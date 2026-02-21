@@ -6,14 +6,6 @@ import {
   useUIMessages,
   type UIMessage,
 } from "@convex-dev/agent/react";
-import {
-  ChatsCircle,
-  List,
-  NotePencil,
-  Plus,
-  Trash,
-  X,
-} from "@phosphor-icons/react";
 import { useMutation, useQuery } from "convex/react";
 import clsx from "clsx";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -22,26 +14,30 @@ import remarkGfm from "remark-gfm";
 import { api } from "@convex/_generated/api";
 import { ChatCanvas } from "@/components/chat-canvas";
 
-function formatLastSeen(timestamp: number) {
-  const date = new Date(timestamp);
-  const now = new Date();
-  const sameDay =
-    date.getDate() === now.getDate() &&
-    date.getMonth() === now.getMonth() &&
-    date.getFullYear() === now.getFullYear();
+const INTRO_RESPONSE =
+  "I can help you find better flight deals with AI-assisted deep research.\n\n" +
+  "I compare route combinations, scan timing windows, cross-check fare rules, and verify options before recommending them. " +
+  "I can also prioritize what matters most to you: lowest price, shortest duration, fewer layovers, or flexible change policies.\n\n" +
+  "Share your route, dates, and constraints, and I will return a clear, verifiable shortlist.";
 
-  if (sameDay) {
-    return date.toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  }
+const TYPEWRITER_INITIAL_DELAY_MS = 0;
+const TYPEWRITER_MIN_DELAY_MS = 0;
+const TYPEWRITER_VARIANCE_MS = 2;
+const TYPEWRITER_PUNCTUATION_PAUSE_MS = 25;
+const SIDEBAR_MIN_WIDTH = 280;
+const SIDEBAR_DEFAULT_WIDTH = 320;
+const SIDEBAR_MAX_WIDTH = 620;
 
-  return date.toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-  });
-}
+const PLACEHOLDER_HISTORY = [
+  "Top Travel Destinations in Germany",
+  "Initial Greeting and Assistance Offer",
+  "NYC to Tokyo Fare Strategy",
+  "Hidden-City Route Risk Review",
+  "Multi-City Combinatorics Test",
+  "Weekend Flash Deal Verification",
+  "Award Seat Availability Sweep",
+  "Baggage and Fare Rule Audit",
+];
 
 function getReasoningText(message: UIMessage) {
   return message.parts
@@ -51,19 +47,7 @@ function getReasoningText(message: UIMessage) {
     .trim();
 }
 
-function hasVisibleAssistantContent(message: UIMessage) {
-  if (message.role !== "assistant") {
-    return false;
-  }
-
-  if ((message.text ?? "").trim().length > 0) {
-    return true;
-  }
-
-  return getReasoningText(message).length > 0;
-}
-
-function MessageBubble({ message }: { message: UIMessage }) {
+function Message({ message, index }: { message: UIMessage; index: number }) {
   const [visibleText] = useSmoothText(message.text ?? "", {
     startStreaming: message.status === "streaming",
   });
@@ -74,43 +58,42 @@ function MessageBubble({ message }: { message: UIMessage }) {
 
   if (message.role === "user") {
     return (
-      <div className="fade-rise mb-6 flex w-full justify-end">
-        <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-[var(--ink)] px-5 py-3 font-sans text-sm leading-relaxed text-white shadow-md">
-          {message.text}
-        </div>
+      <div className="message user" style={{ animationDelay: `${Math.min(index * 0.08, 0.6)}s` }}>
+        <div className="message-meta">User Query</div>
+        <div className="message-content">{message.text}</div>
       </div>
     );
   }
 
-  const showSafetyFallback =
-    message.status === "failed" && (message.text ?? "").trim().length === 0;
-  const assistantText = showSafetyFallback
-    ? "Response blocked by safety policies or model filtering."
-    : visibleText;
-  const reasoningText = getReasoningText(message);
+  const reasoning = getReasoningText(message);
+  const safetyFallback = message.status === "failed" && !(message.text ?? "").trim();
+  const displayText = (safetyFallback ? "Response blocked by safety policies." : visibleText).trim();
 
-  if (assistantText.trim().length === 0 && reasoningText.length === 0) {
+  if (!displayText && !reasoning) {
     return null;
   }
 
   return (
-    <div className="fade-rise mb-6 flex w-full justify-start">
-      <div className="glass-bubble relative max-w-[86%] overflow-hidden rounded-2xl rounded-bl-sm px-6 py-4 font-mono text-sm leading-loose text-[var(--ink)] shadow-sm">
-        <div className="absolute inset-y-0 left-0 w-1 bg-[var(--ink)]/10" />
-        {reasoningText.length > 0 ? (
-          <details className="reasoning-block mb-3" open={message.status === "streaming"}>
-            <summary>Thinking summary</summary>
-            <div className="markdown-content mt-2">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{reasoningText}</ReactMarkdown>
-            </div>
-          </details>
-        ) : null}
-        {assistantText.trim().length > 0 ? (
-          <div className="markdown-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{assistantText}</ReactMarkdown>
-          </div>
-        ) : null}
+    <div className="message ai" style={{ animationDelay: `${Math.min(index * 0.08, 0.6)}s` }}>
+      <div className="message-meta">
+        {message.status === "streaming" ? "Aura Processing" : "Aura Response"}
       </div>
+
+      {reasoning && (
+        <details className="reasoning-block" open={message.status === "streaming"}>
+          <summary>Synthesis Process</summary>
+          <div className="message-content reasoning-content">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{reasoning}</ReactMarkdown>
+          </div>
+        </details>
+      )}
+
+      {displayText && (
+        <div className="message-content">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText}</ReactMarkdown>
+          {message.status === "streaming" && <span className="typewriter-cursor" />}
+        </div>
+      )}
     </div>
   );
 }
@@ -118,44 +101,58 @@ function MessageBubble({ message }: { message: UIMessage }) {
 export function Chat() {
   const threads = useQuery(api.chat.listThreads);
   const createThread = useMutation(api.chat.createThread);
-  const renameThread = useMutation(api.chat.renameThread);
   const deleteThread = useMutation(api.chat.deleteThread);
   const sendPrompt = useMutation(api.chat.sendPrompt).withOptimisticUpdate(
     optimisticallySendMessage(api.chat.listMessages),
   );
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const [isComposingNewThread, setIsComposingNewThread] = useState(false);
+  const [isComposingNew, setIsComposingNew] = useState(false);
   const [draft, setDraft] = useState("");
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [introHtml, setIntroHtml] = useState("");
+  const [isIntroTyping, setIsIntroTyping] = useState(false);
+  const [isFeedScrolling, setIsFeedScrolling] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
+  const [hoverExtraWidth, setHoverExtraWidth] = useState(0);
+  const [isMobile, setIsMobile] = useState(false);
 
-  const chatScrollerRef = useRef<HTMLDivElement | null>(null);
+  const sidebarRef = useRef<HTMLElement | null>(null);
+  const feedRef = useRef<HTMLDivElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const isResizingSidebar = useRef(false);
+  const scrollIdleTimerRef = useRef<number | null>(null);
+  const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
+  const hoverExtraWidthRef = useRef(0);
 
-  const startNewThreadDraft = useCallback(() => {
-    setIsComposingNewThread(true);
+  const applySidebarWidth = useCallback(
+    (baseWidth: number, extraWidth: number) => {
+      if (isMobile || !sidebarRef.current) {
+        return;
+      }
+
+      const effectiveWidth = Math.min(baseWidth + extraWidth, SIDEBAR_MAX_WIDTH);
+      sidebarRef.current.style.width = `${effectiveWidth}px`;
+    },
+    [isMobile],
+  );
+
+  const startNew = useCallback(() => {
+    setIsComposingNew(true);
     setActiveThreadId(null);
-    setIsSidebarOpen(false);
   }, []);
 
   useEffect(() => {
-    if (!threads) {
+    if (!threads || isComposingNew) {
       return;
     }
-
-    if (isComposingNewThread) {
-      return;
-    }
-
     if (activeThreadId && threads.some((thread) => thread.threadId === activeThreadId)) {
       return;
     }
-
     if (threads.length > 0) {
       setActiveThreadId(threads[0].threadId);
-      return;
     }
-  }, [activeThreadId, isComposingNewThread, threads]);
+  }, [activeThreadId, isComposingNew, threads]);
 
   const activeThread = useMemo(
     () => threads?.find((thread) => thread.threadId === activeThreadId),
@@ -169,42 +166,185 @@ export function Chat() {
     { initialNumItems: 40, stream: true },
   );
 
-  const messages = messageFeed.results;
   const visibleMessages = useMemo(
-    () => (isComposingNewThread || !activeThreadIdForMessages ? [] : messages),
-    [activeThreadIdForMessages, isComposingNewThread, messages],
+    () => (isComposingNew || !activeThreadIdForMessages ? [] : messageFeed.results),
+    [activeThreadIdForMessages, isComposingNew, messageFeed.results],
   );
-  const showWelcomeHero = visibleMessages.length === 0;
+
   const isStreaming = visibleMessages.some(
     (message) => message.role === "assistant" && message.status === "streaming",
   );
-  const hasVisibleStreamingAssistant = visibleMessages.some(
-    (message) => message.status === "streaming" && hasVisibleAssistantContent(message),
-  );
+  const showIntro = visibleMessages.length === 0 && !isStreaming;
 
   useEffect(() => {
-    const scroller = chatScrollerRef.current;
-    if (!scroller) {
+    const feed = feedRef.current;
+    if (!feed) {
       return;
     }
-    scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
-  }, [activeThreadIdForMessages, isStreaming, visibleMessages]);
+    const timer = window.setTimeout(() => {
+      feed.scrollTop = feed.scrollHeight;
+    }, 50);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [visibleMessages.length, isStreaming, introHtml]);
 
-  const handleSend = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
+  useEffect(() => {
+    if (!showIntro) {
+      setIntroHtml("");
+      setIsIntroTyping(false);
+      return;
+    }
+
+    let cancelled = false;
+    let i = 0;
+    let textBuffer = "";
+    let isTag = false;
+    let timer = 0;
+
+    setIntroHtml("");
+    setIsIntroTyping(true);
+
+    const typeWriter = () => {
+      if (cancelled) {
+        return;
+      }
+
+      if (i >= INTRO_RESPONSE.length) {
+        setIsIntroTyping(false);
+        return;
+      }
+
+      const char = INTRO_RESPONSE.charAt(i);
+      if (char === "<") {
+        isTag = true;
+      }
+
+      textBuffer += char;
+      setIntroHtml(textBuffer.replace(/\n/g, "<br />"));
+
+      if (char === ">") {
+        isTag = false;
+      }
+
+      i += 1;
+      let delay = isTag ? 0 : Math.random() * TYPEWRITER_VARIANCE_MS + TYPEWRITER_MIN_DELAY_MS;
+      if (char === "." || char === "\n") {
+        delay += TYPEWRITER_PUNCTUATION_PAUSE_MS;
+      }
+
+      timer = window.setTimeout(typeWriter, delay);
+    };
+
+    timer = window.setTimeout(typeWriter, TYPEWRITER_INITIAL_DELAY_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [showIntro]);
+
+  useEffect(() => {
+    const updateMobileState = () => {
+      setIsMobile(window.innerWidth <= 760);
+    };
+
+    updateMobileState();
+    window.addEventListener("resize", updateMobileState);
+    return () => {
+      window.removeEventListener("resize", updateMobileState);
+    };
+  }, []);
+
+  useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth;
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    hoverExtraWidthRef.current = hoverExtraWidth;
+  }, [hoverExtraWidth]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollIdleTimerRef.current !== null) {
+        window.clearTimeout(scrollIdleTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isMobile) {
+      setHoverExtraWidth(0);
+      if (sidebarRef.current) {
+        sidebarRef.current.style.removeProperty("width");
+      }
+      return;
+    }
+
+    applySidebarWidth(sidebarWidth, hoverExtraWidth);
+  }, [applySidebarWidth, hoverExtraWidth, isMobile, sidebarWidth]);
+
+  useEffect(() => {
+    if (isMobile) {
+      return;
+    }
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!isResizingSidebar.current) {
+        return;
+      }
+
+      const maxWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - 420));
+      const clampedWidth = Math.min(Math.max(event.clientX, SIDEBAR_MIN_WIDTH), maxWidth);
+      sidebarWidthRef.current = clampedWidth;
+      applySidebarWidth(clampedWidth, hoverExtraWidthRef.current);
+    };
+
+    const handleMouseUp = () => {
+      if (!isResizingSidebar.current) {
+        return;
+      }
+      isResizingSidebar.current = false;
+      document.body.classList.remove("resizing-sidebar");
+      setSidebarWidth(sidebarWidthRef.current);
+    };
+
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [applySidebarWidth, isMobile]);
+
+  const resizeTextarea = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+    textarea.style.height = "28px";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 150)}px`;
+  }, []);
+
+  const handleSend = async (event?: FormEvent) => {
+    event?.preventDefault();
     const prompt = draft.trim();
     if (!prompt || isSubmitting) {
       return;
     }
 
     setDraft("");
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "28px";
+    }
     setIsSubmitting(true);
+
     try {
       let threadId = activeThreadIdForMessages;
       if (!threadId) {
         const created = await createThread({});
         threadId = created.threadId;
-        setIsComposingNewThread(false);
+        setIsComposingNew(false);
         setActiveThreadId(threadId);
       }
 
@@ -214,226 +354,202 @@ export function Chat() {
     }
   };
 
-  const handleRenameThread = async (threadId: string, currentTitle: string) => {
-    const title = window.prompt("Rename thread", currentTitle)?.trim();
-    if (!title) {
-      return;
-    }
-
-    await renameThread({ threadId, title });
-  };
-
-  const handleDeleteThread = async (threadId: string) => {
-    if (!window.confirm("Delete this conversation? This cannot be undone.")) {
+  const handleDelete = async (event: React.MouseEvent, threadId: string) => {
+    event.stopPropagation();
+    if (!window.confirm("Delete this session?")) {
       return;
     }
 
     await deleteThread({ threadId });
     if (activeThreadId === threadId) {
-      setIsComposingNewThread(false);
+      setIsComposingNew(false);
       setActiveThreadId(null);
     }
   };
 
+  const handleSidebarResizeStart = (event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    isResizingSidebar.current = true;
+    document.body.classList.add("resizing-sidebar");
+  };
+
+  const handleHistoryEnter = (
+    event: React.MouseEvent<HTMLButtonElement> | React.FocusEvent<HTMLButtonElement>,
+  ) => {
+    if (isMobile || isResizingSidebar.current) {
+      return;
+    }
+
+    const { currentTarget } = event;
+    const overflow = currentTarget.scrollWidth - currentTarget.clientWidth;
+    const neededExtra = overflow > 0 ? Math.min(overflow + 28, 180) : 0;
+    setHoverExtraWidth(neededExtra);
+  };
+
+  const handleHistoryLeave = () => {
+    setHoverExtraWidth(0);
+  };
+
+  const handleFeedScroll = () => {
+    setIsFeedScrolling((current) => (current ? current : true));
+
+    if (scrollIdleTimerRef.current !== null) {
+      window.clearTimeout(scrollIdleTimerRef.current);
+    }
+
+    scrollIdleTimerRef.current = window.setTimeout(() => {
+      setIsFeedScrolling(false);
+    }, 140);
+  };
+
+  const effectiveSidebarWidth = isMobile
+    ? undefined
+    : Math.min(sidebarWidth + hoverExtraWidth, SIDEBAR_MAX_WIDTH);
+
   return (
-    <div className="relative h-screen overflow-hidden bg-[var(--bg-color)] text-[var(--ink)]">
-      <div className="bg-grid" />
-      <ChatCanvas />
+    <div className="oracle-shell">
+      <div className="noise-overlay" />
+      <div className="grid-bg" />
+      <ChatCanvas pause={isFeedScrolling} />
 
-      {isSidebarOpen ? (
-        <button
-          type="button"
-          className="fixed inset-0 z-20 bg-black/20 backdrop-blur-[1px] md:hidden"
-          onClick={() => setIsSidebarOpen(false)}
-          aria-label="Close sidebar"
-        />
-      ) : null}
-
-      <div className="relative z-30 mx-auto flex h-full w-full max-w-[1680px] gap-4 p-4 sm:px-8 sm:py-6">
+      <div className="app-container">
         <aside
-          className={clsx(
-            "glass-bubble fixed inset-y-0 left-0 z-30 flex w-[300px] flex-col border-r border-black/5 p-4 transition-transform duration-300 md:static md:w-[320px] md:translate-x-0 md:rounded-3xl md:border",
-            isSidebarOpen ? "translate-x-0" : "-translate-x-full",
-          )}
+          ref={sidebarRef}
+          className="sidebar"
+          style={effectiveSidebarWidth ? { width: effectiveSidebarWidth } : undefined}
         >
-          <div className="mb-4 flex items-center justify-between">
-            <div>
-              <p className="text-[10px] font-mono uppercase tracking-[0.2em] text-[var(--ink-light)]">
-                Thread Memory
-              </p>
-              <h2 className="mt-1 font-serif text-2xl">Aura</h2>
-            </div>
-            <button
-              type="button"
-              className="inline-flex size-8 items-center justify-center rounded-full text-[var(--ink-light)] hover:bg-black/5 md:hidden"
-              onClick={() => setIsSidebarOpen(false)}
-              aria-label="Close thread panel"
-            >
-              <X size={18} />
-            </button>
-          </div>
-
-          <button
-            type="button"
-            className="mb-4 inline-flex items-center justify-center gap-2 rounded-full border border-black/10 bg-white px-4 py-2 text-sm font-medium text-[var(--ink)] shadow-[0_6px_18px_rgba(0,0,0,0.05)] transition hover:-translate-y-px hover:shadow-[0_8px_22px_rgba(0,0,0,0.08)]"
-            onClick={startNewThreadDraft}
-          >
-            <Plus size={16} />
-            New Thread
-          </button>
-
-          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-            {threads === undefined ? (
-              <p className="pt-4 text-sm text-[var(--ink-light)]/70">Loading threads...</p>
-            ) : threads.length === 0 ? (
-              <p className="pt-4 text-sm text-[var(--ink-light)]/70">
-                No threads yet. Start one from the button above.
-              </p>
-            ) : (
-              threads.map((thread) => {
-                const isActive = thread.threadId === activeThreadId;
-                return (
-                  <div
-                    key={thread.threadId}
-                    className={clsx(
-                      "group rounded-2xl border px-3 py-3 transition",
-                      isActive
-                        ? "border-black/20 bg-white"
-                        : "border-transparent bg-white/40 hover:border-black/10",
-                    )}
-                  >
-                    <button
-                      type="button"
-                      className="w-full text-left"
-                      onClick={() => {
-                        setIsComposingNewThread(false);
-                        setActiveThreadId(thread.threadId);
-                        setIsSidebarOpen(false);
-                      }}
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <p className="line-clamp-1 text-sm font-medium text-[var(--ink)]">
-                          {thread.title}
-                        </p>
-                        <span className="shrink-0 text-[10px] font-mono uppercase tracking-wider text-[var(--ink-light)]/70">
-                          {formatLastSeen(thread.lastMessageAt)}
-                        </span>
-                      </div>
-                      <p className="mt-2 line-clamp-2 text-xs text-[var(--ink-light)]/80">
-                        {thread.preview}
-                      </p>
-                    </button>
-
-                    <div className="mt-3 flex items-center justify-end gap-1 opacity-100 md:opacity-0 md:transition md:group-hover:opacity-100">
-                      <button
-                        type="button"
-                        className="inline-flex size-7 items-center justify-center rounded-full text-[var(--ink-light)] hover:bg-black/5"
-                        onClick={() => void handleRenameThread(thread.threadId, thread.title)}
-                        aria-label="Rename thread"
-                      >
-                        <NotePencil size={14} />
-                      </button>
-                      <button
-                        type="button"
-                        className="inline-flex size-7 items-center justify-center rounded-full text-[var(--ink-light)] hover:bg-black/5"
-                        onClick={() => void handleDeleteThread(thread.threadId)}
-                        aria-label="Delete thread"
-                      >
-                        <Trash size={14} />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </aside>
-
-        <main className="glass-bubble relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-3xl border border-black/5 p-4 sm:p-6">
-          <header className={clsx("shrink-0", showWelcomeHero ? "mb-4" : "mb-2")}>
-            <div className="mb-2 flex items-center justify-start md:hidden">
-              <button
-                type="button"
-                className="inline-flex size-9 items-center justify-center rounded-full border border-black/10 bg-white text-[var(--ink)] shadow-sm md:hidden"
-                onClick={() => setIsSidebarOpen(true)}
-                aria-label="Open thread panel"
-              >
-                <List size={18} />
-              </button>
-            </div>
-
-            {showWelcomeHero ? (
-              <>
-                <h1 className="text-center font-serif text-4xl leading-[0.9] tracking-tight sm:text-6xl">
-                  Aura
-                  <span className="mt-2 block font-mono text-2xl text-[var(--ink-light)] sm:text-4xl">
-                    Intelligence
-                  </span>
-                </h1>
-                <p className="mt-4 text-center text-xs font-mono uppercase tracking-wider text-[var(--ink-light)]/70">
-                  {activeThread?.title ?? "New chat"}
-                </p>
-              </>
-            ) : (
-              <p className="text-center text-[11px] font-mono uppercase tracking-[0.24em] text-[var(--ink-light)]/65">
-                {activeThread?.title ?? "New chat"}
-              </p>
-            )}
+          <header className="brand">
+            <h1>Aura</h1>
+            <span>System.v.26</span>
           </header>
 
-          <section
-            ref={chatScrollerRef}
-            className="min-h-0 flex-1 overflow-y-auto px-1 pb-24 pt-2 sm:px-4"
-          >
-            {visibleMessages.length === 0 ? (
-              <div className="mt-14 text-center text-xs font-mono uppercase tracking-widest text-[var(--ink-light)]/55">
-                System initialized. Awaiting input...
-              </div>
-            ) : (
-              visibleMessages.map((message) => <MessageBubble key={message.key} message={message} />)
+          <button className="new-chat-btn" onClick={startNew}>
+            <span>New Session</span>
+            <span>[+]</span>
+          </button>
+
+          <div className="nav-section-title">Context History</div>
+          <ul className="history-list" id="historyList">
+            {threads === undefined && (
+              <li className="history-item">
+                <span className="history-link placeholder">Loading sessions...</span>
+              </li>
             )}
 
-            {isStreaming && !hasVisibleStreamingAssistant ? (
-              <div className="mb-6 flex w-full justify-start">
-                <div className="glass-bubble flex h-11 items-center gap-1.5 rounded-2xl rounded-bl-sm px-5 py-4">
-                  <div className="typing-dot size-1.5 rounded-full bg-[var(--ink)]/60" />
-                  <div className="typing-dot size-1.5 rounded-full bg-[var(--ink)]/60" />
-                  <div className="typing-dot size-1.5 rounded-full bg-[var(--ink)]/60" />
-                </div>
-              </div>
-            ) : null}
-          </section>
-
-          <footer className="absolute inset-x-0 bottom-0 z-20 bg-gradient-to-t from-white via-white/95 to-transparent pb-5 pt-10">
-            <div className="px-2 sm:px-4">
-              <form onSubmit={handleSend} className="relative flex items-center">
-                <div className="glow-wrapper w-full rounded-full bg-white shadow-[0_8px_30px_rgb(0,0,0,0.04)]">
-                  <div className="flex items-center">
-                    <input
-                      type="text"
-                      value={draft}
-                      onChange={(event) => setDraft(event.target.value)}
-                      autoComplete="off"
-                      placeholder="Initialize query..."
-                      className="w-full rounded-full bg-transparent px-6 py-4 font-mono text-sm text-[var(--ink)] placeholder:text-[var(--ink-light)]/40 focus:outline-none"
-                      disabled={isSubmitting}
-                    />
+            {threads && threads.length > 0
+              ? threads.map((thread) => (
+                  <li className="history-item" key={thread.threadId}>
                     <button
-                      type="submit"
-                      className="mr-2 inline-flex size-9 shrink-0 items-center justify-center rounded-full bg-[var(--ink)] text-white transition hover:bg-[var(--ink-light)] disabled:cursor-not-allowed disabled:opacity-50"
-                      disabled={isSubmitting || draft.trim().length === 0}
-                      aria-label="Send message"
+                      className={clsx(
+                        "history-link",
+                        thread.threadId === activeThreadId && !isComposingNew && "active",
+                      )}
+                      onMouseEnter={handleHistoryEnter}
+                      onMouseLeave={handleHistoryLeave}
+                      onFocus={handleHistoryEnter}
+                      onBlur={handleHistoryLeave}
+                      onClick={() => {
+                        setIsComposingNew(false);
+                        setActiveThreadId(thread.threadId);
+                      }}
                     >
-                      <ChatsCircle size={17} weight="fill" />
+                      {thread.title}
                     </button>
-                  </div>
-                </div>
-              </form>
-              <p className="mt-2 text-center text-[10px] font-mono text-[var(--ink-light)]/55">
-                Aura may generate inaccurate responses. Verify critical logic and citations.
-              </p>
+
+                    <button
+                      className="history-delete"
+                      onClick={(event) => {
+                        void handleDelete(event, thread.threadId);
+                      }}
+                      aria-label="Delete session"
+                    >
+                      [x]
+                    </button>
+                  </li>
+                ))
+              : threads &&
+                PLACEHOLDER_HISTORY.map((item, index) => (
+                  <li className="history-item" key={item}>
+                    <span className={clsx("history-link placeholder", index === 0 && "active")}>{item}</span>
+                  </li>
+                ))}
+          </ul>
+        </aside>
+
+        {!isMobile && <div className="sidebar-resizer" onMouseDown={handleSidebarResizeStart} />}
+
+        <main className="main-area">
+          <header className="chat-header">
+            <div className="model-info">
+              <span className="status-dot" />
+              {activeThread?.title && !isComposingNew
+                ? activeThread.title
+                : "Aura Prime / Generative Mode"}
             </div>
-          </footer>
+            <div className="model-info">
+              {isStreaming ? "Aura Processing..." : "Latency: 12ms | Grid: Active"}
+            </div>
+          </header>
+
+          <div className="chat-feed" id="chatFeed" ref={feedRef} onScroll={handleFeedScroll}>
+            {showIntro ? (
+              <>
+                <div className="message user" style={{ animationDelay: "0.5s" }}>
+                  <div className="message-meta">User Query</div>
+                  <div className="message-content">What do you do?</div>
+                </div>
+
+                <div className="message ai" style={{ animationDelay: "0.7s" }}>
+                  <div className="message-meta">Aura Response</div>
+                  <div
+                    className="message-content"
+                    id="typewriter-target"
+                    dangerouslySetInnerHTML={{
+                      __html: `${introHtml}${isIntroTyping ? '<span class="typewriter-cursor"></span>' : ""}`,
+                    }}
+                  />
+                </div>
+              </>
+            ) : (
+              visibleMessages.map((message, index) => (
+                <Message key={message.key} message={message} index={index} />
+              ))
+            )}
+          </div>
+
+          <div className="input-wrapper">
+            <form className="input-container" onSubmit={(event) => void handleSend(event)}>
+              <span className="input-prefix">_&gt;</span>
+
+              <textarea
+                id="userInput"
+                ref={textareaRef}
+                rows={1}
+                value={draft}
+                placeholder="Enter command sequence..."
+                onChange={(event) => {
+                  setDraft(event.target.value);
+                  resizeTextarea();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void handleSend();
+                  }
+                }}
+                disabled={isSubmitting}
+              />
+
+              <button
+                className="send-btn"
+                id="sendBtn"
+                type="submit"
+                disabled={isSubmitting || !draft.trim()}
+              >
+                [ Execute ]
+              </button>
+            </form>
+          </div>
         </main>
       </div>
     </div>
