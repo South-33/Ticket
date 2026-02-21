@@ -1,36 +1,50 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Aura Chat (Next.js + Convex + Gemini)
 
-## Getting Started
+Production-style chat scaffold using:
 
-First, run the development server:
+- Next.js 16 App Router + TypeScript + Tailwind
+- Convex backend + `@convex-dev/agent` threads/messages/streaming deltas
+- Gemini via `@ai-sdk/google` (`gemini-2.5-flash-lite`)
+- Async generation flow (mutation -> scheduler -> internal action)
+
+## Setup
+
+1. Install dependencies:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+pnpm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+2. Add a server-only Gemini key to `.env.local`:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+GOOGLE_GENERATIVE_AI_API_KEY=your_key_here
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+3. Start Convex in one terminal:
 
-## Learn More
+```bash
+pnpm convex dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+4. Start Next.js in another terminal:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+pnpm dev
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+5. Open `http://localhost:3000`.
 
-## Deploy on Vercel
+## How messaging works
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+- `sendPrompt` mutation saves the user prompt immediately and schedules an internal action.
+- `generateReplyInternal` continues the same thread and streams assistant output with `saveStreamDeltas`.
+- UI reads with `useUIMessages(..., { stream: true })`, so reconnects remain resilient through Convex reactivity.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Key files
+
+- Frontend shell + sidebar/history: `src/components/chat.tsx`
+- Canvas ASCII background: `src/components/chat-canvas.tsx`
+- Convex agent config: `convex/agent.ts`
+- Convex chat functions: `convex/chat.ts`
+- Convex component wiring: `convex/convex.config.ts`
