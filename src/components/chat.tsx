@@ -6,14 +6,128 @@ import {
   useUIMessages,
   type UIMessage,
 } from "@convex-dev/agent/react";
-import { SignInButton, UserButton } from "@clerk/nextjs";
+import { SignInButton, UserProfile, useClerk, useUser } from "@clerk/nextjs";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import clsx from "clsx";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
+import Image from "next/image";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "@convex/_generated/api";
 import { ChatCanvas } from "@/components/chat-canvas";
+
+function SidebarUser() {
+  const { signOut } = useClerk();
+  const { user } = useUser();
+  const [open, setOpen] = useState(false);
+  const [isClosing, setIsClosing] = useState(false);
+
+  const cachedAvatarUrl = useMemo(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    return window.localStorage.getItem("aura:lastAvatarUrl");
+  }, []);
+
+  const cachedInitials = useMemo(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    return window.localStorage.getItem("aura:lastAvatarInitial");
+  }, []);
+
+  const initials =
+    user?.firstName?.[0] ??
+    user?.emailAddresses?.[0]?.emailAddress?.[0] ??
+    cachedInitials?.[0] ??
+    "?";
+  const avatarUrl = user?.imageUrl ?? cachedAvatarUrl;
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (user?.imageUrl) {
+      window.localStorage.setItem("aura:lastAvatarUrl", user.imageUrl);
+    }
+
+    if (initials && initials !== "?") {
+      window.localStorage.setItem("aura:lastAvatarInitial", initials);
+    }
+  }, [initials, user?.imageUrl]);
+
+  const closeModal = () => {
+    setIsClosing(true);
+    setTimeout(() => {
+      setOpen(false);
+      setIsClosing(false);
+    }, 250);
+  };
+
+  useEffect(() => {
+    if (open) {
+      document.body.style.overflow = "hidden";
+    } else {
+      document.body.style.overflow = "";
+    }
+    return () => { document.body.style.overflow = ""; };
+  }, [open]);
+
+  return (
+    <>
+      <div className="sidebar-user">
+        <button
+          className="sidebar-avatar-btn"
+          onClick={() => setOpen(true)}
+          title="Manage account"
+          type="button"
+        >
+          {avatarUrl ? (
+            <Image
+              src={avatarUrl}
+              alt={initials}
+              className="sidebar-avatar-img"
+              width={28}
+              height={28}
+              unoptimized
+            />
+          ) : (
+            <span className="sidebar-avatar-initials">{initials.toUpperCase()}</span>
+          )}
+        </button>
+      </div>
+
+      {open && createPortal(
+        <div
+          className="user-modal-backdrop"
+          data-closing={isClosing ? "true" : undefined}
+          onClick={closeModal}
+        >
+          <div className="user-modal-content" onClick={(e) => e.stopPropagation()}>
+            <UserProfile routing="hash" />
+            <div className="user-modal-footer">
+              <button
+                className="user-modal-signout"
+                type="button"
+                onClick={() => {
+                  window.localStorage.removeItem("aura:lastAvatarUrl");
+                  window.localStorage.removeItem("aura:lastAvatarInitial");
+                  window.localStorage.removeItem(SIDEBAR_LAST_USER_ID_KEY);
+                  signOut();
+                }}
+              >
+                Sign Out _&gt;
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
+  );
+}
 
 const INTRO_RESPONSE =
   "I can help you find better flight deals with AI-assisted deep research.\n\n" +
@@ -29,20 +143,71 @@ const THREAD_SWITCH_FADE_MS = 500;
 const THREAD_SWITCH_REVEAL_DELAY_MS = 120;
 const THREAD_SWITCH_FAILSAFE_MS = 5000;
 
-const PLACEHOLDER_HISTORY = [
-  "Top Travel Destinations in Germany",
-  "Initial Greeting and Assistance Offer",
-  "NYC to Tokyo Fare Strategy",
-  "Hidden-City Route Risk Review",
-  "Multi-City Combinatorics Test",
-  "Weekend Flash Deal Verification",
-  "Award Seat Availability Sweep",
-  "Baggage and Fare Rule Audit",
-];
-
 const hasClerk = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+const SIDEBAR_HISTORY_CACHE_KEY_PREFIX = "aura:sidebarHistory:v1";
+const SIDEBAR_LAST_USER_ID_KEY = "aura:lastUserId";
+const MAX_CACHED_SIDEBAR_THREADS = 8;
 
 const TERMINAL_RESEARCH_STATUSES = new Set(["completed", "failed", "cancelled", "expired"]);
+
+type CachedSidebarThread = {
+  threadId: string;
+  title: string;
+};
+
+const subscribeNoop = () => {
+  return () => {};
+};
+
+function getSidebarHistoryCacheKey(userId: string | undefined) {
+  return `${SIDEBAR_HISTORY_CACHE_KEY_PREFIX}:${userId ?? "anon"}`;
+}
+
+function readCachedSidebarThreads(cacheKey: string): CachedSidebarThread[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(cacheKey);
+    if (!raw) {
+      return [];
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map((item) => {
+        if (!item || typeof item !== "object") {
+          return null;
+        }
+        const threadId = (item as Record<string, unknown>).threadId;
+        const title = (item as Record<string, unknown>).title;
+        if (typeof threadId !== "string" || typeof title !== "string") {
+          return null;
+        }
+        return { threadId, title };
+      })
+      .filter((item): item is CachedSidebarThread => item !== null)
+      .slice(0, MAX_CACHED_SIDEBAR_THREADS);
+  } catch {
+    return [];
+  }
+}
+
+function writeCachedSidebarThreads(cacheKey: string, threads: CachedSidebarThread[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(cacheKey, JSON.stringify(threads.slice(0, MAX_CACHED_SIDEBAR_THREADS)));
+  } catch {
+    // Ignore localStorage write failures.
+  }
+}
 
 function toResearchStatusLabel(status: string) {
   switch (status) {
@@ -245,6 +410,7 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
 }
 
 function AuthenticatedChat() {
+  const { user } = useUser();
   const threads = useQuery(api.chat.listThreads);
   const createThread = useMutation(api.chat.createThread);
   const deleteThread = useMutation(api.chat.deleteThread);
@@ -262,6 +428,19 @@ function AuthenticatedChat() {
   const [isFeedScrolling, setIsFeedScrolling] = useState(false);
   const [isFadingOut, setIsFadingOut] = useState(false);
   const [sessionVersion, setSessionVersion] = useState(0);
+  const [lastKnownUserId, setLastKnownUserId] = useState<string | null>(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    return window.localStorage.getItem(SIDEBAR_LAST_USER_ID_KEY);
+  });
+  const [cachedSidebarThreads, setCachedSidebarThreads] = useState<CachedSidebarThread[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
+    const rememberedUserId = window.localStorage.getItem(SIDEBAR_LAST_USER_ID_KEY) ?? undefined;
+    return readCachedSidebarThreads(getSidebarHistoryCacheKey(rememberedUserId));
+  });
 
   const sidebarRef = useRef<HTMLElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
@@ -270,6 +449,38 @@ function AuthenticatedChat() {
   const fadingTimerRef = useRef<number | null>(null);
   const dataWaitTimerRef = useRef<number | null>(null);
   const waitingForDataRef = useRef(false);
+  const effectiveUserId = user?.id ?? lastKnownUserId ?? undefined;
+  const sidebarHistoryCacheKey = useMemo(() => getSidebarHistoryCacheKey(effectiveUserId), [effectiveUserId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (!user?.id || user.id === lastKnownUserId) {
+      return;
+    }
+    window.localStorage.setItem(SIDEBAR_LAST_USER_ID_KEY, user.id);
+    setLastKnownUserId(user.id);
+  }, [lastKnownUserId, user?.id]);
+
+  useEffect(() => {
+    setCachedSidebarThreads(readCachedSidebarThreads(sidebarHistoryCacheKey));
+  }, [sidebarHistoryCacheKey]);
+
+  useEffect(() => {
+    if (!threads) {
+      return;
+    }
+
+    const compact = threads.map((thread) => ({
+      threadId: thread.threadId,
+      title: thread.title,
+    }));
+    setCachedSidebarThreads(compact);
+    writeCachedSidebarThreads(sidebarHistoryCacheKey, compact);
+  }, [threads, sidebarHistoryCacheKey]);
+
+  const sidebarThreads = threads ?? cachedSidebarThreads;
 
 
   const switchThread = useCallback(
@@ -522,7 +733,6 @@ function AuthenticatedChat() {
           <header className="brand">
             <h1>Aura</h1>
             <span>System.v.26</span>
-            {hasClerk && <UserButton />}
           </header>
 
           <button className="new-chat-btn" onClick={startNew}>
@@ -532,14 +742,8 @@ function AuthenticatedChat() {
 
           <div className="nav-section-title">Context History</div>
           <ul className="history-list" id="historyList">
-            {threads === undefined && (
-              <li className="history-item">
-                <span className="history-link placeholder">Loading sessions...</span>
-              </li>
-            )}
-
-            {threads && threads.length > 0
-              ? threads.map((thread) => (
+            {sidebarThreads.length > 0
+              ? sidebarThreads.map((thread) => (
                 <li className="history-item" key={thread.threadId}>
                   <button
                     className={clsx(
@@ -553,24 +757,27 @@ function AuthenticatedChat() {
                     {thread.title}
                   </button>
 
-                  <button
-                    className="history-delete"
-                    onClick={(event) => {
-                      void handleDelete(event, thread.threadId);
-                    }}
-                    aria-label="Delete session"
-                  >
-                    [x]
-                  </button>
+                  {threads && (
+                    <button
+                      className="history-delete"
+                      onClick={(event) => {
+                        void handleDelete(event, thread.threadId);
+                      }}
+                      aria-label="Delete session"
+                    >
+                      [x]
+                    </button>
+                  )}
                 </li>
               ))
-              : threads &&
-              PLACEHOLDER_HISTORY.map((item, index) => (
-                <li className="history-item" key={item}>
-                  <span className={clsx("history-link placeholder", index === 0 && "active")}>{item}</span>
+              : (
+                <li className="history-item">
+                  <span className="history-link placeholder">No Sessions yet</span>
                 </li>
-              ))}
+              )}
           </ul>
+
+          {hasClerk && <SidebarUser />}
         </aside>
 
 
@@ -793,49 +1000,81 @@ function AuthenticatedChat() {
 }
 
 export function Chat() {
-  const { isLoading, isAuthenticated } = useConvexAuth();
+  const { isAuthenticated, isLoading } = useConvexAuth();
+  const hasMounted = useSyncExternalStore(subscribeNoop, () => true, () => false);
+  const [cachedSignedInSession] = useState<boolean>(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    return window.localStorage.getItem("aura:lastSignedIn") === "1";
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (isAuthenticated) {
+      window.localStorage.setItem("aura:lastSignedIn", "1");
+      return;
+    }
+
+    if (!isLoading) {
+      window.localStorage.removeItem("aura:lastSignedIn");
+    }
+  }, [isAuthenticated, isLoading]);
+
+  if (!hasMounted) {
+    return (
+      <div className="oracle-shell">
+        <div className="noise-overlay" />
+        <div className="grid-bg" style={{ left: 0 }} />
+      </div>
+    );
+  }
+
+  if (isAuthenticated || (isLoading && cachedSignedInSession)) {
+    return <AuthenticatedChat />;
+  }
 
   if (isLoading) {
     return (
-      <div className="oracle-shell">
-        <div className="app-container">
-          <main className="main-area">
-            <div className="chat-feed">Connecting authentication...</div>
-          </main>
+      <div className="oracle-shell auth-screen">
+        <div className="noise-overlay" />
+        <div className="grid-bg" style={{ left: 0 }} />
+        <div className="auth-content-wrapper">
+          <div className="auth-message-block" key="loading">
+            <div className="message-meta">Restoring Session</div>
+            <h2 className="auth-title">Aura Access Protocol</h2>
+            <div className="message-content">Checking your authentication status...</div>
+          </div>
         </div>
       </div>
     );
   }
 
-  if (!isAuthenticated) {
-    return (
-      <div className="oracle-shell">
-        <div className="app-container">
-          <main className="main-area">
-            <div className="chat-feed">
-              <div className="message ai">
-                <div className="response-container">
-                  <div className="message-meta">Sign In Required</div>
-                  <div className="message-content">
-                    Please sign in to start travel research and save your preferences.
-                  </div>
-                  {hasClerk ? (
-                    <SignInButton mode="modal">
-                      <button className="send-btn" type="button">
-                        [ Sign In ]
-                      </button>
-                    </SignInButton>
-                  ) : (
-                    <div className="message-content">Set Clerk environment keys to enable sign-in.</div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </main>
+  return (
+    <div className="oracle-shell auth-screen">
+      <div className="noise-overlay" />
+      <div className="grid-bg" style={{ left: 0 }} />
+      <div className="auth-content-wrapper">
+        <div className="auth-message-block" key="signin">
+          <div className="message-meta">Sign In Required</div>
+          <h2 className="auth-title">Aura Access Protocol</h2>
+          <div className="message-content">
+            Please authenticate to start travel research and save your preferences.
+          </div>
+          {hasClerk ? (
+            <SignInButton mode="modal">
+              <button className="auth-btn" type="button">
+                Authenticate _&gt;
+              </button>
+            </SignInButton>
+          ) : (
+            <div className="message-content">Set Clerk environment keys to enable sign-in.</div>
+          )}
         </div>
       </div>
-    );
-  }
-
-  return <AuthenticatedChat />;
+    </div>
+  );
 }

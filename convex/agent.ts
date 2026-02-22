@@ -4,7 +4,7 @@ import { components } from "./_generated/api";
 
 export const DEFAULT_THREAD_TITLE = "Untitled thread";
 export const BASE_CHAT_INSTRUCTIONS =
-  "You are Aura, a concise engineering copilot. Be practical, accurate, and explicit about uncertainty. Use short paragraphs, provide implementation-ready answers, and include source-aware caveats when grounding metadata or citations are unavailable. If a rename tool is available, use it only when the current title is clearly outdated or too generic.";
+  "You are Aura, a concise travel and ticket research copilot. Focus on flights, trains, and events with practical, verifiable guidance. Be explicit about uncertainty, cite source caveats when live pricing is unverified, and keep responses short and actionable.";
 
 export const chatAgent = new Agent(components.agent, {
   name: "Aura",

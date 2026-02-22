@@ -72,4 +72,24 @@ describe("chat intake flow", () => {
     expect(latest?.status).toBe("planned");
     expect(latest?.missingFields).toHaveLength(0);
   });
+
+  test("sendPrompt does not create research job for non-research small talk", async () => {
+    vi.useFakeTimers();
+    const testConvex = convexTest(schema, modules);
+    registerAgentComponent(testConvex);
+    const t = testConvex.withIdentity(AUTH_IDENTITY);
+
+    const created = await t.mutation(api.chat.createThread, {});
+    const sent = await t.mutation(api.chat.sendPrompt, {
+      threadId: created.threadId,
+      prompt: "hello",
+    });
+
+    const latest = await t.query(api.research.getLatestJobForThread, {
+      threadId: created.threadId,
+    });
+
+    expect(sent.researchJobId).toBeNull();
+    expect(latest).toBeNull();
+  });
 });

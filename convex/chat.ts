@@ -19,6 +19,7 @@ import {
 } from "./agent";
 import { getAuthUserIdOrThrow } from "./auth";
 import { continueAwaitingJobForPrompt, createResearchJobForPrompt } from "./research";
+import { isResearchIntent } from "./researchIntake";
 import { components, internal } from "./_generated/api";
 import {
   internalAction,
@@ -503,6 +504,20 @@ export const sendPrompt = mutation({
       promptMessageId: messageId,
       prompt,
     });
+
+    if (!resumed && !isResearchIntent(prompt)) {
+      await ctx.scheduler.runAfter(0, internal.chat.generateReplyInternal, {
+        threadId: args.threadId,
+        promptMessageId: messageId,
+        prompt,
+      });
+
+      await ctx.scheduler.runAfter(0, internal.memory.generateUserMemorySnapshotInternal, {
+        userId,
+      });
+
+      return { promptMessageId: messageId, researchJobId: null };
+    }
 
     const research =
       resumed ??

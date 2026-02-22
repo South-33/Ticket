@@ -11,6 +11,12 @@ const REQUIRED_SLOTS: Record<ResearchDomain, string[]> = {
   general: [],
 };
 
+const GENERIC_TRAVEL_PATTERN =
+  /\b(travel|trip|vacation|holiday|itinerary|destination|from\s+[a-zA-Z][a-zA-Z\s-]{1,30}\s+to\s+[a-zA-Z][a-zA-Z\s-]{1,30})\b/i;
+
+const RESEARCH_INTENT_PATTERN =
+  /\b(flight|airport|airline|fare|train|rail|station|concert|show|gig|ticket|book|booking|route|layover|stopover|seat|baggage|cheapest|best value|most convenient|price|deal|promo)\b/i;
+
 function normalizeValue(value: string | undefined) {
   if (!value) {
     return undefined;
@@ -52,6 +58,7 @@ export function detectDomain(prompt: string): ResearchDomain {
   const hasFlight = /(flight|airport|layover|airline|fare)/.test(value);
   const hasTrain = /(train|rail|station|eurail)/.test(value);
   const hasConcert = /(concert|show|gig|ticketmaster|seatgeek|event)/.test(value);
+  const hasGenericTravel = GENERIC_TRAVEL_PATTERN.test(value);
 
   const count = Number(hasFlight) + Number(hasTrain) + Number(hasConcert);
   if (count >= 2) {
@@ -66,7 +73,18 @@ export function detectDomain(prompt: string): ResearchDomain {
   if (hasConcert) {
     return "concert";
   }
+  if (hasGenericTravel) {
+    return "mixed";
+  }
   return "general";
+}
+
+export function isResearchIntent(prompt: string) {
+  if (RESEARCH_INTENT_PATTERN.test(prompt)) {
+    return true;
+  }
+
+  return detectDomain(prompt) !== "general";
 }
 
 export function detectMode(prompt: string): ResearchMode {
