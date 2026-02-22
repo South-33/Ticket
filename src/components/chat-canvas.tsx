@@ -2,11 +2,11 @@
 
 import { useEffect, useRef } from "react";
 
-const DENSITY = "Ñ@#W$9876543210?!abc;:+=-,._                    ";
+const DENSITY = "Ñ@#W$9876543210?!abc;:+=-,._                                                                                                   ";
 const TARGET_FPS = 28;
 const FRAME_INTERVAL_MS = 1000 / TARGET_FPS;
-const CELL_SIZE = 16;
-const CANVAS_SCALE = 1.08;
+const CELL_SIZE = 14;
+const CANVAS_SCALE = 1.2;
 
 type ChatCanvasProps = {
   pause?: boolean;
@@ -51,9 +51,9 @@ export function ChatCanvas({ pause = false }: ChatCanvasProps) {
 
       ctx.clearRect(0, 0, width, height);
       ctx.fillStyle = getComputedStyle(document.documentElement)
-        .getPropertyValue("--text-primary")
+        .getPropertyValue("--text-secondary")
         .trim();
-      ctx.font = '13px var(--font-mono), "JetBrains Mono", monospace';
+      ctx.font = '14px "JetBrains Mono", monospace';
 
       const cols = Math.floor(width / CELL_SIZE);
       const rows = Math.floor(height / CELL_SIZE);

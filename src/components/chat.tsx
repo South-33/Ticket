@@ -24,9 +24,7 @@ const TYPEWRITER_INITIAL_DELAY_MS = 0;
 const TYPEWRITER_MIN_DELAY_MS = 0;
 const TYPEWRITER_VARIANCE_MS = 2;
 const TYPEWRITER_PUNCTUATION_PAUSE_MS = 25;
-const SIDEBAR_MIN_WIDTH = 280;
-const SIDEBAR_DEFAULT_WIDTH = 320;
-const SIDEBAR_MAX_WIDTH = 620;
+const SIDEBAR_WIDTH = 320;
 
 const PLACEHOLDER_HISTORY = [
   "Top Travel Destinations in Germany",
@@ -51,6 +49,14 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
   const [visibleText] = useSmoothText(message.text ?? "", {
     startStreaming: message.status === "streaming",
   });
+  const [isReasoningOpen, setIsReasoningOpen] = useState(true);
+
+  // Keep it open while streaming
+  useEffect(() => {
+    if (message.status === "streaming") {
+      setIsReasoningOpen(true);
+    }
+  }, [message.status]);
 
   if (message.role === "system") {
     return null;
@@ -59,8 +65,10 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
   if (message.role === "user") {
     return (
       <div className="message user" style={{ animationDelay: `${Math.min(index * 0.08, 0.6)}s` }}>
-        <div className="message-meta">User Query</div>
-        <div className="message-content">{message.text}</div>
+        <div className="message-wrapper">
+          <div className="message-meta">User Query</div>
+          <div className="message-content">{message.text}</div>
+        </div>
       </div>
     );
   }
@@ -75,25 +83,38 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
 
   return (
     <div className="message ai" style={{ animationDelay: `${Math.min(index * 0.08, 0.6)}s` }}>
-      <div className="message-meta">
-        {message.status === "streaming" ? "Aura Processing" : "Aura Response"}
-      </div>
-
       {reasoning && (
-        <details className="reasoning-block" open={message.status === "streaming"}>
-          <summary>Synthesis Process</summary>
-          <div className="message-content reasoning-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{reasoning}</ReactMarkdown>
+        <div className="reasoning-container">
+          <div className={clsx("reasoning-block", isReasoningOpen && "open")}>
+            <button
+              className="reasoning-summary"
+              onClick={() => setIsReasoningOpen(!isReasoningOpen)}
+              type="button"
+            >
+              Synthesis Process
+            </button>
+            <div className={clsx("reasoning-accordion", isReasoningOpen && "open")}>
+              <div className="reasoning-content-wrapper">
+                <div className="message-content reasoning-content">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{reasoning}</ReactMarkdown>
+                </div>
+              </div>
+            </div>
           </div>
-        </details>
-      )}
-
-      {displayText && (
-        <div className="message-content">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText}</ReactMarkdown>
-          {message.status === "streaming" && <span className="typewriter-cursor" />}
         </div>
       )}
+
+      <div className="response-container">
+        <div className="message-meta">
+          {message.status === "streaming" ? "Aura Processing" : "Aura Response"}
+        </div>
+        {displayText && (
+          <div className="message-content">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText}</ReactMarkdown>
+            {message.status === "streaming" && <span className="typewriter-cursor" />}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -113,34 +134,53 @@ export function Chat() {
   const [introHtml, setIntroHtml] = useState("");
   const [isIntroTyping, setIsIntroTyping] = useState(false);
   const [isFeedScrolling, setIsFeedScrolling] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(SIDEBAR_DEFAULT_WIDTH);
-  const [hoverExtraWidth, setHoverExtraWidth] = useState(0);
+  const [isFadingOut, setIsFadingOut] = useState(false);
+  const [sessionVersion, setSessionVersion] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
 
   const sidebarRef = useRef<HTMLElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const isResizingSidebar = useRef(false);
   const scrollIdleTimerRef = useRef<number | null>(null);
-  const sidebarWidthRef = useRef(SIDEBAR_DEFAULT_WIDTH);
-  const hoverExtraWidthRef = useRef(0);
+  const fadingTimerRef = useRef<number | null>(null);
+  const dataWaitTimerRef = useRef<number | null>(null);
+  const waitingForDataRef = useRef(false);
 
-  const applySidebarWidth = useCallback(
-    (baseWidth: number, extraWidth: number) => {
-      if (isMobile || !sidebarRef.current) {
-        return;
-      }
 
-      const effectiveWidth = Math.min(baseWidth + extraWidth, SIDEBAR_MAX_WIDTH);
-      sidebarRef.current.style.width = `${effectiveWidth}px`;
+  const switchThread = useCallback(
+    (newThreadId: string | null, composingNew: boolean) => {
+      if (isFadingOut) return;
+      if (!composingNew && newThreadId === activeThreadId && !isComposingNew) return;
+      setIsFadingOut(true);
+      waitingForDataRef.current = false;
+      if (fadingTimerRef.current !== null) window.clearTimeout(fadingTimerRef.current);
+      if (dataWaitTimerRef.current !== null) window.clearTimeout(dataWaitTimerRef.current);
+      fadingTimerRef.current = window.setTimeout(() => {
+        setIsComposingNew(composingNew);
+        setActiveThreadId(newThreadId);
+        if (composingNew) {
+          setSessionVersion((v) => v + 1);
+        }
+        if (composingNew) {
+          // New session: no data to load, fade in immediately
+          window.setTimeout(() => setIsFadingOut(false), 50);
+        } else {
+          // Existing thread: stay invisible until messages arrive
+          waitingForDataRef.current = true;
+          // Safety fallback — fade in after 1s regardless (faster than 2s for better UX)
+          dataWaitTimerRef.current = window.setTimeout(() => {
+            waitingForDataRef.current = false;
+            setIsFadingOut(false);
+          }, 1000);
+        }
+      }, 350);
     },
-    [isMobile],
+    [activeThreadId, isComposingNew, isFadingOut, setSessionVersion, setActiveThreadId, setIsComposingNew],
   );
 
   const startNew = useCallback(() => {
-    setIsComposingNew(true);
-    setActiveThreadId(null);
-  }, []);
+    switchThread(null, true);
+  }, [switchThread]);
 
   useEffect(() => {
     if (!threads || isComposingNew) {
@@ -176,13 +216,21 @@ export function Chat() {
   );
   const showIntro = visibleMessages.length === 0 && !isStreaming;
 
+  // Fade back in once the target thread's messages have loaded
   useEffect(() => {
-    const feed = feedRef.current;
-    if (!feed) {
-      return;
+    if (waitingForDataRef.current && visibleMessages.length > 0) {
+      waitingForDataRef.current = false;
+      if (dataWaitTimerRef.current !== null) {
+        window.clearTimeout(dataWaitTimerRef.current);
+        dataWaitTimerRef.current = null;
+      }
+      setIsFadingOut(false);
     }
+  }, [visibleMessages.length]);
+
+  useEffect(() => {
     const timer = window.setTimeout(() => {
-      feed.scrollTop = feed.scrollHeight;
+      window.scrollTo(0, document.documentElement.scrollHeight);
     }, 50);
     return () => {
       window.clearTimeout(timer);
@@ -242,7 +290,7 @@ export function Chat() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [showIntro]);
+  }, [showIntro, sessionVersion]);
 
   useEffect(() => {
     const updateMobileState = () => {
@@ -257,65 +305,12 @@ export function Chat() {
   }, []);
 
   useEffect(() => {
-    sidebarWidthRef.current = sidebarWidth;
-  }, [sidebarWidth]);
-
-  useEffect(() => {
-    hoverExtraWidthRef.current = hoverExtraWidth;
-  }, [hoverExtraWidth]);
-
-  useEffect(() => {
     return () => {
-      if (scrollIdleTimerRef.current !== null) {
-        window.clearTimeout(scrollIdleTimerRef.current);
-      }
+      if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
+      if (fadingTimerRef.current !== null) window.clearTimeout(fadingTimerRef.current);
+      if (dataWaitTimerRef.current !== null) window.clearTimeout(dataWaitTimerRef.current);
     };
   }, []);
-
-  useEffect(() => {
-    if (isMobile) {
-      setHoverExtraWidth(0);
-      if (sidebarRef.current) {
-        sidebarRef.current.style.removeProperty("width");
-      }
-      return;
-    }
-
-    applySidebarWidth(sidebarWidth, hoverExtraWidth);
-  }, [applySidebarWidth, hoverExtraWidth, isMobile, sidebarWidth]);
-
-  useEffect(() => {
-    if (isMobile) {
-      return;
-    }
-
-    const handleMouseMove = (event: MouseEvent) => {
-      if (!isResizingSidebar.current) {
-        return;
-      }
-
-      const maxWidth = Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, window.innerWidth - 420));
-      const clampedWidth = Math.min(Math.max(event.clientX, SIDEBAR_MIN_WIDTH), maxWidth);
-      sidebarWidthRef.current = clampedWidth;
-      applySidebarWidth(clampedWidth, hoverExtraWidthRef.current);
-    };
-
-    const handleMouseUp = () => {
-      if (!isResizingSidebar.current) {
-        return;
-      }
-      isResizingSidebar.current = false;
-      document.body.classList.remove("resizing-sidebar");
-      setSidebarWidth(sidebarWidthRef.current);
-    };
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, [applySidebarWidth, isMobile]);
 
   const resizeTextarea = useCallback(() => {
     const textarea = textareaRef.current;
@@ -367,29 +362,6 @@ export function Chat() {
     }
   };
 
-  const handleSidebarResizeStart = (event: React.MouseEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    isResizingSidebar.current = true;
-    document.body.classList.add("resizing-sidebar");
-  };
-
-  const handleHistoryEnter = (
-    event: React.MouseEvent<HTMLButtonElement> | React.FocusEvent<HTMLButtonElement>,
-  ) => {
-    if (isMobile || isResizingSidebar.current) {
-      return;
-    }
-
-    const { currentTarget } = event;
-    const overflow = currentTarget.scrollWidth - currentTarget.clientWidth;
-    const neededExtra = overflow > 0 ? Math.min(overflow + 28, 180) : 0;
-    setHoverExtraWidth(neededExtra);
-  };
-
-  const handleHistoryLeave = () => {
-    setHoverExtraWidth(0);
-  };
-
   const handleFeedScroll = () => {
     setIsFeedScrolling((current) => (current ? current : true));
 
@@ -402,9 +374,7 @@ export function Chat() {
     }, 140);
   };
 
-  const effectiveSidebarWidth = isMobile
-    ? undefined
-    : Math.min(sidebarWidth + hoverExtraWidth, SIDEBAR_MAX_WIDTH);
+  const effectiveSidebarWidth = isMobile ? undefined : SIDEBAR_WIDTH;
 
   return (
     <div className="oracle-shell">
@@ -413,11 +383,7 @@ export function Chat() {
       <ChatCanvas pause={isFeedScrolling} />
 
       <div className="app-container">
-        <aside
-          ref={sidebarRef}
-          className="sidebar"
-          style={effectiveSidebarWidth ? { width: effectiveSidebarWidth } : undefined}
-        >
+        <aside ref={sidebarRef} className="sidebar">
           <header className="brand">
             <h1>Aura</h1>
             <span>System.v.26</span>
@@ -438,76 +404,65 @@ export function Chat() {
 
             {threads && threads.length > 0
               ? threads.map((thread) => (
-                  <li className="history-item" key={thread.threadId}>
-                    <button
-                      className={clsx(
-                        "history-link",
-                        thread.threadId === activeThreadId && !isComposingNew && "active",
-                      )}
-                      onMouseEnter={handleHistoryEnter}
-                      onMouseLeave={handleHistoryLeave}
-                      onFocus={handleHistoryEnter}
-                      onBlur={handleHistoryLeave}
-                      onClick={() => {
-                        setIsComposingNew(false);
-                        setActiveThreadId(thread.threadId);
-                      }}
-                    >
-                      {thread.title}
-                    </button>
+                <li className="history-item" key={thread.threadId}>
+                  <button
+                    className={clsx(
+                      "history-link",
+                      thread.threadId === activeThreadId && !isComposingNew && "active",
+                    )}
+                    onClick={() => {
+                      switchThread(thread.threadId, false);
+                    }}
+                  >
+                    {thread.title}
+                  </button>
 
-                    <button
-                      className="history-delete"
-                      onClick={(event) => {
-                        void handleDelete(event, thread.threadId);
-                      }}
-                      aria-label="Delete session"
-                    >
-                      [x]
-                    </button>
-                  </li>
-                ))
+                  <button
+                    className="history-delete"
+                    onClick={(event) => {
+                      void handleDelete(event, thread.threadId);
+                    }}
+                    aria-label="Delete session"
+                  >
+                    [x]
+                  </button>
+                </li>
+              ))
               : threads &&
-                PLACEHOLDER_HISTORY.map((item, index) => (
-                  <li className="history-item" key={item}>
-                    <span className={clsx("history-link placeholder", index === 0 && "active")}>{item}</span>
-                  </li>
-                ))}
+              PLACEHOLDER_HISTORY.map((item, index) => (
+                <li className="history-item" key={item}>
+                  <span className={clsx("history-link placeholder", index === 0 && "active")}>{item}</span>
+                </li>
+              ))}
           </ul>
         </aside>
 
-        {!isMobile && <div className="sidebar-resizer" onMouseDown={handleSidebarResizeStart} />}
+
 
         <main className="main-area">
-          <header className="chat-header">
-            <div className="model-info">
-              <span className="status-dot" />
-              {activeThread?.title && !isComposingNew
-                ? activeThread.title
-                : "Aura Prime / Generative Mode"}
-            </div>
-            <div className="model-info">
-              {isStreaming ? "Aura Processing..." : "Latency: 12ms | Grid: Active"}
-            </div>
-          </header>
 
-          <div className="chat-feed" id="chatFeed" ref={feedRef} onScroll={handleFeedScroll}>
+
+          <div className={clsx("chat-feed", isFadingOut && "fading-out")} id="chatFeed" ref={feedRef} onScroll={handleFeedScroll}>
             {showIntro ? (
               <>
                 <div className="message user" style={{ animationDelay: "0.5s" }}>
-                  <div className="message-meta">User Query</div>
-                  <div className="message-content">What do you do?</div>
+                  <div className="message-wrapper">
+                    <div className="message-meta">User Query</div>
+                    <div className="message-content">What do you do?</div>
+                  </div>
                 </div>
 
                 <div className="message ai" style={{ animationDelay: "0.7s" }}>
-                  <div className="message-meta">Aura Response</div>
-                  <div
-                    className="message-content"
-                    id="typewriter-target"
-                    dangerouslySetInnerHTML={{
-                      __html: `${introHtml}${isIntroTyping ? '<span class="typewriter-cursor"></span>' : ""}`,
-                    }}
-                  />
+                  <div className="response-container">
+                    <div className="message-meta">Aura Response</div>
+                    <div
+                      className="message-content"
+                      id="typewriter-target"
+                      dangerouslySetInnerHTML={{
+                        __html: `${introHtml}${isIntroTyping ? '<span class="typewriter-cursor"></span>' : ""}`,
+                      }}
+                    />
+                  </div>
                 </div>
               </>
             ) : (
@@ -518,37 +473,39 @@ export function Chat() {
           </div>
 
           <div className="input-wrapper">
-            <form className="input-container" onSubmit={(event) => void handleSend(event)}>
-              <span className="input-prefix">_&gt;</span>
+            <div className="input-grid">
+              <form className="input-container" onSubmit={(event) => void handleSend(event)}>
+                <span className="input-prefix">_&gt;</span>
 
-              <textarea
-                id="userInput"
-                ref={textareaRef}
-                rows={1}
-                value={draft}
-                placeholder="Enter command sequence..."
-                onChange={(event) => {
-                  setDraft(event.target.value);
-                  resizeTextarea();
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void handleSend();
-                  }
-                }}
-                disabled={isSubmitting}
-              />
+                <textarea
+                  id="userInput"
+                  ref={textareaRef}
+                  rows={1}
+                  value={draft}
+                  placeholder="Enter command sequence..."
+                  onChange={(event) => {
+                    setDraft(event.target.value);
+                    resizeTextarea();
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void handleSend();
+                    }
+                  }}
+                  disabled={isSubmitting}
+                />
 
-              <button
-                className="send-btn"
-                id="sendBtn"
-                type="submit"
-                disabled={isSubmitting || !draft.trim()}
-              >
-                [ Execute ]
-              </button>
-            </form>
+                <button
+                  className="send-btn"
+                  id="sendBtn"
+                  type="submit"
+                  disabled={isSubmitting || !draft.trim()}
+                >
+                  [ Execute ]
+                </button>
+              </form>
+            </div>
           </div>
         </main>
       </div>

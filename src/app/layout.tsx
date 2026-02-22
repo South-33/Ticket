@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { ConvexClientProvider } from "@/components/convex-client-provider";
+import { SmoothScroll } from "@/components/smooth-scroll";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -15,7 +16,9 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body suppressHydrationWarning>
-        <ConvexClientProvider>{children}</ConvexClientProvider>
+        <SmoothScroll>
+          <ConvexClientProvider>{children}</ConvexClientProvider>
+        </SmoothScroll>
       </body>
     </html>
   );
