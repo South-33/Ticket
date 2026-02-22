@@ -108,7 +108,7 @@ export default defineSchema({
     url: v.string(),
     title: v.string(),
     snippet: v.optional(v.string()),
-    provider: v.union(v.literal("duckduckgo"), v.literal("fallback")),
+    provider: v.union(v.literal("tavily"), v.literal("fallback")),
     createdAt: v.number(),
   })
     .index("by_job_rank", ["jobId", "rank"])

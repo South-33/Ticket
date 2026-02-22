@@ -113,18 +113,32 @@ describe("research pipeline", () => {
   test("runs seeded job to completion with task and finding updates", async () => {
     const t = convexTest(schema, modules);
     const threadId = "thread-flow";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    process.env.TAVILY_API_KEY = "test-tavily-key";
 
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => {
-        const html = [
-          '<div class="result"><div><a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdeal-1">Deal One</a><a class="result__snippet">Cheap fare lead one</a></div></div>',
-          '<div class="result"><div><a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdeal-2">Deal Two</a><a class="result__snippet">Cheap fare lead two</a></div></div>',
-        ].join("\n");
-
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (!url.includes("api.tavily.com/search")) {
+          throw new Error(`Unexpected fetch url in test: ${url}`);
+        }
         return {
           ok: true,
-          text: async () => html,
+          json: async () => ({
+            results: [
+              {
+                title: "Deal One",
+                url: "https://example.com/deal-1",
+                content: "Cheap fare lead one",
+              },
+              {
+                title: "Deal Two",
+                url: "https://example.com/deal-2",
+                content: "Cheap fare lead two",
+              },
+            ],
+          }),
         } as Response;
       }),
     );
@@ -151,6 +165,7 @@ describe("research pipeline", () => {
       expect(latest?.findings.length).toBeGreaterThanOrEqual(3);
       expect(latest?.sources).toHaveLength(2);
       expect(latest?.sources[0]?.url).toContain("example.com/deal-1");
+      expect(latest?.sources[0]?.provider).toBe("tavily");
 
       const persisted = await t.run(async (ctx) => {
         const job = await ctx.db.get("researchJobs", researchJobId);
@@ -171,8 +186,14 @@ describe("research pipeline", () => {
       expect(persisted.findings.length).toBeGreaterThanOrEqual(3);
       expect(persisted.findings.some((finding) => finding.sourceType === "web")).toBe(true);
       expect(persisted.sources).toHaveLength(2);
+      expect(persisted.sources[0]?.provider).toBe("tavily");
     } finally {
       vi.unstubAllGlobals();
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
     }
   });
 

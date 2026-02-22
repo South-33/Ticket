@@ -17,6 +17,15 @@ type WebSearchResult = {
   snippet?: string;
 };
 
+type TavilySearchResponse = {
+  results?: Array<{
+    title?: string;
+    url?: string;
+    content?: string;
+    raw_content?: string;
+  }>;
+};
+
 function detectDomain(prompt: string) {
   const value = prompt.toLowerCase();
   const hasFlight = /(flight|airport|layover|airline|fare)/.test(value);
@@ -43,85 +52,63 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function decodeHtml(value: string) {
-  return value
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&nbsp;/g, " ");
+function normalizeSnippet(value: string | undefined) {
+  if (!value) {
+    return undefined;
+  }
+  const compact = value.replace(/\s+/g, " ").trim();
+  if (!compact) {
+    return undefined;
+  }
+  return compact.slice(0, 280);
 }
 
-function stripHtml(value: string) {
-  return decodeHtml(value.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
-}
-
-function unwrapDuckDuckGoUrl(rawHref: string) {
-  const href = decodeHtml(rawHref.trim());
-  if (!href) {
-    return null;
+async function runTavilySearch(query: string, maxResults: number) {
+  const apiKey = process.env.TAVILY_API_KEY;
+  if (!apiKey) {
+    throw new Error("TAVILY_API_KEY is not configured");
   }
 
-  if (href.startsWith("http://") || href.startsWith("https://")) {
-    try {
-      const parsed = new URL(href);
-      const redirectTarget = parsed.searchParams.get("uddg");
-      if (redirectTarget) {
-        return decodeURIComponent(redirectTarget);
-      }
-      return href;
-    } catch {
-      return null;
-    }
+  const response = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      query,
+      topic: "general",
+      search_depth: "basic",
+      max_results: maxResults,
+      include_answer: false,
+      include_raw_content: false,
+      include_images: false,
+      include_favicon: false,
+      include_usage: false,
+      auto_parameters: true,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Tavily search failed: ${response.status}`);
   }
 
-  if (href.startsWith("/l/?")) {
-    try {
-      const parsed = new URL(`https://duckduckgo.com${href}`);
-      const redirectTarget = parsed.searchParams.get("uddg");
-      if (redirectTarget) {
-        return decodeURIComponent(redirectTarget);
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  }
-
-  return null;
-}
-
-function parseDuckDuckGoResults(html: string, maxResults: number) {
-  const blocks = Array.from(html.matchAll(/<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/g));
+  const payload = (await response.json()) as TavilySearchResponse;
+  const seenUrls = new Set<string>();
   const output: WebSearchResult[] = [];
-  const seen = new Set<string>();
 
-  for (const match of blocks) {
-    const block = match[1] ?? "";
-    const linkMatch = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
-    if (!linkMatch) {
+  for (const result of payload.results ?? []) {
+    const url = result.url?.trim();
+    const title = result.title?.trim();
+    if (!url || !title || seenUrls.has(url)) {
       continue;
     }
+    seenUrls.add(url);
 
-    const unwrapped = unwrapDuckDuckGoUrl(linkMatch[1] ?? "");
-    if (!unwrapped || seen.has(unwrapped)) {
-      continue;
-    }
-
-    const title = stripHtml(linkMatch[2] ?? "");
-    if (!title) {
-      continue;
-    }
-
-    const snippetMatch = block.match(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/);
-    const snippet = snippetMatch ? stripHtml(snippetMatch[1] ?? "") : undefined;
-
-    seen.add(unwrapped);
     output.push({
+      url,
       title,
-      url: unwrapped,
-      snippet,
+      snippet: normalizeSnippet(result.content ?? result.raw_content),
     });
 
     if (output.length >= maxResults) {
@@ -130,24 +117,6 @@ function parseDuckDuckGoResults(html: string, maxResults: number) {
   }
 
   return output;
-}
-
-async function runDuckDuckGoSearch(query: string, maxResults: number) {
-  const endpoint = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  const response = await fetch(endpoint, {
-    headers: {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
-      accept: "text/html,application/xhtml+xml",
-    },
-  });
-
-  if (!response.ok) {
-    throw new Error(`DuckDuckGo search failed: ${response.status}`);
-  }
-
-  const html = await response.text();
-  return parseDuckDuckGoResults(html, maxResults);
 }
 
 function buildSearchQuery(prompt: string, domain: string) {
@@ -550,7 +519,7 @@ export const addSourcesInternal = internalMutation({
         url: v.string(),
         title: v.string(),
         snippet: v.optional(v.string()),
-        provider: v.union(v.literal("duckduckgo"), v.literal("fallback")),
+        provider: v.union(v.literal("tavily"), v.literal("fallback")),
       }),
     ),
   },
@@ -664,9 +633,11 @@ export const runJobInternal = internalAction({
 
       const searchQuery = buildSearchQuery(goal.prompt, goal.domain);
       let webResults: WebSearchResult[] = [];
+      let searchProvider: "tavily" | "fallback" = "fallback";
 
       try {
-        webResults = await runDuckDuckGoSearch(searchQuery, 6);
+        webResults = await runTavilySearch(searchQuery, 6);
+        searchProvider = "tavily";
       } catch {
         webResults = [];
       }
@@ -680,7 +651,7 @@ export const runJobInternal = internalAction({
             url: result.url,
             title: result.title,
             snippet: result.snippet,
-            provider: "duckduckgo" as const,
+            provider: searchProvider,
           })),
         });
 
@@ -699,9 +670,9 @@ export const runJobInternal = internalAction({
         await ctx.runMutation(internal.research.addFindingInternal, {
           researchJobId: args.researchJobId,
           taskKey: "scan",
-          title: "Live web scan fallback used",
+          title: "Tavily scan fallback used",
           summary:
-            "Web search provider returned no parsed results for this run. Pipeline remained healthy and created a fallback lead.",
+            "Tavily returned no usable search results for this run (or API key is missing). Pipeline remained healthy and created a fallback lead.",
           confidence: 0.38,
           sourceType: "simulated",
         });
