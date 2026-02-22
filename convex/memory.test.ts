@@ -4,13 +4,18 @@ import { api } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
 
+const AUTH_IDENTITY = {
+  tokenIdentifier: "demo-user",
+  subject: "demo-user",
+  issuer: "https://auth.test",
+};
+
 describe("memory guards", () => {
   test("rejects inferred confirmation for sensitive facts", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
 
     await expect(
       t.mutation(api.memory.upsertUserMemoryFact, {
-        userId: "demo-user",
         key: "nationality",
         value: "Filipino",
         sourceType: "inferred",
@@ -22,10 +27,9 @@ describe("memory guards", () => {
   });
 
   test("allows explicit user confirmation for sensitive facts", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
 
     await t.mutation(api.memory.upsertUserMemoryFact, {
-      userId: "demo-user",
       key: "nationality",
       value: "Filipino",
       sourceType: "user_confirmed",
@@ -34,9 +38,11 @@ describe("memory guards", () => {
       isSensitive: true,
     });
 
-    const memory = await t.query(api.memory.getUserMemory, {
-      userId: "demo-user",
-    });
-    expect(memory.facts.some((fact) => fact.key === "nationality" && fact.status === "confirmed")).toBe(true);
+    const memory = await t.query(api.memory.getUserMemory, {});
+    expect(
+      memory.facts.some(
+        (fact: { key: string; status: string }) => fact.key === "nationality" && fact.status === "confirmed",
+      ),
+    ).toBe(true);
   });
 });

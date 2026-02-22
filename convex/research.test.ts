@@ -8,6 +8,11 @@ import schema from "./schema";
 import { modules } from "./test.setup";
 
 const DEMO_USER_ID = "demo-user";
+const AUTH_IDENTITY = {
+  tokenIdentifier: DEMO_USER_ID,
+  subject: DEMO_USER_ID,
+  issuer: "https://auth.test",
+};
 
 type JobStatus =
   | "draft"
@@ -22,7 +27,7 @@ type JobStatus =
   | "expired";
 
 async function seedJob(
-  t: ReturnType<typeof convexTest>,
+  t: Pick<ReturnType<typeof convexTest>, "run">,
   args?: {
     threadId?: string;
     promptMessageId?: string;
@@ -110,7 +115,7 @@ describe("research pipeline", () => {
   });
 
   test("returns null for threads without jobs", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
 
     const result = await t.query(api.research.getLatestJobForThread, {
       threadId: "thread-missing",
@@ -120,7 +125,7 @@ describe("research pipeline", () => {
   });
 
   test("runs seeded job to completion with task and finding updates", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-flow";
     const priorApiKey = process.env.TAVILY_API_KEY;
     process.env.TAVILY_API_KEY = "test-tavily-key";
@@ -253,7 +258,7 @@ describe("research pipeline", () => {
   });
 
   test("does not rerun terminal jobs", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-terminal";
     const researchJobId = await seedJob(t, {
       threadId,
@@ -277,7 +282,7 @@ describe("research pipeline", () => {
   });
 
   test("prefers active jobs over terminal jobs for latest query", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-priority";
 
     await seedJob(t, {
@@ -300,7 +305,7 @@ describe("research pipeline", () => {
   });
 
   test("throws when patching a missing task", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const researchJobId = await seedJob(t, {
       threadId: "thread-error",
       withTasks: false,
@@ -316,7 +321,7 @@ describe("research pipeline", () => {
   });
 
   test("falls back safely when Tavily key is missing", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-no-key";
     const priorApiKey = process.env.TAVILY_API_KEY;
     delete process.env.TAVILY_API_KEY;
@@ -353,7 +358,7 @@ describe("research pipeline", () => {
   });
 
   test("creates awaiting_input job when required slots are missing", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
 
     const created = await t.run(async (ctx) => {
       return await createResearchJobForPrompt(ctx as unknown as MutationCtx, {
@@ -377,7 +382,7 @@ describe("research pipeline", () => {
 
   test("continues awaiting_input job and auto-resumes when slots are provided", async () => {
     vi.useFakeTimers();
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
 
     const created = await t.run(async (ctx) => {
       return await createResearchJobForPrompt(ctx as unknown as MutationCtx, {
@@ -411,7 +416,7 @@ describe("research pipeline", () => {
 
   test("allows manual recheck scheduling for terminal jobs", async () => {
     vi.useFakeTimers();
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const researchJobId = await seedJob(t, {
       threadId: "thread-manual-recheck",
       status: "completed",
@@ -440,7 +445,7 @@ describe("research pipeline", () => {
   });
 
   test("paginates jobs and enforces page-size limits", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-pagination-jobs";
 
     await seedJob(t, { threadId, status: "completed", updatedAt: 100 });
@@ -484,7 +489,7 @@ describe("research pipeline", () => {
   });
 
   test("injects knowledge planner hints into plan findings", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-knowledge";
     const researchJobId = await seedJob(t, {
       threadId,
@@ -531,7 +536,7 @@ describe("research pipeline", () => {
   });
 
   test("paginates ranked results by job", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-ranked-pagination";
     const priorApiKey = process.env.TAVILY_API_KEY;
     delete process.env.TAVILY_API_KEY;
@@ -581,7 +586,7 @@ describe("research pipeline", () => {
   });
 
   test("paginates tasks and findings by job", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-task-finding-pagination";
     const priorApiKey = process.env.TAVILY_API_KEY;
     delete process.env.TAVILY_API_KEY;
@@ -630,7 +635,7 @@ describe("research pipeline", () => {
   });
 
   test("schedules retry metadata on transient provider failure", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-retry-once";
     const priorApiKey = process.env.TAVILY_API_KEY;
     process.env.TAVILY_API_KEY = "test-tavily-key";
@@ -694,7 +699,7 @@ describe("research pipeline", () => {
   });
 
   test("fails terminally after max retry attempts", async () => {
-    const t = convexTest(schema, modules);
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-retry-terminal";
     const priorApiKey = process.env.TAVILY_API_KEY;
     process.env.TAVILY_API_KEY = "test-tavily-key";

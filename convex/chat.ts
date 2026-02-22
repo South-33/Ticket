@@ -13,13 +13,13 @@ import { z } from "zod";
 import {
   BASE_CHAT_INSTRUCTIONS,
   DEFAULT_THREAD_TITLE,
-  DEMO_USER_ID,
   chatAgent,
   normalizeTitle,
   toPreview,
 } from "./agent";
+import { getAuthUserIdOrThrow } from "./auth";
 import { continueAwaitingJobForPrompt, createResearchJobForPrompt } from "./research";
-import { api, components, internal } from "./_generated/api";
+import { components, internal } from "./_generated/api";
 import {
   internalAction,
   internalMutation,
@@ -332,8 +332,12 @@ function toErrorMessage(error: unknown) {
   return "I ran into a model error. Please try again in a moment.";
 }
 
-async function getOwnedThreadState(ctx: QueryCtx | MutationCtx, threadId: string) {
-  const state = await findOwnedThreadState(ctx, threadId);
+async function getThreadStateByThreadId(ctx: QueryCtx | MutationCtx, threadId: string) {
+  const state = await ctx.db
+    .query("threadState")
+    .withIndex("by_threadId", (indexQuery) => indexQuery.eq("threadId", threadId))
+    .unique();
+
   if (!state) {
     throw new ConvexError("Thread not found");
   }
@@ -341,13 +345,22 @@ async function getOwnedThreadState(ctx: QueryCtx | MutationCtx, threadId: string
   return state;
 }
 
-async function findOwnedThreadState(ctx: QueryCtx | MutationCtx, threadId: string) {
+async function getOwnedThreadState(ctx: QueryCtx | MutationCtx, threadId: string, userId: string) {
+  const state = await findOwnedThreadState(ctx, threadId, userId);
+  if (!state) {
+    throw new ConvexError("Thread not found");
+  }
+
+  return state;
+}
+
+async function findOwnedThreadState(ctx: QueryCtx | MutationCtx, threadId: string, userId: string) {
   const state = await ctx.db
     .query("threadState")
     .withIndex("by_threadId", (indexQuery) => indexQuery.eq("threadId", threadId))
     .unique();
 
-  if (!state || state.userId !== DEMO_USER_ID) {
+  if (!state || state.userId !== userId) {
     return null;
   }
 
@@ -357,9 +370,10 @@ async function findOwnedThreadState(ctx: QueryCtx | MutationCtx, threadId: strin
 export const listThreads = query({
   args: {},
   handler: async (ctx) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
     const threads = await ctx.db
       .query("threadState")
-      .withIndex("by_user_lastMessageAt", (indexQuery) => indexQuery.eq("userId", DEMO_USER_ID))
+      .withIndex("by_user_lastMessageAt", (indexQuery) => indexQuery.eq("userId", userId))
       .order("desc")
       .take(MAX_THREADS);
 
@@ -377,16 +391,17 @@ export const createThread = mutation({
     title: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
     const title = normalizeTitle(args.title ?? "");
     const now = Date.now();
     const threadId = await createAgentThread(ctx, components.agent, {
-      userId: DEMO_USER_ID,
+      userId,
       title,
     });
 
     await ctx.db.insert("threadState", {
       threadId,
-      userId: DEMO_USER_ID,
+      userId,
       title,
       titleUpdatedAt: now,
       preview: "No messages yet",
@@ -403,7 +418,8 @@ export const renameThread = mutation({
     title: v.string(),
   },
   handler: async (ctx, args) => {
-    const state = await getOwnedThreadState(ctx, args.threadId);
+    const userId = await getAuthUserIdOrThrow(ctx);
+    const state = await getOwnedThreadState(ctx, args.threadId, userId);
     const title = normalizeTitle(args.title);
     const now = Date.now();
 
@@ -421,7 +437,8 @@ export const deleteThread = mutation({
     threadId: v.string(),
   },
   handler: async (ctx, args) => {
-    const state = await getOwnedThreadState(ctx, args.threadId);
+    const userId = await getAuthUserIdOrThrow(ctx);
+    const state = await getOwnedThreadState(ctx, args.threadId, userId);
     await chatAgent.deleteThreadAsync(ctx, { threadId: args.threadId });
     await ctx.db.delete(state._id);
   },
@@ -434,7 +451,8 @@ export const listMessages = query({
     streamArgs: vStreamArgs,
   },
   handler: async (ctx, args) => {
-    const state = await findOwnedThreadState(ctx, args.threadId);
+    const userId = await getAuthUserIdOrThrow(ctx);
+    const state = await findOwnedThreadState(ctx, args.threadId, userId);
     if (!state) {
       return {
         page: [],
@@ -460,7 +478,8 @@ export const sendPrompt = mutation({
     prompt: v.string(),
   },
   handler: async (ctx, args) => {
-    const state = await getOwnedThreadState(ctx, args.threadId);
+    const userId = await getAuthUserIdOrThrow(ctx);
+    const state = await getOwnedThreadState(ctx, args.threadId, userId);
     const prompt = args.prompt.trim();
     if (!prompt) {
       throw new ConvexError("Prompt cannot be empty");
@@ -468,7 +487,7 @@ export const sendPrompt = mutation({
 
     const { messageId } = await chatAgent.saveMessage(ctx, {
       threadId: args.threadId,
-      userId: DEMO_USER_ID,
+      userId,
       prompt,
       skipEmbeddings: true,
     });
@@ -479,7 +498,7 @@ export const sendPrompt = mutation({
     });
 
     const resumed = await continueAwaitingJobForPrompt(ctx, {
-      userId: DEMO_USER_ID,
+      userId,
       threadId: args.threadId,
       promptMessageId: messageId,
       prompt,
@@ -488,7 +507,7 @@ export const sendPrompt = mutation({
     const research =
       resumed ??
       (await createResearchJobForPrompt(ctx, {
-        userId: DEMO_USER_ID,
+        userId,
         threadId: args.threadId,
         promptMessageId: messageId,
         prompt,
@@ -501,7 +520,7 @@ export const sendPrompt = mutation({
 
       await chatAgent.saveMessage(ctx, {
         threadId: args.threadId,
-        userId: DEMO_USER_ID,
+        userId,
         message: {
           role: "assistant",
           content: followUpMessage,
@@ -513,8 +532,8 @@ export const sendPrompt = mutation({
         lastMessageAt: Date.now(),
       });
 
-      await ctx.scheduler.runAfter(0, api.memory.generateUserMemorySnapshot, {
-        userId: DEMO_USER_ID,
+      await ctx.scheduler.runAfter(0, internal.memory.generateUserMemorySnapshotInternal, {
+        userId,
       });
 
       return { promptMessageId: messageId, researchJobId: research.researchJobId };
@@ -526,8 +545,8 @@ export const sendPrompt = mutation({
       prompt,
     });
 
-    await ctx.scheduler.runAfter(0, api.memory.generateUserMemorySnapshot, {
-      userId: DEMO_USER_ID,
+    await ctx.scheduler.runAfter(0, internal.memory.generateUserMemorySnapshotInternal, {
+      userId,
     });
 
     return { promptMessageId: messageId, researchJobId: research.researchJobId };
@@ -539,7 +558,7 @@ export const getThreadStateInternal = internalQuery({
     threadId: v.string(),
   },
   handler: async (ctx, args) => {
-    return getOwnedThreadState(ctx, args.threadId);
+    return getThreadStateByThreadId(ctx, args.threadId);
   },
 });
 
@@ -549,7 +568,7 @@ export const updateThreadPreviewInternal = internalMutation({
     preview: v.string(),
   },
   handler: async (ctx, args) => {
-    const state = await getOwnedThreadState(ctx, args.threadId);
+    const state = await getThreadStateByThreadId(ctx, args.threadId);
     await ctx.db.patch(state._id, {
       preview: toPreview(args.preview),
       lastMessageAt: Date.now(),
@@ -563,7 +582,7 @@ export const setThreadTitleFromToolInternal = internalMutation({
     title: v.string(),
   },
   handler: async (ctx, args) => {
-    const state = await getOwnedThreadState(ctx, args.threadId);
+    const state = await getThreadStateByThreadId(ctx, args.threadId);
     const nextTitle = normalizeTitle(args.title);
     if (nextTitle === DEFAULT_THREAD_TITLE || nextTitle === state.title) {
       return { changed: false, title: state.title };
@@ -664,14 +683,14 @@ export const generateReplyInternal = internalAction({
     const metadata = await getThreadMetadata(ctx, components.agent, {
       threadId: args.threadId,
     });
-    if (metadata.userId !== DEMO_USER_ID) {
+    if (metadata.userId !== threadState.userId) {
       throw new ConvexError("Thread does not belong to this user");
     }
 
     try {
       const { thread } = await chatAgent.continueThread(ctx, {
         threadId: args.threadId,
-        userId: DEMO_USER_ID,
+        userId: threadState.userId,
       });
 
       const result = await thread.streamText(
@@ -767,7 +786,7 @@ export const generateReplyInternal = internalAction({
       const fallbackMessage = toErrorMessage(error);
       await chatAgent.saveMessage(ctx, {
         threadId: args.threadId,
-        userId: DEMO_USER_ID,
+        userId: threadState.userId,
         message: {
           role: "assistant",
           content: fallbackMessage,

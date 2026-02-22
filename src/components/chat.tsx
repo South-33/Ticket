@@ -6,7 +6,8 @@ import {
   useUIMessages,
   type UIMessage,
 } from "@convex-dev/agent/react";
-import { useMutation, useQuery } from "convex/react";
+import { SignInButton, UserButton } from "@clerk/nextjs";
+import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import clsx from "clsx";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
@@ -38,6 +39,8 @@ const PLACEHOLDER_HISTORY = [
   "Award Seat Availability Sweep",
   "Baggage and Fare Rule Audit",
 ];
+
+const hasClerk = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
 const TERMINAL_RESEARCH_STATUSES = new Set(["completed", "failed", "cancelled", "expired"]);
 
@@ -241,7 +244,7 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
   );
 }
 
-export function Chat() {
+function AuthenticatedChat() {
   const threads = useQuery(api.chat.listThreads);
   const createThread = useMutation(api.chat.createThread);
   const deleteThread = useMutation(api.chat.deleteThread);
@@ -464,6 +467,10 @@ export function Chat() {
         setActiveThreadId(threadId);
       }
 
+      if (!threadId) {
+        return;
+      }
+
       await sendPrompt({ threadId, prompt });
     } finally {
       setIsSubmitting(false);
@@ -515,6 +522,7 @@ export function Chat() {
           <header className="brand">
             <h1>Aura</h1>
             <span>System.v.26</span>
+            {hasClerk && <UserButton />}
           </header>
 
           <button className="new-chat-btn" onClick={startNew}>
@@ -782,4 +790,52 @@ export function Chat() {
       </div>
     </div>
   );
+}
+
+export function Chat() {
+  const { isLoading, isAuthenticated } = useConvexAuth();
+
+  if (isLoading) {
+    return (
+      <div className="oracle-shell">
+        <div className="app-container">
+          <main className="main-area">
+            <div className="chat-feed">Connecting authentication...</div>
+          </main>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="oracle-shell">
+        <div className="app-container">
+          <main className="main-area">
+            <div className="chat-feed">
+              <div className="message ai">
+                <div className="response-container">
+                  <div className="message-meta">Sign In Required</div>
+                  <div className="message-content">
+                    Please sign in to start travel research and save your preferences.
+                  </div>
+                  {hasClerk ? (
+                    <SignInButton mode="modal">
+                      <button className="send-btn" type="button">
+                        [ Sign In ]
+                      </button>
+                    </SignInButton>
+                  ) : (
+                    <div className="message-content">Set Clerk environment keys to enable sign-in.</div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </main>
+        </div>
+      </div>
+    );
+  }
+
+  return <AuthenticatedChat />;
 }

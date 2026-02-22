@@ -73,6 +73,7 @@ export default defineSchema({
     completedAt: v.optional(v.number()),
   })
     .index("by_thread_updatedAt", ["threadId", "updatedAt"])
+    .index("by_user_thread_updatedAt", ["userId", "threadId", "updatedAt"])
     .index("by_status_updatedAt", ["status", "updatedAt"])
     .index("by_promptMessageId", ["promptMessageId"]),
 

@@ -6,6 +6,11 @@ import schema from "./schema";
 import { modules } from "./test.setup";
 
 const DEMO_USER_ID = "demo-user";
+const AUTH_IDENTITY = {
+  tokenIdentifier: DEMO_USER_ID,
+  subject: DEMO_USER_ID,
+  issuer: "https://auth.test",
+};
 
 describe("chat intake flow", () => {
   afterEach(() => {
@@ -14,8 +19,9 @@ describe("chat intake flow", () => {
 
   test("sendPrompt stores awaiting_input job and schedules memory snapshot", async () => {
     vi.useFakeTimers();
-    const t = convexTest(schema, modules);
-    registerAgentComponent(t);
+    const testConvex = convexTest(schema, modules);
+    registerAgentComponent(testConvex);
+    const t = testConvex.withIdentity(AUTH_IDENTITY);
 
     const created = await t.mutation(api.chat.createThread, {});
 
@@ -31,9 +37,7 @@ describe("chat intake flow", () => {
     const latest = await t.query(api.research.getLatestJobForThread, {
       threadId: created.threadId,
     });
-    const memory = await t.query(api.memory.getUserMemory, {
-      userId: DEMO_USER_ID,
-    });
+    const memory = await t.query(api.memory.getUserMemory, {});
 
     expect(sent.researchJobId).toBe(latest?.researchJobId);
     expect(latest?.status).toBe("awaiting_input");
@@ -44,8 +48,9 @@ describe("chat intake flow", () => {
 
   test("sendPrompt resumes an awaiting_input job on follow-up details", async () => {
     vi.useFakeTimers();
-    const t = convexTest(schema, modules);
-    registerAgentComponent(t);
+    const testConvex = convexTest(schema, modules);
+    registerAgentComponent(testConvex);
+    const t = testConvex.withIdentity(AUTH_IDENTITY);
 
     const created = await t.mutation(api.chat.createThread, {});
 

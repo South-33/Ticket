@@ -1,5 +1,12 @@
 import { ConvexError, v } from "convex/values";
-import { query, mutation, internalQuery } from "./_generated/server";
+import {
+  query,
+  mutation,
+  internalMutation,
+  internalQuery,
+  type MutationCtx,
+} from "./_generated/server";
+import { getAuthUserIdOrThrow } from "./auth";
 
 function toMarkdown(args: {
   profile: {
@@ -41,10 +48,47 @@ function toMarkdown(args: {
   return lines.join("\n");
 }
 
+async function persistSnapshotForUser(ctx: MutationCtx, userId: string) {
+  const [profile, facts, snapshots] = await Promise.all([
+    ctx.db.query("userProfiles").withIndex("by_userId", (q) => q.eq("userId", userId)).unique(),
+    ctx.db
+      .query("userMemoryFacts")
+      .withIndex("by_user_status_updatedAt", (q) => q.eq("userId", userId).eq("status", "confirmed"))
+      .order("desc")
+      .take(80),
+    ctx.db
+      .query("userMemorySnapshots")
+      .withIndex("by_user_createdAt", (q) => q.eq("userId", userId))
+      .order("desc")
+      .take(1),
+  ]);
+
+  const markdown = toMarkdown({
+    profile,
+    facts: facts.map((fact) => ({
+      key: fact.key,
+      value: fact.value,
+      status: fact.status,
+      confidence: fact.confidence,
+    })),
+  });
+
+  const version = (snapshots[0]?.version ?? 0) + 1;
+  await ctx.db.insert("userMemorySnapshots", {
+    userId,
+    version,
+    markdown,
+    createdAt: Date.now(),
+  });
+
+  return {
+    version,
+    markdown,
+  };
+}
+
 export const getUserMemory = query({
-  args: {
-    userId: v.string(),
-  },
+  args: {},
   returns: v.object({
     profile: v.union(
       v.null(),
@@ -81,17 +125,18 @@ export const getUserMemory = query({
       }),
     ),
   }),
-  handler: async (ctx, args) => {
+  handler: async (ctx) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
     const [profile, facts, snapshots] = await Promise.all([
-      ctx.db.query("userProfiles").withIndex("by_userId", (q) => q.eq("userId", args.userId)).unique(),
+      ctx.db.query("userProfiles").withIndex("by_userId", (q) => q.eq("userId", userId)).unique(),
       ctx.db
         .query("userMemoryFacts")
-        .withIndex("by_user_status_updatedAt", (q) => q.eq("userId", args.userId).eq("status", "confirmed"))
+        .withIndex("by_user_status_updatedAt", (q) => q.eq("userId", userId).eq("status", "confirmed"))
         .order("desc")
         .take(40),
       ctx.db
         .query("userMemorySnapshots")
-        .withIndex("by_user_createdAt", (q) => q.eq("userId", args.userId))
+        .withIndex("by_user_createdAt", (q) => q.eq("userId", userId))
         .order("desc")
         .take(1),
     ]);
@@ -133,7 +178,6 @@ export const getUserMemory = query({
 
 export const upsertUserProfile = mutation({
   args: {
-    userId: v.string(),
     displayName: v.optional(v.string()),
     homeCity: v.optional(v.string()),
     homeAirport: v.optional(v.string()),
@@ -146,15 +190,16 @@ export const upsertUserProfile = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
     const existing = await ctx.db
       .query("userProfiles")
-      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .withIndex("by_userId", (q) => q.eq("userId", userId))
       .unique();
 
     const now = Date.now();
     if (!existing) {
       await ctx.db.insert("userProfiles", {
-        userId: args.userId,
+        userId,
         displayName: args.displayName,
         homeCity: args.homeCity,
         homeAirport: args.homeAirport,
@@ -188,7 +233,6 @@ export const upsertUserProfile = mutation({
 
 export const upsertUserMemoryFact = mutation({
   args: {
-    userId: v.string(),
     key: v.string(),
     value: v.string(),
     sourceType: v.union(v.literal("user_confirmed"), v.literal("inferred"), v.literal("imported")),
@@ -198,13 +242,14 @@ export const upsertUserMemoryFact = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
     if (args.isSensitive && args.status === "confirmed" && args.sourceType !== "user_confirmed") {
       throw new ConvexError("Sensitive facts must be explicitly user confirmed");
     }
 
     const existing = await ctx.db
       .query("userMemoryFacts")
-      .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", args.key))
+      .withIndex("by_user_key", (q) => q.eq("userId", userId).eq("key", args.key))
       .order("desc")
       .take(1);
 
@@ -212,7 +257,7 @@ export const upsertUserMemoryFact = mutation({
     const fact = existing[0];
     if (!fact) {
       await ctx.db.insert("userMemoryFacts", {
-        userId: args.userId,
+        userId,
         key: args.key,
         value: args.value,
         sourceType: args.sourceType,
@@ -239,15 +284,15 @@ export const upsertUserMemoryFact = mutation({
 
 export const confirmSensitiveFact = mutation({
   args: {
-    userId: v.string(),
     key: v.string(),
     value: v.string(),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
     const fact = await ctx.db
       .query("userMemoryFacts")
-      .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", args.key))
+      .withIndex("by_user_key", (q) => q.eq("userId", userId).eq("key", args.key))
       .order("desc")
       .take(1);
 
@@ -268,6 +313,18 @@ export const confirmSensitiveFact = mutation({
 });
 
 export const generateUserMemorySnapshot = mutation({
+  args: {},
+  returns: v.object({
+    version: v.number(),
+    markdown: v.string(),
+  }),
+  handler: async (ctx) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    return await persistSnapshotForUser(ctx, userId);
+  },
+});
+
+export const generateUserMemorySnapshotInternal = internalMutation({
   args: {
     userId: v.string(),
   },
@@ -276,42 +333,7 @@ export const generateUserMemorySnapshot = mutation({
     markdown: v.string(),
   }),
   handler: async (ctx, args) => {
-    const [profile, facts, snapshots] = await Promise.all([
-      ctx.db.query("userProfiles").withIndex("by_userId", (q) => q.eq("userId", args.userId)).unique(),
-      ctx.db
-        .query("userMemoryFacts")
-        .withIndex("by_user_status_updatedAt", (q) => q.eq("userId", args.userId).eq("status", "confirmed"))
-        .order("desc")
-        .take(80),
-      ctx.db
-        .query("userMemorySnapshots")
-        .withIndex("by_user_createdAt", (q) => q.eq("userId", args.userId))
-        .order("desc")
-        .take(1),
-    ]);
-
-    const markdown = toMarkdown({
-      profile,
-      facts: facts.map((fact) => ({
-        key: fact.key,
-        value: fact.value,
-        status: fact.status,
-        confidence: fact.confidence,
-      })),
-    });
-
-    const version = (snapshots[0]?.version ?? 0) + 1;
-    await ctx.db.insert("userMemorySnapshots", {
-      userId: args.userId,
-      version,
-      markdown,
-      createdAt: Date.now(),
-    });
-
-    return {
-      version,
-      markdown,
-    };
+    return await persistSnapshotForUser(ctx, args.userId);
   },
 });
 

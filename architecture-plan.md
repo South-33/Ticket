@@ -358,7 +358,9 @@ These are important implementation constraints from Convex docs and should be tr
 Locking these now prevents painful refactors later.
 
 - Identity model
-  - Move from demo `userId` to real auth-backed identity before Phase 1 completion
+  - Completed: switched from demo `userId` to auth-backed identity via Clerk + Convex auth integration
+  - Public Convex functions derive user identity from `ctx.auth.getUserIdentity()` and enforce ownership checks
+  - Keep `userId` schema fields provider-agnostic (`string`) to simplify future auth-provider migration
 - Memory confirmation policy
   - Explicit confirmation required for sensitive facts
 - Job retry policy

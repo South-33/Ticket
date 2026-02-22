@@ -26,6 +26,7 @@ import {
   summarizeConstraints,
 } from "./researchIntake";
 import { buildRankedResultsFromCandidates } from "./researchRanking";
+import { getAuthUserIdOrThrow } from "./auth";
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "expired"]);
 const MAX_PAGE_SIZE = 50;
@@ -107,6 +108,29 @@ function classifyResearchError(error: unknown): { code: ResearchErrorCode; retry
 function computeRetryDelayMs(attempt: number) {
   const idx = Math.max(0, Math.min(RETRY_BACKOFF_MS.length - 1, attempt - 1));
   return RETRY_BACKOFF_MS[idx];
+}
+
+async function getOwnedJobOrThrow(
+  ctx: {
+    db: {
+      get: (id: Id<"researchJobs">) => Promise<{
+        _id: Id<"researchJobs">;
+        userId: string;
+        status: string;
+      } | null>;
+    };
+  },
+  researchJobId: Id<"researchJobs">,
+  userId: string,
+) {
+  const job = await ctx.db.get(researchJobId);
+  if (!job) {
+    throw new ConvexError("Research job not found");
+  }
+  if (job.userId !== userId) {
+    throw new ConvexError("Not authorized");
+  }
+  return job;
 }
 
 function summarizeExtractedContent(value: string | undefined) {
@@ -751,9 +775,10 @@ export const getLatestJobForThread = query({
     }),
   ),
   handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
     const jobs = await ctx.db
       .query("researchJobs")
-      .withIndex("by_thread_updatedAt", (q) => q.eq("threadId", args.threadId))
+      .withIndex("by_user_thread_updatedAt", (q) => q.eq("userId", userId).eq("threadId", args.threadId))
       .order("desc")
       .take(8);
 
@@ -874,11 +899,12 @@ export const listJobsByThread = query({
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
     assertPageSize(args.paginationOpts.numItems);
 
     const result = await ctx.db
       .query("researchJobs")
-      .withIndex("by_thread_updatedAt", (q) => q.eq("threadId", args.threadId))
+      .withIndex("by_user_thread_updatedAt", (q) => q.eq("userId", userId).eq("threadId", args.threadId))
       .order("desc")
       .paginate(args.paginationOpts);
 
@@ -904,6 +930,8 @@ export const listSourcesByJob = query({
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    await getOwnedJobOrThrow(ctx, args.researchJobId, userId);
     assertPageSize(args.paginationOpts.numItems);
 
     const result = await ctx.db
@@ -932,6 +960,8 @@ export const listCandidatesByJob = query({
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    await getOwnedJobOrThrow(ctx, args.researchJobId, userId);
     assertPageSize(args.paginationOpts.numItems);
 
     const result = await ctx.db
@@ -971,6 +1001,8 @@ export const listTasksByJob = query({
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    await getOwnedJobOrThrow(ctx, args.researchJobId, userId);
     assertPageSize(args.paginationOpts.numItems);
 
     const result = await ctx.db
@@ -1001,6 +1033,8 @@ export const listFindingsByJob = query({
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    await getOwnedJobOrThrow(ctx, args.researchJobId, userId);
     assertPageSize(args.paginationOpts.numItems);
 
     const result = await ctx.db
@@ -1028,6 +1062,8 @@ export const listRankedResultsByJob = query({
     paginationOpts: paginationOptsValidator,
   },
   handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    await getOwnedJobOrThrow(ctx, args.researchJobId, userId);
     assertPageSize(args.paginationOpts.numItems);
 
     const result = await ctx.db
@@ -1062,10 +1098,8 @@ export const requestLiveRecheck = mutation({
     status: v.string(),
   }),
   handler: async (ctx, args) => {
-    const job = await ctx.db.get(args.researchJobId);
-    if (!job) {
-      throw new ConvexError("Research job not found");
-    }
+    const userId = await getAuthUserIdOrThrow(ctx);
+    const job = await getOwnedJobOrThrow(ctx, args.researchJobId, userId);
 
     if (job.status === "awaiting_input") {
       return { scheduled: false, status: job.status };

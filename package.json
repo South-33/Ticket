@@ -16,6 +16,7 @@
   "dependencies": {
     "@ai-sdk/google": "^2.0.54",
     "@ai-sdk/provider-utils": "3.0.21",
+    "@clerk/nextjs": "^6.38.1",
     "@convex-dev/agent": "^0.3.2",
     "@phosphor-icons/react": "^2.1.10",
     "ai": "^5.0.137",
