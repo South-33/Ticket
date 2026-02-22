@@ -13,6 +13,7 @@
 
   --input-side-fade-color: var(--bg-color);
   --input-side-fade-size: 5rem;
+  --research-dock-height: 18rem;
 
   --transition-slow: 0.8s cubic-bezier(0.16, 1, 0.3, 1);
   --transition-fast: 0.3s cubic-bezier(0.16, 1, 0.3, 1);
@@ -618,6 +619,26 @@ body.resizing-sidebar * {
   position: relative;
 }
 
+.chat-feed.with-research-dock {
+  padding-top: calc(4rem + var(--research-dock-height) + 1.25rem);
+}
+
+.research-status-dock {
+  position: fixed;
+  top: 5.3rem;
+  left: 320px;
+  right: 0;
+  padding: 0 3rem;
+  z-index: 82;
+  pointer-events: none;
+}
+
+.research-status-shell {
+  display: grid;
+  grid-template-columns: 1fr 800px 1fr;
+  gap: 4rem;
+}
+
 .research-status {
   grid-column: 2;
   border: 1px solid var(--border-color);
@@ -627,6 +648,9 @@ body.resizing-sidebar * {
   margin-left: auto;
   margin-right: auto;
   width: 100%;
+  max-height: var(--research-dock-height);
+  overflow-y: auto;
+  pointer-events: auto;
 }
 
 .research-status-head,
@@ -902,21 +926,6 @@ body.resizing-sidebar * {
   margin: 0 auto;
   width: 100%;
   position: relative;
-  opacity: 0;
-  transform: translateY(20px);
-  animation: slideUpFade 0.6s var(--transition-slow) forwards;
-}
-
-@keyframes slideUpFade {
-  from {
-    opacity: 0;
-    transform: translateY(20px);
-  }
-
-  to {
-    opacity: 1;
-    transform: none;
-  }
 }
 
 .message-meta {
@@ -995,8 +1004,10 @@ body.resizing-sidebar * {
 .message.ai .message-meta::before {
   content: "";
   width: 20px;
-  height: 1px;
-  background: var(--text-primary);
+  height: 2px;
+  background: currentColor;
+  opacity: 0.78;
+  border-radius: 999px;
 }
 
 .message.ai .message-meta {
@@ -1111,8 +1122,10 @@ body.resizing-sidebar * {
 .reasoning-summary::before {
   content: "";
   width: 20px;
-  height: 1px;
-  background: var(--text-primary);
+  height: 2px;
+  background: currentColor;
+  opacity: 0.78;
+  border-radius: 999px;
   flex-shrink: 0;
 }
 
@@ -1361,6 +1374,12 @@ textarea::placeholder {
     padding-right: 2rem;
   }
 
+  .research-status-dock {
+    left: 280px;
+    padding-left: 2rem;
+    padding-right: 2rem;
+  }
+
 }
 
 @media (max-width: 760px) {
@@ -1424,6 +1443,27 @@ textarea::placeholder {
   .chat-feed {
     padding: 1.5rem 1rem;
     gap: 1.5rem;
+  }
+
+  .chat-feed.with-research-dock {
+    padding-top: 1.5rem;
+  }
+
+  .research-status-dock {
+    position: static;
+    left: auto;
+    right: auto;
+    top: auto;
+    padding: 0 1rem;
+    margin-top: 0.5rem;
+  }
+
+  .research-status-shell {
+    display: block;
+  }
+
+  .research-status {
+    max-height: none;
   }
 
   .message {
