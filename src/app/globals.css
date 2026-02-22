@@ -12,7 +12,7 @@
   --font-mono: "JetBrains Mono", monospace;
 
   --input-side-fade-color: var(--bg-color);
-  --input-side-fade-size: 6rem;
+  --input-side-fade-size: 5.4rem;
 
   --transition-slow: 0.8s cubic-bezier(0.16, 1, 0.3, 1);
   --transition-fast: 0.3s cubic-bezier(0.16, 1, 0.3, 1);
@@ -28,6 +28,7 @@ html,
 body {
   width: 100%;
   min-height: 100%;
+  scrollbar-gutter: stable;
 }
 
 body {
@@ -35,9 +36,18 @@ body {
   color: var(--text-primary);
   font-family: var(--font-mono);
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: scroll;
+  --scrollbar-track-alpha: 0;
+  --scrollbar-thumb-alpha: 0.7;
+  --scrollbar-thumb-hover-alpha: 0.9;
   display: flex;
   position: relative;
+}
+
+body.chat-switching {
+  --scrollbar-track-alpha: 0;
+  --scrollbar-thumb-alpha: 0;
+  --scrollbar-thumb-hover-alpha: 0;
 }
 
 ::selection {
@@ -268,12 +278,13 @@ body.resizing-sidebar * {
   text-align: left;
   text-decoration: none;
   color: var(--text-secondary);
+  opacity: 0.5;
   font-family: var(--font-mono);
   font-size: 0.84rem;
   padding: 0.5rem 2.5rem 0.5rem 1.4rem;
   margin: 0.2rem 0;
   border-radius: 0;
-  transition: var(--transition-fast);
+  transition: color var(--transition-slow), opacity var(--transition-slow);
   position: relative;
   white-space: nowrap;
   overflow: hidden;
@@ -289,6 +300,7 @@ body.resizing-sidebar * {
 
 .history-link:hover {
   color: var(--text-primary);
+  opacity: 0.8;
 }
 
 .history-link::after {
@@ -300,7 +312,7 @@ body.resizing-sidebar * {
   width: 2px;
   height: 0;
   background: var(--text-primary);
-  transition: var(--transition-fast);
+  transition: var(--transition-slow);
 }
 
 .history-link:hover::after,
@@ -312,8 +324,7 @@ body.resizing-sidebar * {
 
 .history-link.active {
   color: var(--text-primary);
-  font-weight: 700;
-  font-size: 0.92rem;
+  opacity: 1;
 }
 
 .history-link.placeholder {
@@ -424,17 +435,19 @@ body.resizing-sidebar * {
 }
 
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: rgba(0, 0, 0, var(--scrollbar-track-alpha));
+  transition: background-color 350ms ease;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, var(--scrollbar-thumb-alpha));
   border-radius: 20px;
   border: 2px solid var(--bg-color);
+  transition: background-color 350ms ease;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 0, 0, 0.9);
+  background: rgba(0, 0, 0, var(--scrollbar-thumb-hover-alpha));
 }
 
 .chat-feed.fading-out {
@@ -475,6 +488,10 @@ body.resizing-sidebar * {
 
 .message-content {
   line-height: 1.6;
+}
+
+.streaming-text {
+  white-space: pre-wrap;
 }
 
 .message.user {
@@ -591,47 +608,94 @@ body.resizing-sidebar * {
 
 .reasoning-block {
   border: none;
-  border-top: 1px solid var(--text-primary);
-  padding: 0.5rem 0 0.5rem 0;
+  padding: 0.2rem 0 0.5rem 0;
   margin: 0.2rem 0 1.1rem 0;
   background: transparent;
-  opacity: 0.6;
+  opacity: 0.84;
   transition: opacity var(--transition-fast);
 }
 
 .reasoning-block.open {
-  opacity: 0.7;
+  opacity: 0.92;
 }
 
 .reasoning-accordion {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows var(--transition-slow);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: grid-template-rows var(--transition-slow), opacity 220ms ease, transform 220ms ease;
 }
 
 .reasoning-accordion.open {
   grid-template-rows: 1fr;
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .reasoning-block:hover,
 .reasoning-block:focus-within {
-  opacity: 0.9;
+  opacity: 0.98;
 }
 
 .reasoning-summary {
   background: transparent;
   border: none;
   cursor: pointer;
-  font-size: 0.62rem;
+  font-size: 0.65rem;
   text-transform: uppercase;
-  letter-spacing: 0.14em;
-  color: var(--text-secondary);
+  letter-spacing: 0.1em;
+  color: var(--text-primary);
+  opacity: 0.92;
   padding: 0;
   margin: 0;
   text-align: left;
   font-family: var(--font-mono);
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  line-height: 1;
   width: 100%;
+}
+
+.reasoning-summary::before {
+  content: "";
+  width: 20px;
+  height: 1px;
+  background: var(--text-primary);
+  flex-shrink: 0;
+}
+
+.reasoning-points-shell {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(-4px);
+  margin: 0;
+  transition: max-height 260ms ease, opacity 220ms ease, transform 220ms ease, margin 220ms ease;
+}
+
+.reasoning-points-shell.visible {
+  max-height: 12rem;
+  opacity: 1;
+  transform: translateY(0);
+  margin: 0.65rem 0 0.15rem;
+}
+
+.reasoning-points {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.3rem;
+  list-style: square;
+}
+
+.reasoning-points li {
+  color: var(--text-primary);
+  opacity: 0.95;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.45;
 }
 
 .reasoning-content-wrapper {
@@ -669,6 +733,12 @@ body.resizing-sidebar * {
   vertical-align: text-bottom;
   margin-left: 4px;
   animation: blink 1s step-end infinite;
+}
+
+.reasoning-cursor {
+  width: 6px;
+  height: 1.1em;
+  margin-left: 3px;
 }
 
 @keyframes blink {
@@ -720,13 +790,10 @@ body.resizing-sidebar * {
   content: "";
   position: absolute;
   bottom: -3rem;
-  left: calc(-1 * var(--input-side-fade-size));
-  right: calc(-1 * var(--input-side-fade-size));
+  left: -2rem;
+  right: -2rem;
   height: 12rem;
-  background:
-    linear-gradient(to bottom, transparent, var(--bg-color) 50%, var(--bg-color) 100%),
-    linear-gradient(to left, transparent, var(--input-side-fade-color)) left / var(--input-side-fade-size) 100% no-repeat,
-    linear-gradient(to right, transparent, var(--input-side-fade-color)) right / var(--input-side-fade-size) 100% no-repeat;
+  background: linear-gradient(to bottom, transparent, var(--bg-color) 50%, var(--bg-color) 100%);
   z-index: 0;
   pointer-events: none;
 }
@@ -751,6 +818,25 @@ body.resizing-sidebar * {
   margin-bottom: 2px;
   color: var(--text-primary);
   font-weight: 700;
+}
+
+.input-side-fade {
+  position: absolute;
+  bottom: -3rem;
+  width: var(--input-side-fade-size);
+  height: 12rem;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.input-side-fade-left {
+  left: calc(-1 * var(--input-side-fade-size));
+  background: linear-gradient(to right, transparent, var(--input-side-fade-color));
+}
+
+.input-side-fade-right {
+  right: calc(-1 * var(--input-side-fade-size));
+  background: linear-gradient(to right, var(--input-side-fade-color), transparent);
 }
 
 textarea {

@@ -44,13 +44,64 @@ function getReasoningText(message: UIMessage) {
     .trim();
 }
 
+function getReasoningKeyPoints(reasoning: string) {
+  const cleaned = reasoning.replace(/\r\n/g, "\n").trim();
+  if (!cleaned) {
+    return [] as string[];
+  }
+
+  const blocks = cleaned.split(/\n\s*\n+/);
+  const points: string[] = [];
+
+  for (const block of blocks) {
+    const firstLine = block.split("\n")[0]?.trim();
+    if (!firstLine) {
+      continue;
+    }
+
+    let point = "";
+    const markdownHeading = firstLine.match(/^#{1,6}\s+(.+)$/);
+    const boldHeading = firstLine.match(/^\*\*(.+)\*\*$/);
+
+    if (markdownHeading) {
+      point = markdownHeading[1].trim();
+    } else if (boldHeading) {
+      point = boldHeading[1].trim();
+    } else if (firstLine.length <= 90 && !/[.!?:;]$/.test(firstLine)) {
+      point = firstLine;
+    }
+
+    if (!point) {
+      continue;
+    }
+
+    if (!points.includes(point)) {
+      points.push(point);
+    }
+    if (points.length >= 5) {
+      break;
+    }
+  }
+
+  return points;
+}
+
 function Message({ message, index }: { message: UIMessage; index: number }) {
+  const reasoning = getReasoningText(message);
   const [visibleText, smoothTextState] = useSmoothText(message.text ?? "", {
-    charsPerSec: 44,
     startStreaming: message.status === "streaming",
   });
-  const [isReasoningOpen, setIsReasoningOpen] = useState(true);
-  const isReasoningExpanded = message.status === "streaming" || isReasoningOpen;
+  const [visibleReasoning, smoothReasoningState] = useSmoothText(reasoning, {
+    startStreaming: message.status === "streaming",
+  });
+  const [isReasoningOpen, setIsReasoningOpen] = useState(false);
+  const isReasoningExpanded = isReasoningOpen;
+  const isReasoningTypewriterActive = message.status === "streaming" || smoothReasoningState.isStreaming;
+  const displayReasoning = isReasoningTypewriterActive ? visibleReasoning : reasoning;
+  const reasoningKeyPoints = useMemo(
+    () => getReasoningKeyPoints(displayReasoning),
+    [displayReasoning],
+  );
 
   if (message.role === "system") {
     return null;
@@ -67,18 +118,17 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
     );
   }
 
-  const reasoning = getReasoningText(message);
   const safetyFallback = message.status === "failed" && !(message.text ?? "").trim();
   const displayText = safetyFallback ? "Response blocked by safety policies." : visibleText;
   const isTypewriterActive = message.status === "streaming" || smoothTextState.isStreaming;
 
-  if (!displayText.trim() && !reasoning && !isTypewriterActive) {
+  if (!displayText.trim() && !displayReasoning.trim() && !isTypewriterActive && !isReasoningTypewriterActive) {
     return null;
   }
 
   return (
     <div className="message ai" style={{ animationDelay: `${Math.min(index * 0.08, 0.6)}s` }}>
-      {reasoning && (
+      {(displayReasoning || isReasoningTypewriterActive) && (
         <div className="reasoning-container">
           <div className={clsx("reasoning-block", isReasoningExpanded && "open")}>
             <button
@@ -88,10 +138,26 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
             >
               Synthesis Process
             </button>
+            <div className={clsx("reasoning-points-shell", !isReasoningExpanded && "visible")}>
+              {reasoningKeyPoints.length > 0 && (
+                <ul className="reasoning-points">
+                  {reasoningKeyPoints.map((point) => (
+                    <li key={point}>{point}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
             <div className={clsx("reasoning-accordion", isReasoningExpanded && "open")}>
               <div className="reasoning-content-wrapper">
                 <div className="message-content reasoning-content">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{reasoning}</ReactMarkdown>
+                  {isReasoningTypewriterActive ? (
+                    <>
+                      <span className="streaming-text">{displayReasoning}</span>
+                      <span className="typewriter-cursor reasoning-cursor" />
+                    </>
+                  ) : (
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayReasoning.trim()}</ReactMarkdown>
+                  )}
                 </div>
               </div>
             </div>
@@ -105,8 +171,14 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
         </div>
         {(displayText || isTypewriterActive) && (
           <div className="message-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText.trim()}</ReactMarkdown>
-            {isTypewriterActive && <span className="typewriter-cursor" />}
+            {isTypewriterActive ? (
+              <>
+                <span className="streaming-text">{displayText}</span>
+                <span className="typewriter-cursor" />
+              </>
+            ) : (
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText.trim()}</ReactMarkdown>
+            )}
           </div>
         )}
       </div>
@@ -197,6 +269,13 @@ export function Chat() {
     (message) => message.role === "assistant" && message.status === "streaming",
   );
   const showIntro = visibleMessages.length === 0 && !isStreaming;
+
+  useEffect(() => {
+    document.body.classList.toggle("chat-switching", isFadingOut);
+    return () => {
+      document.body.classList.remove("chat-switching");
+    };
+  }, [isFadingOut]);
 
   // Fade back in once the target thread's messages have loaded
   useEffect(() => {
@@ -444,6 +523,8 @@ export function Chat() {
             <div className="input-grid">
               <form className="input-container" onSubmit={(event) => void handleSend(event)}>
                 <span className="input-prefix">_&gt;</span>
+                <span className="input-side-fade input-side-fade-left" aria-hidden />
+                <span className="input-side-fade input-side-fade-right" aria-hidden />
 
                 <textarea
                   id="userInput"
