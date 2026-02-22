@@ -18,6 +18,7 @@ import {
   normalizeTitle,
   toPreview,
 } from "./agent";
+import { createResearchJobForPrompt } from "./research";
 import { components, internal } from "./_generated/api";
 import {
   internalAction,
@@ -477,13 +478,20 @@ export const sendPrompt = mutation({
       lastMessageAt: Date.now(),
     });
 
+    const { researchJobId } = await createResearchJobForPrompt(ctx, {
+      userId: DEMO_USER_ID,
+      threadId: args.threadId,
+      promptMessageId: messageId,
+      prompt,
+    });
+
     await ctx.scheduler.runAfter(0, internal.chat.generateReplyInternal, {
       threadId: args.threadId,
       promptMessageId: messageId,
       prompt,
     });
 
-    return { promptMessageId: messageId };
+    return { promptMessageId: messageId, researchJobId };
   },
 });
 

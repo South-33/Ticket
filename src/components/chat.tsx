@@ -39,6 +39,31 @@ const PLACEHOLDER_HISTORY = [
   "Baggage and Fare Rule Audit",
 ];
 
+const TERMINAL_RESEARCH_STATUSES = new Set(["completed", "failed", "cancelled", "expired"]);
+
+function toResearchStatusLabel(status: string) {
+  switch (status) {
+    case "completed":
+      return "Completed";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+    case "verifying":
+      return "Verifying";
+    case "synthesizing":
+      return "Synthesizing";
+    case "running":
+      return "Running";
+    case "planned":
+      return "Planned";
+    case "awaiting_input":
+      return "Awaiting Input";
+    default:
+      return "Queued";
+  }
+}
+
 function getReasoningText(message: UIMessage) {
   return message.parts
     .filter((part) => part.type === "reasoning")
@@ -262,6 +287,10 @@ export function Chat() {
     activeThreadIdForMessages ? { threadId: activeThreadIdForMessages } : "skip",
     { initialNumItems: 40, stream: true },
   );
+  const latestResearchJob = useQuery(
+    api.research.getLatestJobForThread,
+    activeThreadIdForMessages ? { threadId: activeThreadIdForMessages } : "skip",
+  );
 
   const visibleMessages = useMemo(
     () => (isComposingNew || !activeThreadIdForMessages ? [] : messageFeed.results),
@@ -272,6 +301,7 @@ export function Chat() {
     (message) => message.role === "assistant" && message.status === "streaming",
   );
   const showIntro = visibleMessages.length === 0 && !isStreaming;
+  const isResearchActive = !!latestResearchJob && !TERMINAL_RESEARCH_STATUSES.has(latestResearchJob.status);
 
   useEffect(() => {
     document.body.classList.toggle("chat-switching", isFadingOut);
@@ -504,6 +534,46 @@ export function Chat() {
 
 
           <div className={clsx("chat-feed", isFadingOut && "fading-out")} id="chatFeed" ref={feedRef} onScroll={handleFeedScroll}>
+            {latestResearchJob && (
+              <section className="research-status" aria-live="polite">
+                <div className="research-status-head">
+                  <span>Research Pipeline</span>
+                  <span>{latestResearchJob.stage}</span>
+                </div>
+                <div className="research-status-progress-track">
+                  <div
+                    className="research-status-progress-fill"
+                    style={{ width: `${Math.min(100, Math.max(0, latestResearchJob.progress))}%` }}
+                  />
+                </div>
+                <div className="research-status-meta">
+                  <span>{toResearchStatusLabel(latestResearchJob.status)}</span>
+                  <span>{latestResearchJob.progress}%</span>
+                </div>
+                {latestResearchJob.error && (
+                  <p className="research-status-error">{latestResearchJob.error}</p>
+                )}
+                {latestResearchJob.tasks.length > 0 && (
+                  <ul className="research-status-tasks">
+                    {latestResearchJob.tasks.map((task) => (
+                      <li key={task.key} className={clsx("research-status-task", `status-${task.status}`)}>
+                        <span>{task.label}</span>
+                        <span>{toResearchStatusLabel(task.status)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {!isResearchActive && latestResearchJob.findings.length > 0 && (
+                  <div className="research-status-findings">
+                    {latestResearchJob.findings.map((finding) => (
+                      <p key={`${finding.title}-${finding.createdAt}`}>
+                        <strong>{finding.title}:</strong> {finding.summary}
+                      </p>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
             {showIntro ? (
               <>
                 <div className="message user" style={{ animationDelay: "0.5s" }}>
