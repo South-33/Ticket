@@ -18,7 +18,7 @@ import {
   normalizeTitle,
   toPreview,
 } from "./agent";
-import { createResearchJobForPrompt } from "./research";
+import { continueAwaitingJobForPrompt, createResearchJobForPrompt } from "./research";
 import { api, components, internal } from "./_generated/api";
 import {
   internalAction,
@@ -478,12 +478,21 @@ export const sendPrompt = mutation({
       lastMessageAt: Date.now(),
     });
 
-    const research = await createResearchJobForPrompt(ctx, {
+    const resumed = await continueAwaitingJobForPrompt(ctx, {
       userId: DEMO_USER_ID,
       threadId: args.threadId,
       promptMessageId: messageId,
       prompt,
     });
+
+    const research =
+      resumed ??
+      (await createResearchJobForPrompt(ctx, {
+        userId: DEMO_USER_ID,
+        threadId: args.threadId,
+        promptMessageId: messageId,
+        prompt,
+      }));
 
     if (research.jobStatus === "awaiting_input") {
       const followUpMessage =

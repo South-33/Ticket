@@ -1,9 +1,9 @@
 import { convexTest } from "convex-test";
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
-import { createResearchJobForPrompt } from "./research";
+import { continueAwaitingJobForPrompt, createResearchJobForPrompt } from "./research";
 import schema from "./schema";
 import { modules } from "./test.setup";
 
@@ -105,6 +105,10 @@ async function seedJob(
 }
 
 describe("research pipeline", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   test("returns null for threads without jobs", async () => {
     const t = convexTest(schema, modules);
 
@@ -197,6 +201,9 @@ describe("research pipeline", () => {
       expect(latest?.sources[0]?.provider).toBe("tavily");
       expect(latest?.candidates).toHaveLength(3);
       expect(latest?.rankedResults).toHaveLength(3);
+      expect(latest?.candidates[0]?.estimatedTotalUsd).toBeGreaterThan(0);
+      expect(latest?.candidates[0]?.recheckAfter).toBeGreaterThan(0);
+      expect(latest?.rankedResults[0]?.recheckAfter).toBeGreaterThan(0);
       expect(
         latest?.findings.some(
           (finding: { title: string }) => finding.title === "Content extraction pass completed",
@@ -366,6 +373,70 @@ describe("research pipeline", () => {
     expect(latest?.status).toBe("awaiting_input");
     expect(latest?.followUpQuestion).toBeTruthy();
     expect(latest?.missingFields?.length).toBeGreaterThan(0);
+  });
+
+  test("continues awaiting_input job and auto-resumes when slots are provided", async () => {
+    vi.useFakeTimers();
+    const t = convexTest(schema, modules);
+
+    const created = await t.run(async (ctx) => {
+      return await createResearchJobForPrompt(ctx as unknown as MutationCtx, {
+        userId: DEMO_USER_ID,
+        threadId: "thread-resume",
+        promptMessageId: "pm-resume-1",
+        prompt: "I want a flight to Frankfurt",
+      });
+    });
+
+    const continued = await t.run(async (ctx) => {
+      return await continueAwaitingJobForPrompt(ctx as unknown as MutationCtx, {
+        userId: DEMO_USER_ID,
+        threadId: "thread-resume",
+        promptMessageId: "pm-resume-2",
+        prompt: "From Manila to Frankfurt on 2026-08-11 budget 900 nationality is Filipino",
+      });
+    });
+
+    const latest = await t.query(api.research.getLatestJobForThread, {
+      threadId: "thread-resume",
+    });
+
+    expect(continued).not.toBeNull();
+    expect(continued?.researchJobId).toBe(created.researchJobId);
+    expect(continued?.jobStatus).toBe("planned");
+    expect(continued?.missingFields).toHaveLength(0);
+    expect(latest?.status).toBe("planned");
+    expect(latest?.missingFields).toHaveLength(0);
+  });
+
+  test("allows manual recheck scheduling for terminal jobs", async () => {
+    vi.useFakeTimers();
+    const t = convexTest(schema, modules);
+    const researchJobId = await seedJob(t, {
+      threadId: "thread-manual-recheck",
+      status: "completed",
+      withTasks: true,
+    });
+
+    const requested = await t.mutation(api.research.requestLiveRecheck, {
+      researchJobId,
+    });
+
+    const jobState = await t.run(async (ctx) => {
+      const job = await ctx.db.get("researchJobs", researchJobId);
+      const tasks = await ctx.db
+        .query("researchTasks")
+        .withIndex("by_job_order", (q) => q.eq("jobId", researchJobId))
+        .order("asc")
+        .take(10);
+      return { job, tasks };
+    });
+
+    expect(requested.scheduled).toBe(true);
+    expect(requested.status).toBe("planned");
+    expect(jobState.job?.status).toBe("planned");
+    expect(jobState.job?.stage).toBe("Manual live recheck queued");
+    expect(jobState.tasks.every((task) => task.status === "queued")).toBe(true);
   });
 
   test("paginates jobs and enforces page-size limits", async () => {

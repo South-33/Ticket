@@ -5,6 +5,7 @@ import {
   internalAction,
   internalMutation,
   internalQuery,
+  mutation,
   query,
   type MutationCtx,
 } from "./_generated/server";
@@ -21,6 +22,7 @@ import {
   extractSlotsFromPrompt,
   mergeSlots,
   missingSlots,
+  requiredSlotsForDomain,
   summarizeConstraints,
 } from "./researchIntake";
 import { buildRankedResultsFromCandidates } from "./researchRanking";
@@ -38,6 +40,15 @@ type CandidateDraft = {
   summary: string;
   confidence: number;
   verificationStatus: "needs_live_check" | "partially_verified" | "verified";
+  estimatedTotalUsd: number;
+  travelMinutes: number;
+  transferCount: number;
+  flexibilityScore: number;
+  baggageScore: number;
+  bookingEaseScore: number;
+  freshnessScore: number;
+  verifiedAt?: number;
+  recheckAfter: number;
   primarySourceUrl?: string;
   sourceUrls: string[];
 };
@@ -49,6 +60,13 @@ type ResearchErrorCode =
   | "task_missing"
   | "goal_missing"
   | "unknown_error";
+
+const SENSITIVE_SLOT_KEYS = new Set(["nationality", "ageBand"]);
+const VERIFICATION_WINDOW_MS = {
+  verified: 6 * 60 * 60 * 1000,
+  partially_verified: 2 * 60 * 60 * 1000,
+  needs_live_check: 0,
+} as const;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -130,13 +148,56 @@ function createSynthesisSummary(sources: { title: string; url: string }[]) {
   return `Collected ${sources.length} web leads. Strongest early leads: ${labels.join("; ")}. All prices still require live verification before booking.`;
 }
 
-function buildCandidateDrafts(goal: { prompt: string; domain: string }, sources: { title: string; url: string }[]): CandidateDraft[] {
+function isSensitiveSlot(key: string) {
+  return SENSITIVE_SLOT_KEYS.has(key);
+}
+
+function verificationTimestamps(
+  status: CandidateDraft["verificationStatus"],
+  now: number,
+): Pick<CandidateDraft, "verifiedAt" | "recheckAfter"> {
+  if (status === "needs_live_check") {
+    return {
+      verifiedAt: undefined,
+      recheckAfter: now,
+    };
+  }
+
+  return {
+    verifiedAt: now,
+    recheckAfter: now + VERIFICATION_WINDOW_MS[status],
+  };
+}
+
+function extractBudgetCeiling(text: string) {
+  const budgetMatch = text.match(/(?:budget|max|under|below|<=?)\s*\$?\s*(\d{2,5})/i);
+  if (budgetMatch) {
+    return Number(budgetMatch[1]);
+  }
+
+  const dollarMatch = text.match(/\$\s*(\d{2,5})/);
+  if (dollarMatch) {
+    return Number(dollarMatch[1]);
+  }
+
+  return undefined;
+}
+
+function buildCandidateDrafts(
+  goal: { prompt: string; domain: string; constraintSummary?: string },
+  sources: { title: string; url: string }[],
+): CandidateDraft[] {
+  const now = Date.now();
   const top = sources.slice(0, 4);
   const sourceUrls = top.map((source) => source.url);
   const primary = sourceUrls[0];
   const routeHint = goal.domain === "flight" ? "route and airport alternatives" : "option alternatives";
+  const budget = extractBudgetCeiling(`${goal.prompt} ${goal.constraintSummary ?? ""}`);
+  const baselineBudget = budget ?? (goal.domain === "flight" ? 780 : 460);
+  const freshnessFromSources = Math.max(0.2, Math.min(0.95, 0.35 + top.length * 0.12));
 
   if (top.length === 0) {
+    const pending = verificationTimestamps("needs_live_check", now);
     return [
       {
         category: "cheapest",
@@ -145,6 +206,15 @@ function buildCandidateDrafts(goal: { prompt: string; domain: string }, sources:
           "No reliable live source links were captured in this run. Re-run search or broaden query constraints before presenting a bookable cheapest option.",
         confidence: 0.25,
         verificationStatus: "needs_live_check",
+        estimatedTotalUsd: Math.round(baselineBudget * 0.96),
+        travelMinutes: goal.domain === "flight" ? 760 : 340,
+        transferCount: 2,
+        flexibilityScore: 0.4,
+        baggageScore: 0.3,
+        bookingEaseScore: 0.35,
+        freshnessScore: 0.2,
+        verifiedAt: pending.verifiedAt,
+        recheckAfter: pending.recheckAfter,
         sourceUrls: [],
       },
       {
@@ -154,6 +224,15 @@ function buildCandidateDrafts(goal: { prompt: string; domain: string }, sources:
           "Value recommendation is blocked until at least one credible source is available for comparison across total cost and tradeoffs.",
         confidence: 0.22,
         verificationStatus: "needs_live_check",
+        estimatedTotalUsd: Math.round(baselineBudget * 1.06),
+        travelMinutes: goal.domain === "flight" ? 690 : 300,
+        transferCount: 1,
+        flexibilityScore: 0.5,
+        baggageScore: 0.45,
+        bookingEaseScore: 0.45,
+        freshnessScore: 0.2,
+        verifiedAt: pending.verifiedAt,
+        recheckAfter: pending.recheckAfter,
         sourceUrls: [],
       },
       {
@@ -163,10 +242,23 @@ function buildCandidateDrafts(goal: { prompt: string; domain: string }, sources:
           "Convenience recommendation needs validated timing and transfer details from live sources before ranking can be trusted.",
         confidence: 0.2,
         verificationStatus: "needs_live_check",
+        estimatedTotalUsd: Math.round(baselineBudget * 1.14),
+        travelMinutes: goal.domain === "flight" ? 540 : 230,
+        transferCount: 0,
+        flexibilityScore: 0.44,
+        baggageScore: 0.5,
+        bookingEaseScore: 0.55,
+        freshnessScore: 0.2,
+        verifiedAt: pending.verifiedAt,
+        recheckAfter: pending.recheckAfter,
         sourceUrls: [],
       },
     ];
   }
+
+  const cheapestVerification = verificationTimestamps("needs_live_check", now);
+  const valueVerification = verificationTimestamps("partially_verified", now);
+  const convenientVerification = verificationTimestamps("needs_live_check", now);
 
   return [
     {
@@ -174,31 +266,103 @@ function buildCandidateDrafts(goal: { prompt: string; domain: string }, sources:
       title: "Cheapest Candidate (Web Lead)",
       summary:
         "Prioritize the strongest low-cost source first, then verify total payable amount including fees and baggage before booking.",
-      confidence: 0.58,
-      verificationStatus: "needs_live_check",
-      primarySourceUrl: primary,
-      sourceUrls,
-    },
+        confidence: 0.58,
+        verificationStatus: "needs_live_check",
+        estimatedTotalUsd: Math.round(baselineBudget * 0.9),
+        travelMinutes: goal.domain === "flight" ? 680 : 300,
+        transferCount: goal.domain === "flight" ? 2 : 1,
+        flexibilityScore: 0.46,
+        baggageScore: 0.42,
+        bookingEaseScore: 0.52,
+        freshnessScore: freshnessFromSources,
+        verifiedAt: cheapestVerification.verifiedAt,
+        recheckAfter: cheapestVerification.recheckAfter,
+        primarySourceUrl: primary,
+        sourceUrls,
+      },
     {
       category: "best_value",
       title: "Best Value Candidate (Balanced)",
       summary: `Balance total price against ${routeHint}, transfer burden, and policy flexibility using the top ranked source set.`,
-      confidence: 0.62,
-      verificationStatus: "partially_verified",
-      primarySourceUrl: sourceUrls[1] ?? primary,
-      sourceUrls,
-    },
+        confidence: 0.62,
+        verificationStatus: "partially_verified",
+        estimatedTotalUsd: Math.round(baselineBudget * 1.02),
+        travelMinutes: goal.domain === "flight" ? 590 : 260,
+        transferCount: 1,
+        flexibilityScore: 0.72,
+        baggageScore: 0.66,
+        bookingEaseScore: 0.64,
+        freshnessScore: Math.min(1, freshnessFromSources + 0.05),
+        verifiedAt: valueVerification.verifiedAt,
+        recheckAfter: valueVerification.recheckAfter,
+        primarySourceUrl: sourceUrls[1] ?? primary,
+        sourceUrls,
+      },
     {
       category: "most_convenient",
       title: "Most Convenient Candidate",
       summary:
         "Favor fewer transfers and simpler booking flow while staying within acceptable budget variance from the low-cost candidate.",
-      confidence: 0.55,
-      verificationStatus: "needs_live_check",
-      primarySourceUrl: sourceUrls[2] ?? primary,
-      sourceUrls,
-    },
+        confidence: 0.55,
+        verificationStatus: "needs_live_check",
+        estimatedTotalUsd: Math.round(baselineBudget * 1.13),
+        travelMinutes: goal.domain === "flight" ? 510 : 210,
+        transferCount: 0,
+        flexibilityScore: 0.55,
+        baggageScore: 0.62,
+        bookingEaseScore: 0.82,
+        freshnessScore: freshnessFromSources,
+        verifiedAt: convenientVerification.verifiedAt,
+        recheckAfter: convenientVerification.recheckAfter,
+        primarySourceUrl: sourceUrls[2] ?? primary,
+        sourceUrls,
+      },
   ];
+}
+
+async function upsertFactFromSlot(
+  ctx: MutationCtx,
+  args: {
+    userId: string;
+    key: string;
+    value: string;
+    sourceType: "inferred" | "user_confirmed";
+  },
+) {
+  const now = Date.now();
+  const sensitive = isSensitiveSlot(args.key);
+  const status = args.sourceType === "user_confirmed" ? "confirmed" : sensitive ? "proposed" : "confirmed";
+  const confidence = args.sourceType === "user_confirmed" ? 1 : sensitive ? 0.45 : 0.66;
+
+  const existingFact = await ctx.db
+    .query("userMemoryFacts")
+    .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", args.key))
+    .order("desc")
+    .take(1);
+
+  if (!existingFact[0]) {
+    await ctx.db.insert("userMemoryFacts", {
+      userId: args.userId,
+      key: args.key,
+      value: args.value,
+      sourceType: args.sourceType,
+      confidence,
+      status,
+      isSensitive: sensitive,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return;
+  }
+
+  await ctx.db.patch(existingFact[0]._id, {
+    value: args.value,
+    sourceType: args.sourceType,
+    confidence,
+    status,
+    isSensitive: sensitive,
+    updatedAt: now,
+  });
 }
 
 export async function createResearchJobForPrompt(
@@ -269,35 +433,11 @@ export async function createResearchJobForPrompt(
     if (!value) {
       continue;
     }
-    const isSensitive = key === "nationality" || key === "ageBand";
-    const existingFact = await ctx.db
-      .query("userMemoryFacts")
-      .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", key))
-      .order("desc")
-      .take(1);
-
-    if (!existingFact[0]) {
-      await ctx.db.insert("userMemoryFacts", {
-        userId: args.userId,
-        key,
-        value,
-        sourceType: "inferred",
-        confidence: isSensitive ? 0.45 : 0.66,
-        status: isSensitive ? "proposed" : "confirmed",
-        isSensitive,
-        createdAt: now,
-        updatedAt: now,
-      });
-      continue;
-    }
-
-    await ctx.db.patch(existingFact[0]._id, {
+    await upsertFactFromSlot(ctx, {
+      userId: args.userId,
+      key,
       value,
       sourceType: "inferred",
-      confidence: isSensitive ? 0.45 : 0.66,
-      status: isSensitive ? "proposed" : "confirmed",
-      isSensitive,
-      updatedAt: now,
     });
   }
 
@@ -364,6 +504,166 @@ export async function createResearchJobForPrompt(
   };
 }
 
+export async function continueAwaitingJobForPrompt(
+  ctx: MutationCtx,
+  args: {
+    userId: string;
+    threadId: string;
+    promptMessageId: string;
+    prompt: string;
+  },
+) {
+  const jobs = await ctx.db
+    .query("researchJobs")
+    .withIndex("by_thread_updatedAt", (q) => q.eq("threadId", args.threadId))
+    .order("desc")
+    .take(8);
+  const awaitingJob = jobs.find((job) => job.status === "awaiting_input");
+  if (!awaitingJob) {
+    return null;
+  }
+
+  const goal = await ctx.db.get(awaitingJob.projectGoalId);
+  if (!goal) {
+    throw new ConvexError("Project goal not found");
+  }
+
+  const now = Date.now();
+  const promptSlots = extractSlotsFromPrompt(args.prompt, goal.domain);
+
+  const [allGoalSlots, confirmedFacts] = await Promise.all([
+    ctx.db
+      .query("projectGoalSlots")
+      .withIndex("by_goal_key", (q) => q.eq("projectGoalId", goal._id))
+      .take(120),
+    ctx.db
+      .query("userMemoryFacts")
+      .withIndex("by_user_status_updatedAt", (q) => q.eq("userId", args.userId).eq("status", "confirmed"))
+      .order("desc")
+      .take(60),
+  ]);
+
+  const explicitGoalSlots = allGoalSlots.reduce<Record<string, string>>((acc, slot) => {
+    if (slot.status === "missing") {
+      return acc;
+    }
+    if (slot.value && !acc[slot.key]) {
+      acc[slot.key] = slot.value;
+    }
+    return acc;
+  }, {});
+
+  const memorySlots = confirmedFacts.reduce<Record<string, string>>((acc, fact) => {
+    if (!acc[fact.key]) {
+      acc[fact.key] = fact.value;
+    }
+    return acc;
+  }, {});
+
+  const mergedSlots = mergeSlots(promptSlots, mergeSlots(explicitGoalSlots, memorySlots));
+  const missingFieldList = missingSlots(goal.domain, mergedSlots);
+  const followUpQuestion = buildFollowUpQuestion(goal.domain, missingFieldList);
+  const goalStatus = missingFieldList.length > 0 ? "awaiting_input" : "ready";
+  const jobStatus = missingFieldList.length > 0 ? "awaiting_input" : "planned";
+
+  const trackedSlotKeys = Array.from(
+    new Set([
+      ...requiredSlotsForDomain(goal.domain),
+      ...Object.keys(explicitGoalSlots),
+      ...Object.keys(memorySlots),
+      ...Object.keys(promptSlots),
+    ]),
+  );
+
+  const existingByKey = new Map(allGoalSlots.map((slot) => [slot.key, slot]));
+
+  for (const key of trackedSlotKeys) {
+    const value = mergedSlots[key];
+    const fromPrompt = !!promptSlots[key];
+    const sourceType = fromPrompt
+      ? "user_confirmed"
+      : value && memorySlots[key]
+        ? "memory"
+        : existingByKey.get(key)?.sourceType ?? "prompt";
+    const status = value ? (fromPrompt ? "confirmed" : "provided") : "missing";
+    const existing = existingByKey.get(key);
+
+    if (!existing) {
+      await ctx.db.insert("projectGoalSlots", {
+        projectGoalId: goal._id,
+        key,
+        value,
+        status,
+        sourceType,
+        isSensitive: isSensitiveSlot(key),
+        createdAt: now,
+        updatedAt: now,
+      });
+      continue;
+    }
+
+    await ctx.db.patch(existing._id, {
+      value,
+      status,
+      sourceType,
+      isSensitive: isSensitiveSlot(key),
+      updatedAt: now,
+    });
+  }
+
+  for (const [key, value] of Object.entries(promptSlots)) {
+    if (!value) {
+      continue;
+    }
+
+    await upsertFactFromSlot(ctx, {
+      userId: args.userId,
+      key,
+      value,
+      sourceType: "user_confirmed",
+    });
+  }
+
+  await ctx.db.patch(goal._id, {
+    promptMessageId: args.promptMessageId,
+    prompt: `${goal.prompt}\nFollow-up: ${args.prompt}`,
+    status: goalStatus,
+    missingFields: missingFieldList,
+    followUpQuestion,
+    constraintSummary: summarizeConstraints(mergedSlots),
+    updatedAt: now,
+  });
+
+  await ctx.db.patch(awaitingJob._id, {
+    promptMessageId: args.promptMessageId,
+    status: jobStatus,
+    stage: jobStatus === "planned" ? "Queued" : "Awaiting Required Details",
+    progress: jobStatus === "planned" ? 0 : awaitingJob.progress,
+    missingFields: missingFieldList,
+    followUpQuestion,
+    error: undefined,
+    lastErrorCode: undefined,
+    nextRunAt: undefined,
+    startedAt: jobStatus === "planned" ? undefined : awaitingJob.startedAt,
+    completedAt: undefined,
+    updatedAt: now,
+  });
+
+  if (jobStatus === "planned") {
+    await ctx.scheduler.runAfter(0, internal.research.runJobInternal, {
+      researchJobId: awaitingJob._id,
+    });
+  }
+
+  return {
+    researchJobId: awaitingJob._id,
+    projectGoalId: goal._id,
+    jobStatus,
+    missingFields: missingFieldList,
+    followUpQuestion,
+  };
+}
+
 export const getLatestJobForThread = query({
   args: {
     threadId: v.string(),
@@ -420,6 +720,15 @@ export const getLatestJobForThread = query({
           summary: v.string(),
           confidence: v.number(),
           verificationStatus: v.string(),
+          estimatedTotalUsd: v.number(),
+          travelMinutes: v.number(),
+          transferCount: v.number(),
+          flexibilityScore: v.number(),
+          baggageScore: v.number(),
+          bookingEaseScore: v.number(),
+          freshnessScore: v.number(),
+          verifiedAt: v.optional(v.number()),
+          recheckAfter: v.number(),
           primarySourceUrl: v.optional(v.string()),
           sourceUrls: v.array(v.string()),
           updatedAt: v.number(),
@@ -433,6 +742,8 @@ export const getLatestJobForThread = query({
           title: v.string(),
           rationale: v.string(),
           verificationStatus: v.string(),
+          verifiedAt: v.optional(v.number()),
+          recheckAfter: v.number(),
           sourceUrls: v.array(v.string()),
           updatedAt: v.number(),
         }),
@@ -528,6 +839,15 @@ export const getLatestJobForThread = query({
           summary: candidate.summary,
           confidence: candidate.confidence,
           verificationStatus: candidate.verificationStatus,
+          estimatedTotalUsd: candidate.estimatedTotalUsd,
+          travelMinutes: candidate.travelMinutes,
+          transferCount: candidate.transferCount,
+          flexibilityScore: candidate.flexibilityScore,
+          baggageScore: candidate.baggageScore,
+          bookingEaseScore: candidate.bookingEaseScore,
+          freshnessScore: candidate.freshnessScore,
+          verifiedAt: candidate.verifiedAt,
+          recheckAfter: candidate.recheckAfter,
           primarySourceUrl: candidate.primarySourceUrl,
           sourceUrls: candidate.sourceUrls,
           updatedAt: candidate.updatedAt,
@@ -539,6 +859,8 @@ export const getLatestJobForThread = query({
         title: ranked.title,
         rationale: ranked.rationale,
         verificationStatus: ranked.verificationStatus,
+        verifiedAt: ranked.verifiedAt,
+        recheckAfter: ranked.recheckAfter,
         sourceUrls: ranked.sourceUrls,
         updatedAt: ranked.updatedAt,
       })),
@@ -626,6 +948,15 @@ export const listCandidatesByJob = query({
         summary: candidate.summary,
         confidence: candidate.confidence,
         verificationStatus: candidate.verificationStatus,
+        estimatedTotalUsd: candidate.estimatedTotalUsd,
+        travelMinutes: candidate.travelMinutes,
+        transferCount: candidate.transferCount,
+        flexibilityScore: candidate.flexibilityScore,
+        baggageScore: candidate.baggageScore,
+        bookingEaseScore: candidate.bookingEaseScore,
+        freshnessScore: candidate.freshnessScore,
+        verifiedAt: candidate.verifiedAt,
+        recheckAfter: candidate.recheckAfter,
         primarySourceUrl: candidate.primarySourceUrl,
         sourceUrls: candidate.sourceUrls,
         updatedAt: candidate.updatedAt,
@@ -714,9 +1045,72 @@ export const listRankedResultsByJob = query({
         title: ranked.title,
         rationale: ranked.rationale,
         verificationStatus: ranked.verificationStatus,
+        verifiedAt: ranked.verifiedAt,
+        recheckAfter: ranked.recheckAfter,
         updatedAt: ranked.updatedAt,
       })),
     };
+  },
+});
+
+export const requestLiveRecheck = mutation({
+  args: {
+    researchJobId: v.id("researchJobs"),
+  },
+  returns: v.object({
+    scheduled: v.boolean(),
+    status: v.string(),
+  }),
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.researchJobId);
+    if (!job) {
+      throw new ConvexError("Research job not found");
+    }
+
+    if (job.status === "awaiting_input") {
+      return { scheduled: false, status: job.status };
+    }
+    if (job.status === "running" || job.status === "synthesizing" || job.status === "verifying") {
+      return { scheduled: false, status: job.status };
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(job._id, {
+      status: "planned",
+      stage: "Manual live recheck queued",
+      progress: 0,
+      error: undefined,
+      lastErrorCode: undefined,
+      nextRunAt: undefined,
+      startedAt: undefined,
+      completedAt: undefined,
+      updatedAt: now,
+    });
+
+    const tasks = await ctx.db
+      .query("researchTasks")
+      .withIndex("by_job_order", (q) => q.eq("jobId", job._id))
+      .order("asc")
+      .take(20);
+    await Promise.all(
+      tasks.map((task) =>
+        ctx.db.patch(task._id, {
+          status: "queued",
+          output: undefined,
+          error: undefined,
+          errorCode: undefined,
+          nextRunAt: undefined,
+          startedAt: undefined,
+          completedAt: undefined,
+          updatedAt: now,
+        }),
+      ),
+    );
+
+    await ctx.scheduler.runAfter(0, internal.research.runJobInternal, {
+      researchJobId: job._id,
+    });
+    return { scheduled: true, status: "planned" };
   },
 });
 
@@ -995,6 +1389,15 @@ export const replaceCandidatesInternal = internalMutation({
           v.literal("partially_verified"),
           v.literal("verified"),
         ),
+        estimatedTotalUsd: v.number(),
+        travelMinutes: v.number(),
+        transferCount: v.number(),
+        flexibilityScore: v.number(),
+        baggageScore: v.number(),
+        bookingEaseScore: v.number(),
+        freshnessScore: v.number(),
+        verifiedAt: v.optional(v.number()),
+        recheckAfter: v.number(),
         primarySourceUrl: v.optional(v.string()),
         sourceUrls: v.array(v.string()),
       }),
@@ -1019,6 +1422,15 @@ export const replaceCandidatesInternal = internalMutation({
         summary: candidate.summary,
         confidence: candidate.confidence,
         verificationStatus: candidate.verificationStatus,
+        estimatedTotalUsd: candidate.estimatedTotalUsd,
+        travelMinutes: candidate.travelMinutes,
+        transferCount: candidate.transferCount,
+        flexibilityScore: candidate.flexibilityScore,
+        baggageScore: candidate.baggageScore,
+        bookingEaseScore: candidate.bookingEaseScore,
+        freshnessScore: candidate.freshnessScore,
+        verifiedAt: candidate.verifiedAt,
+        recheckAfter: candidate.recheckAfter,
         primarySourceUrl: candidate.primarySourceUrl,
         sourceUrls: candidate.sourceUrls,
         createdAt: now,
@@ -1049,6 +1461,8 @@ export const replaceRankedResultsInternal = internalMutation({
           v.literal("partially_verified"),
           v.literal("verified"),
         ),
+        verifiedAt: v.optional(v.number()),
+        recheckAfter: v.number(),
         sourceUrls: v.array(v.string()),
       }),
     ),
@@ -1072,6 +1486,8 @@ export const replaceRankedResultsInternal = internalMutation({
         title: ranked.title,
         rationale: ranked.rationale,
         verificationStatus: ranked.verificationStatus,
+        verifiedAt: ranked.verifiedAt,
+        recheckAfter: ranked.recheckAfter,
         sourceUrls: ranked.sourceUrls,
         createdAt: now,
         updatedAt: now,
@@ -1305,6 +1721,7 @@ export const runJobInternal = internalAction({
         {
           prompt: goal.prompt,
           domain: goal.domain,
+          constraintSummary: goal.constraintSummary,
         },
         sourceDocs.map((source: { title: string; url: string }) => ({ title: source.title, url: source.url })),
       );

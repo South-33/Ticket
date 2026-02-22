@@ -229,6 +229,12 @@ Every top result must include:
 - assumptions and caveats
 - confidence tier
 
+Implementation notes (current):
+
+- Ranker uses weighted factor scoring by category (`cheapest`, `best_value`, `most_convenient`)
+- Candidate/Ranked records persist freshness metadata (`verifiedAt`, `recheckAfter`)
+- UI can trigger manual live recheck, which re-queues job + tasks and reruns pipeline
+
 ## 12) Knowledge Curation Workflow
 
 For `skills.md` and domain playbooks:

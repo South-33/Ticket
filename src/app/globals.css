@@ -497,6 +497,30 @@ body.resizing-sidebar * {
   font-size: 0.75rem;
 }
 
+.research-status-runtime {
+  margin-top: 0.5rem;
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+
+.research-status-recheck {
+  margin-top: 0.6rem;
+  border: 1px solid var(--border-color);
+  background: color-mix(in oklab, var(--bg-color) 85%, #ffffff 15%);
+  color: var(--text-primary);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.4rem 0.55rem;
+  cursor: pointer;
+}
+
+.research-status-recheck:hover {
+  background: color-mix(in oklab, var(--bg-color) 75%, #ffffff 25%);
+}
+
 .research-status-followup {
   margin-top: 0.55rem;
   font-size: 0.76rem;
@@ -619,6 +643,12 @@ body.resizing-sidebar * {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   font-size: 0.63rem;
+}
+
+.research-candidate-metrics {
+  color: var(--text-secondary);
+  font-size: 0.68rem;
+  letter-spacing: 0.03em;
 }
 
 .research-candidate a {

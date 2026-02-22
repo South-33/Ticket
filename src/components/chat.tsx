@@ -77,6 +77,20 @@ function toCandidateLabel(category: string) {
   return category;
 }
 
+function formatUtcTimestamp(value: number | undefined) {
+  if (!value) {
+    return "n/a";
+  }
+  return new Date(value).toLocaleString();
+}
+
+function freshnessLabel(recheckAfter: number | undefined) {
+  if (!recheckAfter) {
+    return "unknown";
+  }
+  return recheckAfter <= Date.now() ? "stale" : "fresh";
+}
+
 function getReasoningText(message: UIMessage) {
   return message.parts
     .filter((part) => part.type === "reasoning")
@@ -231,6 +245,7 @@ export function Chat() {
   const threads = useQuery(api.chat.listThreads);
   const createThread = useMutation(api.chat.createThread);
   const deleteThread = useMutation(api.chat.deleteThread);
+  const requestLiveRecheck = useMutation(api.research.requestLiveRecheck);
   const sendPrompt = useMutation(api.chat.sendPrompt).withOptimisticUpdate(
     optimisticallySendMessage(api.chat.listMessages),
   );
@@ -468,6 +483,15 @@ export function Chat() {
     }
   };
 
+  const handleRecheckNow = async () => {
+    if (!latestResearchJob || isResearchActive) {
+      return;
+    }
+    await requestLiveRecheck({
+      researchJobId: latestResearchJob.researchJobId,
+    });
+  };
+
   const handleFeedScroll = () => {
     setIsFeedScrolling((current) => (current ? current : true));
 
@@ -563,8 +587,22 @@ export function Chat() {
                   <span>{toResearchStatusLabel(latestResearchJob.status)}</span>
                   <span>{latestResearchJob.progress}%</span>
                 </div>
+                {(latestResearchJob.lastErrorCode || latestResearchJob.nextRunAt) && (
+                  <p className="research-status-runtime">
+                    {latestResearchJob.lastErrorCode ? `Code: ${latestResearchJob.lastErrorCode}` : ""}
+                    {latestResearchJob.lastErrorCode && latestResearchJob.nextRunAt ? " | " : ""}
+                    {latestResearchJob.nextRunAt
+                      ? `Next retry: ${formatUtcTimestamp(latestResearchJob.nextRunAt)}`
+                      : ""}
+                  </p>
+                )}
                 {latestResearchJob.error && (
                   <p className="research-status-error">{latestResearchJob.error}</p>
+                )}
+                {!isResearchActive && latestResearchJob.status !== "awaiting_input" && (
+                  <button className="research-status-recheck" type="button" onClick={() => void handleRecheckNow()}>
+                    Recheck Live Data
+                  </button>
                 )}
                 {latestResearchJob.followUpQuestion && (
                   <p className="research-status-followup">{latestResearchJob.followUpQuestion}</p>
@@ -616,6 +654,10 @@ export function Chat() {
                         summary: string;
                         confidence: number;
                         verificationStatus: string;
+                        estimatedTotalUsd: number;
+                        travelMinutes: number;
+                        transferCount: number;
+                        recheckAfter: number;
                         primarySourceUrl?: string;
                         updatedAt: number;
                       }) => (
@@ -626,8 +668,11 @@ export function Chat() {
                           </div>
                           <h4>{candidate.title}</h4>
                           <p>{candidate.summary}</p>
+                          <p className="research-candidate-metrics">
+                            ${candidate.estimatedTotalUsd} total - {candidate.travelMinutes}m - {candidate.transferCount} transfer(s)
+                          </p>
                           <p className="research-candidate-verification">
-                            Verification: {candidate.verificationStatus.replaceAll("_", " ")}
+                            Verification: {candidate.verificationStatus.replaceAll("_", " ")} ({freshnessLabel(candidate.recheckAfter)})
                           </p>
                           {candidate.primarySourceUrl && (
                             <a href={candidate.primarySourceUrl} target="_blank" rel="noreferrer">
@@ -649,6 +694,7 @@ export function Chat() {
                         title: string;
                         rationale: string;
                         verificationStatus: string;
+                        recheckAfter: number;
                         updatedAt: number;
                       }) => (
                         <article key={`${result.category}-${result.rank}-${result.updatedAt}`} className="research-ranked-result">
@@ -658,6 +704,7 @@ export function Chat() {
                           <p>{result.title}</p>
                           <small>{result.rationale}</small>
                           <small>{result.verificationStatus.replaceAll("_", " ")}</small>
+                          <small>freshness: {freshnessLabel(result.recheckAfter)}</small>
                         </article>
                       ),
                     )}

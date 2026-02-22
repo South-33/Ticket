@@ -4,6 +4,15 @@ type CandidateForRanking = {
   summary: string;
   confidence: number;
   verificationStatus: "needs_live_check" | "partially_verified" | "verified";
+  estimatedTotalUsd: number;
+  travelMinutes: number;
+  transferCount: number;
+  flexibilityScore: number;
+  baggageScore: number;
+  bookingEaseScore: number;
+  freshnessScore: number;
+  verifiedAt?: number;
+  recheckAfter: number;
   sourceUrls: string[];
 };
 
@@ -14,44 +23,108 @@ type RankedResultDraft = {
   title: string;
   rationale: string;
   verificationStatus: "needs_live_check" | "partially_verified" | "verified";
+  verifiedAt?: number;
+  recheckAfter: number;
   sourceUrls: string[];
 };
 
+type NumericBand = {
+  min: number;
+  max: number;
+};
+
+function clamp01(value: number) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function inverseNormalized(value: number, band: NumericBand) {
+  if (band.max <= band.min) {
+    return 1;
+  }
+  const normalized = (value - band.min) / (band.max - band.min);
+  return clamp01(1 - normalized);
+}
+
 function verificationBonus(status: CandidateForRanking["verificationStatus"]) {
   if (status === "verified") {
-    return 12;
+    return 0.12;
   }
   if (status === "partially_verified") {
-    return 6;
+    return 0.06;
   }
   return 0;
 }
 
-function categoryWeight(category: CandidateForRanking["category"]) {
-  if (category === "best_value") {
-    return 4;
-  }
-  if (category === "most_convenient") {
-    return 2;
-  }
-  return 3;
+function toBand(values: number[]): NumericBand {
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  return { min, max };
 }
 
 export function buildRankedResultsFromCandidates(candidates: CandidateForRanking[]): RankedResultDraft[] {
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const priceBand = toBand(candidates.map((candidate) => candidate.estimatedTotalUsd));
+  const durationBand = toBand(candidates.map((candidate) => candidate.travelMinutes));
+  const transferBand = toBand(candidates.map((candidate) => candidate.transferCount));
+
   const ranked = candidates
     .map((candidate) => {
-      const base = Math.round(candidate.confidence * 100);
-      const score = Math.min(100, base + verificationBonus(candidate.verificationStatus) + categoryWeight(candidate.category));
+      const costScore = inverseNormalized(candidate.estimatedTotalUsd, priceBand);
+      const durationScore = inverseNormalized(candidate.travelMinutes, durationBand);
+      const transferScore = inverseNormalized(candidate.transferCount, transferBand);
+      const convenienceScore =
+        durationScore * 0.55 + transferScore * 0.25 + clamp01(candidate.bookingEaseScore) * 0.2;
+
+      let weightedBase = 0;
+      if (candidate.category === "cheapest") {
+        weightedBase =
+          costScore * 0.62 +
+          convenienceScore * 0.16 +
+          clamp01(candidate.flexibilityScore) * 0.08 +
+          clamp01(candidate.baggageScore) * 0.06 +
+          clamp01(candidate.freshnessScore) * 0.08;
+      } else if (candidate.category === "best_value") {
+        weightedBase =
+          costScore * 0.34 +
+          convenienceScore * 0.28 +
+          clamp01(candidate.flexibilityScore) * 0.16 +
+          clamp01(candidate.baggageScore) * 0.1 +
+          clamp01(candidate.freshnessScore) * 0.12;
+      } else {
+        weightedBase =
+          convenienceScore * 0.58 +
+          costScore * 0.14 +
+          clamp01(candidate.flexibilityScore) * 0.12 +
+          clamp01(candidate.baggageScore) * 0.06 +
+          clamp01(candidate.freshnessScore) * 0.1;
+      }
+
+      const confidenceLift = clamp01(candidate.confidence) * 0.12;
+      const verificationLift = verificationBonus(candidate.verificationStatus);
+      const finalScore = Math.round(clamp01(weightedBase + confidenceLift + verificationLift) * 100);
+
+      const rationaleParts = [
+        `price ${Math.round(costScore * 100)}`,
+        `convenience ${Math.round(convenienceScore * 100)}`,
+        `flexibility ${Math.round(clamp01(candidate.flexibilityScore) * 100)}`,
+        `freshness ${Math.round(clamp01(candidate.freshnessScore) * 100)}`,
+      ];
+      const rationale =
+        candidate.verificationStatus === "verified"
+          ? `Weighted factors (${rationaleParts.join(", ")}) with fully verified evidence.`
+          : `Weighted factors (${rationaleParts.join(", ")}) with provisional verification; live price recheck required.`;
 
       return {
         category: candidate.category,
-        score,
+        score: finalScore,
         title: candidate.title,
-        rationale:
-          candidate.verificationStatus === "verified"
-            ? "Rank is boosted by verified evidence quality and confidence."
-            : "Rank is provisional and should be rechecked with live pricing before booking.",
+        rationale,
         verificationStatus: candidate.verificationStatus,
+        verifiedAt: candidate.verifiedAt,
+        recheckAfter: candidate.recheckAfter,
         sourceUrls: candidate.sourceUrls,
       };
     })

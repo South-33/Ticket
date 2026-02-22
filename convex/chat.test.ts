@@ -41,4 +41,30 @@ describe("chat intake flow", () => {
     expect(memory.latestSnapshot).not.toBeNull();
     expect(memory.latestSnapshot?.markdown).toContain("# user.md");
   });
+
+  test("sendPrompt resumes an awaiting_input job on follow-up details", async () => {
+    vi.useFakeTimers();
+    const t = convexTest(schema, modules);
+    registerAgentComponent(t);
+
+    const created = await t.mutation(api.chat.createThread, {});
+
+    const first = await t.mutation(api.chat.sendPrompt, {
+      threadId: created.threadId,
+      prompt: "I want a flight to Frankfurt",
+    });
+
+    const second = await t.mutation(api.chat.sendPrompt, {
+      threadId: created.threadId,
+      prompt: "From Manila to Frankfurt on 2026-08-11 budget 900 nationality is Filipino",
+    });
+
+    const latest = await t.query(api.research.getLatestJobForThread, {
+      threadId: created.threadId,
+    });
+
+    expect(second.researchJobId).toBe(first.researchJobId);
+    expect(latest?.status).toBe("planned");
+    expect(latest?.missingFields).toHaveLength(0);
+  });
 });
