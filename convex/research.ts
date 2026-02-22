@@ -207,9 +207,235 @@ function extractBudgetCeiling(text: string) {
   return undefined;
 }
 
+type SourceEvidence = {
+  title: string;
+  url: string;
+  snippet?: string;
+  extractedSummary?: string;
+};
+
+type CandidateEvidenceMetrics = {
+  cheapestUsd: number;
+  valueUsd: number;
+  convenientUsd: number;
+  cheapestMinutes: number;
+  valueMinutes: number;
+  convenientMinutes: number;
+  cheapestTransfers: number;
+  valueTransfers: number;
+  convenientTransfers: number;
+  flexibilityScore: number;
+  baggageScore: number;
+  bookingEaseScore: number;
+  freshnessScore: number;
+  confidenceLift: number;
+};
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function parseNumber(value: string) {
+  const normalized = value.replace(/,/g, "").trim();
+  const numeric = Number(normalized);
+  return Number.isFinite(numeric) ? numeric : undefined;
+}
+
+function collectUsdPrices(text: string) {
+  const values: number[] = [];
+  const patterns = [
+    /\$\s?(\d{2,5}(?:[.,]\d{1,2})?)/gi,
+    /\b(?:usd|us\$)\s?(\d{2,5}(?:[.,]\d{1,2})?)/gi,
+    /\bfrom\s+\$?(\d{2,5}(?:[.,]\d{1,2})?)/gi,
+  ];
+
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const parsed = parseNumber(match[1] ?? "");
+      if (!parsed) {
+        continue;
+      }
+      if (parsed < 20 || parsed > 15000) {
+        continue;
+      }
+      values.push(Math.round(parsed));
+    }
+  }
+
+  return values;
+}
+
+function collectDurationMinutes(text: string) {
+  const values: number[] = [];
+
+  for (const match of text.matchAll(/(\d{1,2})\s*h(?:ours?)?\s*(\d{1,2})?\s*m?/gi)) {
+    const hours = parseNumber(match[1] ?? "0") ?? 0;
+    const minutes = parseNumber(match[2] ?? "0") ?? 0;
+    const total = hours * 60 + minutes;
+    if (total >= 30 && total <= 3000) {
+      values.push(total);
+    }
+  }
+
+  for (const match of text.matchAll(/(\d{2,4})\s*(?:min|mins|minutes)\b/gi)) {
+    const minutes = parseNumber(match[1] ?? "");
+    if (!minutes) {
+      continue;
+    }
+    if (minutes >= 30 && minutes <= 3000) {
+      values.push(minutes);
+    }
+  }
+
+  return values;
+}
+
+function collectTransferCounts(text: string) {
+  const values: number[] = [];
+
+  if (/\b(?:non[-\s]?stop|direct(?:\s+flight)?|no\s+transfers?)\b/i.test(text)) {
+    values.push(0);
+  }
+
+  for (const match of text.matchAll(/(\d)\s*(?:stop|stops|transfer|transfers|layover|layovers)\b/gi)) {
+    const parsed = parseNumber(match[1] ?? "");
+    if (parsed === undefined) {
+      continue;
+    }
+    values.push(clamp(Math.round(parsed), 0, 4));
+  }
+
+  if (/\bone[-\s]?stop\b/i.test(text)) {
+    values.push(1);
+  }
+  if (/\btwo[-\s]?stops\b/i.test(text)) {
+    values.push(2);
+  }
+
+  return values;
+}
+
+function median(values: number[]) {
+  if (values.length === 0) {
+    return undefined;
+  }
+
+  const sorted = values.slice().sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return Math.round((sorted[middle - 1] + sorted[middle]) / 2);
+  }
+  return sorted[middle];
+}
+
+function average(values: number[]) {
+  if (values.length === 0) {
+    return undefined;
+  }
+  const total = values.reduce((sum, value) => sum + value, 0);
+  return total / values.length;
+}
+
+function keywordScore(text: string, positive: RegExp[], negative: RegExp[], baseline: number) {
+  let score = baseline;
+  for (const pattern of positive) {
+    if (pattern.test(text)) {
+      score += 0.06;
+    }
+  }
+  for (const pattern of negative) {
+    if (pattern.test(text)) {
+      score -= 0.08;
+    }
+  }
+  return clamp(score, 0.2, 0.95);
+}
+
+function deriveCandidateEvidenceMetrics(
+  domain: string,
+  baselineBudget: number,
+  topSources: SourceEvidence[],
+): CandidateEvidenceMetrics {
+  const joinedEvidence = topSources
+    .map((source) => `${source.title} ${source.snippet ?? ""} ${source.extractedSummary ?? ""}`)
+    .join("\n");
+
+  const priceSignals = collectUsdPrices(joinedEvidence);
+  const durationSignals = collectDurationMinutes(joinedEvidence);
+  const transferSignals = collectTransferCounts(joinedEvidence);
+
+  const defaultMinutes = domain === "flight" ? { cheap: 680, value: 590, fast: 510 } : { cheap: 320, value: 260, fast: 210 };
+  const defaultTransfers = domain === "flight" ? { cheap: 2, value: 1, fast: 0 } : { cheap: 1, value: 1, fast: 0 };
+
+  const lowestPrice = priceSignals.length > 0 ? Math.min(...priceSignals) : Math.round(baselineBudget * 0.9);
+  const medianPrice = median(priceSignals) ?? Math.round(baselineBudget * 1.02);
+  const convenientPrice = clamp(Math.round(Math.max(medianPrice, lowestPrice) * 1.08), 30, 15000);
+
+  const shortestDuration = durationSignals.length > 0 ? Math.min(...durationSignals) : defaultMinutes.fast;
+  const medianDuration = median(durationSignals) ?? defaultMinutes.value;
+  const slowDuration = clamp(
+    Math.max(medianDuration, Math.round((average(durationSignals) ?? defaultMinutes.cheap) * 1.08)),
+    30,
+    3000,
+  );
+
+  const minTransfers = transferSignals.length > 0 ? Math.min(...transferSignals) : defaultTransfers.fast;
+  const averageTransfers = average(transferSignals);
+  const typicalTransfers = averageTransfers !== undefined ? clamp(Math.round(averageTransfers), 0, 4) : defaultTransfers.value;
+  const higherTransfers = clamp(Math.max(typicalTransfers, minTransfers + 1), 0, 4);
+
+  const extractCoverage = topSources.length > 0
+    ? topSources.filter((source) => !!source.extractedSummary).length / topSources.length
+    : 0;
+  const snippetCoverage = topSources.length > 0
+    ? topSources.filter((source) => !!source.snippet).length / topSources.length
+    : 0;
+
+  const freshnessScore = clamp(0.25 + extractCoverage * 0.5 + snippetCoverage * 0.2, 0.2, 0.98);
+  const confidenceLift = clamp(0.04 + extractCoverage * 0.14 + Math.min(0.08, priceSignals.length * 0.015), 0.04, 0.26);
+
+  const flexibilityScore = keywordScore(
+    joinedEvidence,
+    [/\brefundable\b/i, /\bfree\s+cancell?ation\b/i, /\bflexible\b/i, /\bchange\s+policy\b/i],
+    [/\bnon[-\s]?refundable\b/i, /\bstrict\b/i, /\bno\s+changes\b/i],
+    0.56,
+  );
+
+  const baggageScore = keywordScore(
+    joinedEvidence,
+    [/\bcarry[-\s]?on\s+included\b/i, /\bchecked\s+bag\s+included\b/i, /\bbaggage\s+included\b/i],
+    [/\bbaggage\s+fee\b/i, /\bextra\s+bag(?:gage)?\b/i, /\bno\s+bag(?:gage)?\b/i],
+    0.52,
+  );
+
+  const bookingEaseScore = keywordScore(
+    joinedEvidence,
+    [/\bofficial\s+site\b/i, /\bbook\s+direct\b/i, /\binstant\s+confirmation\b/i],
+    [/\bcoupon\s+code\b/i, /\bpromo\s+code\b/i, /\bcall\s+to\s+book\b/i],
+    0.6,
+  );
+
+  return {
+    cheapestUsd: clamp(lowestPrice, 30, 15000),
+    valueUsd: clamp(medianPrice, 30, 15000),
+    convenientUsd: convenientPrice,
+    cheapestMinutes: slowDuration,
+    valueMinutes: clamp(medianDuration, 30, 3000),
+    convenientMinutes: clamp(shortestDuration, 30, 3000),
+    cheapestTransfers: higherTransfers,
+    valueTransfers: typicalTransfers,
+    convenientTransfers: minTransfers,
+    flexibilityScore,
+    baggageScore,
+    bookingEaseScore,
+    freshnessScore,
+    confidenceLift,
+  };
+}
+
 function buildCandidateDrafts(
   goal: { prompt: string; domain: string; constraintSummary?: string },
-  sources: { title: string; url: string }[],
+  sources: SourceEvidence[],
 ): CandidateDraft[] {
   const now = Date.now();
   const top = sources.slice(0, 4);
@@ -218,7 +444,7 @@ function buildCandidateDrafts(
   const routeHint = goal.domain === "flight" ? "route and airport alternatives" : "option alternatives";
   const budget = extractBudgetCeiling(`${goal.prompt} ${goal.constraintSummary ?? ""}`);
   const baselineBudget = budget ?? (goal.domain === "flight" ? 780 : 460);
-  const freshnessFromSources = Math.max(0.2, Math.min(0.95, 0.35 + top.length * 0.12));
+  const evidenceMetrics = deriveCandidateEvidenceMetrics(goal.domain, baselineBudget, top);
 
   if (top.length === 0) {
     const pending = verificationTimestamps("needs_live_check", now);
@@ -290,57 +516,57 @@ function buildCandidateDrafts(
       title: "Cheapest Candidate (Web Lead)",
       summary:
         "Prioritize the strongest low-cost source first, then verify total payable amount including fees and baggage before booking.",
-        confidence: 0.58,
+      confidence: clamp(0.56 + evidenceMetrics.confidenceLift * 0.6, 0.3, 0.9),
         verificationStatus: "needs_live_check",
-        estimatedTotalUsd: Math.round(baselineBudget * 0.9),
-        travelMinutes: goal.domain === "flight" ? 680 : 300,
-        transferCount: goal.domain === "flight" ? 2 : 1,
-        flexibilityScore: 0.46,
-        baggageScore: 0.42,
-        bookingEaseScore: 0.52,
-        freshnessScore: freshnessFromSources,
-        verifiedAt: cheapestVerification.verifiedAt,
-        recheckAfter: cheapestVerification.recheckAfter,
-        primarySourceUrl: primary,
-        sourceUrls,
-      },
+      estimatedTotalUsd: evidenceMetrics.cheapestUsd,
+      travelMinutes: evidenceMetrics.cheapestMinutes,
+      transferCount: evidenceMetrics.cheapestTransfers,
+      flexibilityScore: clamp(evidenceMetrics.flexibilityScore - 0.08, 0.2, 0.95),
+      baggageScore: clamp(evidenceMetrics.baggageScore - 0.06, 0.2, 0.95),
+      bookingEaseScore: clamp(evidenceMetrics.bookingEaseScore - 0.08, 0.2, 0.95),
+      freshnessScore: evidenceMetrics.freshnessScore,
+      verifiedAt: cheapestVerification.verifiedAt,
+      recheckAfter: cheapestVerification.recheckAfter,
+      primarySourceUrl: primary,
+      sourceUrls,
+    },
     {
       category: "best_value",
       title: "Best Value Candidate (Balanced)",
       summary: `Balance total price against ${routeHint}, transfer burden, and policy flexibility using the top ranked source set.`,
-        confidence: 0.62,
-        verificationStatus: "partially_verified",
-        estimatedTotalUsd: Math.round(baselineBudget * 1.02),
-        travelMinutes: goal.domain === "flight" ? 590 : 260,
-        transferCount: 1,
-        flexibilityScore: 0.72,
-        baggageScore: 0.66,
-        bookingEaseScore: 0.64,
-        freshnessScore: Math.min(1, freshnessFromSources + 0.05),
-        verifiedAt: valueVerification.verifiedAt,
-        recheckAfter: valueVerification.recheckAfter,
-        primarySourceUrl: sourceUrls[1] ?? primary,
-        sourceUrls,
-      },
+      confidence: clamp(0.6 + evidenceMetrics.confidenceLift, 0.32, 0.94),
+      verificationStatus: "partially_verified",
+      estimatedTotalUsd: evidenceMetrics.valueUsd,
+      travelMinutes: evidenceMetrics.valueMinutes,
+      transferCount: evidenceMetrics.valueTransfers,
+      flexibilityScore: evidenceMetrics.flexibilityScore,
+      baggageScore: evidenceMetrics.baggageScore,
+      bookingEaseScore: evidenceMetrics.bookingEaseScore,
+      freshnessScore: clamp(evidenceMetrics.freshnessScore + 0.05, 0.2, 1),
+      verifiedAt: valueVerification.verifiedAt,
+      recheckAfter: valueVerification.recheckAfter,
+      primarySourceUrl: sourceUrls[1] ?? primary,
+      sourceUrls,
+    },
     {
       category: "most_convenient",
       title: "Most Convenient Candidate",
       summary:
         "Favor fewer transfers and simpler booking flow while staying within acceptable budget variance from the low-cost candidate.",
-        confidence: 0.55,
-        verificationStatus: "needs_live_check",
-        estimatedTotalUsd: Math.round(baselineBudget * 1.13),
-        travelMinutes: goal.domain === "flight" ? 510 : 210,
-        transferCount: 0,
-        flexibilityScore: 0.55,
-        baggageScore: 0.62,
-        bookingEaseScore: 0.82,
-        freshnessScore: freshnessFromSources,
-        verifiedAt: convenientVerification.verifiedAt,
-        recheckAfter: convenientVerification.recheckAfter,
-        primarySourceUrl: sourceUrls[2] ?? primary,
-        sourceUrls,
-      },
+      confidence: clamp(0.54 + evidenceMetrics.confidenceLift * 0.5, 0.3, 0.9),
+      verificationStatus: "needs_live_check",
+      estimatedTotalUsd: evidenceMetrics.convenientUsd,
+      travelMinutes: evidenceMetrics.convenientMinutes,
+      transferCount: evidenceMetrics.convenientTransfers,
+      flexibilityScore: clamp(evidenceMetrics.flexibilityScore - 0.02, 0.2, 0.95),
+      baggageScore: clamp(evidenceMetrics.baggageScore + 0.04, 0.2, 0.95),
+      bookingEaseScore: clamp(evidenceMetrics.bookingEaseScore + 0.12, 0.2, 0.97),
+      freshnessScore: evidenceMetrics.freshnessScore,
+      verifiedAt: convenientVerification.verifiedAt,
+      recheckAfter: convenientVerification.recheckAfter,
+      primarySourceUrl: sourceUrls[2] ?? primary,
+      sourceUrls,
+    },
   ];
 }
 
@@ -1757,7 +1983,12 @@ export const runJobInternal = internalAction({
           domain: goal.domain,
           constraintSummary: goal.constraintSummary,
         },
-        sourceDocs.map((source: { title: string; url: string }) => ({ title: source.title, url: source.url })),
+        sourceDocs.map((source: { title: string; url: string; snippet?: string }) => ({
+          title: source.title,
+          url: source.url,
+          snippet: source.snippet,
+          extractedSummary: summarizeExtractedContent(extractedByUrl.get(source.url)),
+        })),
       );
 
       await ctx.runMutation(internal.research.replaceCandidatesInternal, {

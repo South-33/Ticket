@@ -234,6 +234,7 @@ Implementation notes (current):
 - Ranker uses weighted factor scoring by category (`cheapest`, `best_value`, `most_convenient`)
 - Candidate/Ranked records persist freshness metadata (`verifiedAt`, `recheckAfter`)
 - UI can trigger manual live recheck, which re-queues job + tasks and reruns pipeline
+- Candidate metric defaults are now adjusted by extracted source evidence (price, duration, transfer cues, policy/baggage/booking signals)
 
 ## 12) Knowledge Curation Workflow
 
