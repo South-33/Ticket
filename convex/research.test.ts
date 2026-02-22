@@ -120,25 +120,49 @@ describe("research pipeline", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input.toString();
-        if (!url.includes("api.tavily.com/search")) {
+        if (url.includes("api.tavily.com/search")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  title: "Deal One",
+                  url: "https://example.com/deal-1",
+                  content: "Cheap fare lead one",
+                },
+                {
+                  title: "Deal Two",
+                  url: "https://example.com/deal-2",
+                  content: "Cheap fare lead two",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        if (url.includes("api.tavily.com/extract")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  url: "https://example.com/deal-1",
+                  raw_content: "Extracted content one with richer context and fee caveats.",
+                },
+                {
+                  url: "https://example.com/deal-2",
+                  raw_content: "Extracted content two with baggage and timing caveats.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+
+        if (url.includes("api.tavily.com")) {
           throw new Error(`Unexpected fetch url in test: ${url}`);
         }
         return {
           ok: true,
-          json: async () => ({
-            results: [
-              {
-                title: "Deal One",
-                url: "https://example.com/deal-1",
-                content: "Cheap fare lead one",
-              },
-              {
-                title: "Deal Two",
-                url: "https://example.com/deal-2",
-                content: "Cheap fare lead two",
-              },
-            ],
-          }),
+          json: async () => ({}),
         } as Response;
       }),
     );
@@ -166,6 +190,11 @@ describe("research pipeline", () => {
       expect(latest?.sources).toHaveLength(2);
       expect(latest?.sources[0]?.url).toContain("example.com/deal-1");
       expect(latest?.sources[0]?.provider).toBe("tavily");
+      expect(
+        latest?.findings.some(
+          (finding: { title: string }) => finding.title === "Content extraction pass completed",
+        ),
+      ).toBe(true);
 
       const persisted = await t.run(async (ctx) => {
         const job = await ctx.db.get("researchJobs", researchJobId);
@@ -258,5 +287,40 @@ describe("research pipeline", () => {
         status: "running",
       }),
     ).rejects.toThrowError("Research task not found");
+  });
+
+  test("falls back safely when Tavily key is missing", async () => {
+    const t = convexTest(schema, modules);
+    const threadId = "thread-no-key";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    delete process.env.TAVILY_API_KEY;
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const latest = await t.query(api.research.getLatestJobForThread, {
+        threadId,
+      });
+
+      expect(latest?.status).toBe("completed");
+      expect(latest?.sources).toHaveLength(0);
+      expect(
+        latest?.findings.some((finding: { title: string }) => finding.title === "Tavily scan fallback used"),
+      ).toBe(true);
+    } finally {
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
+    }
   });
 });

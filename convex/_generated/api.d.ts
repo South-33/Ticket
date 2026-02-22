@@ -11,6 +11,7 @@
 import type * as agent from "../agent.js";
 import type * as chat from "../chat.js";
 import type * as research from "../research.js";
+import type * as researchProvider from "../researchProvider.js";
 
 import type {
   ApiFromModules,
@@ -22,6 +23,7 @@ declare const fullApi: ApiFromModules<{
   agent: typeof agent;
   chat: typeof chat;
   research: typeof research;
+  researchProvider: typeof researchProvider;
 }>;
 
 /**

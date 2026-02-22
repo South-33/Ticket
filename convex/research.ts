@@ -8,23 +8,13 @@ import {
   query,
   type MutationCtx,
 } from "./_generated/server";
+import {
+  extractWithTavily,
+  searchWebWithTavily,
+  type SearchLead,
+} from "./researchProvider";
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "expired"]);
-
-type WebSearchResult = {
-  title: string;
-  url: string;
-  snippet?: string;
-};
-
-type TavilySearchResponse = {
-  results?: Array<{
-    title?: string;
-    url?: string;
-    content?: string;
-    raw_content?: string;
-  }>;
-};
 
 function detectDomain(prompt: string) {
   const value = prompt.toLowerCase();
@@ -52,7 +42,7 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function normalizeSnippet(value: string | undefined) {
+function summarizeExtractedContent(value: string | undefined) {
   if (!value) {
     return undefined;
   }
@@ -60,63 +50,7 @@ function normalizeSnippet(value: string | undefined) {
   if (!compact) {
     return undefined;
   }
-  return compact.slice(0, 280);
-}
-
-async function runTavilySearch(query: string, maxResults: number) {
-  const apiKey = process.env.TAVILY_API_KEY;
-  if (!apiKey) {
-    throw new Error("TAVILY_API_KEY is not configured");
-  }
-
-  const response = await fetch("https://api.tavily.com/search", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      query,
-      topic: "general",
-      search_depth: "basic",
-      max_results: maxResults,
-      include_answer: false,
-      include_raw_content: false,
-      include_images: false,
-      include_favicon: false,
-      include_usage: false,
-      auto_parameters: true,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Tavily search failed: ${response.status}`);
-  }
-
-  const payload = (await response.json()) as TavilySearchResponse;
-  const seenUrls = new Set<string>();
-  const output: WebSearchResult[] = [];
-
-  for (const result of payload.results ?? []) {
-    const url = result.url?.trim();
-    const title = result.title?.trim();
-    if (!url || !title || seenUrls.has(url)) {
-      continue;
-    }
-    seenUrls.add(url);
-
-    output.push({
-      url,
-      title,
-      snippet: normalizeSnippet(result.content ?? result.raw_content),
-    });
-
-    if (output.length >= maxResults) {
-      break;
-    }
-  }
-
-  return output;
+  return compact.slice(0, 260);
 }
 
 function buildSearchQuery(prompt: string, domain: string) {
@@ -632,12 +566,24 @@ export const runJobInternal = internalAction({
       });
 
       const searchQuery = buildSearchQuery(goal.prompt, goal.domain);
-      let webResults: WebSearchResult[] = [];
+      let webResults: SearchLead[] = [];
       let searchProvider: "tavily" | "fallback" = "fallback";
+      let extractedByUrl = new Map<string, string>();
 
       try {
-        webResults = await runTavilySearch(searchQuery, 6);
-        searchProvider = "tavily";
+        const searchResponse = await searchWebWithTavily(searchQuery, 6);
+        webResults = searchResponse.results;
+        searchProvider = searchResponse.provider;
+
+        const extractTargets = webResults.slice(0, 3).map((result) => result.url);
+        if (extractTargets.length > 0) {
+          const extracted = await extractWithTavily(extractTargets, searchQuery);
+          extractedByUrl = new Map(
+            extracted.results
+              .filter((item) => !!item.rawContent)
+              .map((item) => [item.url, item.rawContent ?? ""]),
+          );
+        }
       } catch {
         webResults = [];
       }
@@ -657,12 +603,25 @@ export const runJobInternal = internalAction({
 
         const top = webResults.slice(0, 2);
         for (const result of top) {
+          const extractedSummary = summarizeExtractedContent(extractedByUrl.get(result.url));
           await ctx.runMutation(internal.research.addFindingInternal, {
             researchJobId: args.researchJobId,
             taskKey: "scan",
             title: result.title,
-            summary: result.snippet ?? "Captured a relevant source lead for this query.",
+            summary:
+              extractedSummary ?? result.snippet ?? "Captured a relevant source lead for this query.",
             confidence: 0.62,
+            sourceType: "web",
+          });
+        }
+
+        if (extractedByUrl.size > 0) {
+          await ctx.runMutation(internal.research.addFindingInternal, {
+            researchJobId: args.researchJobId,
+            taskKey: "scan",
+            title: "Content extraction pass completed",
+            summary: `Extracted enriched content from ${extractedByUrl.size} source page(s) to improve evidence quality.`,
+            confidence: 0.68,
             sourceType: "web",
           });
         }
@@ -684,7 +643,7 @@ export const runJobInternal = internalAction({
         status: "completed",
         output:
           webResults.length > 0
-            ? `Collected ${webResults.length} real web source leads.`
+            ? `Collected ${webResults.length} real web source leads and extracted ${extractedByUrl.size} page summaries.`
             : "No parsed web leads; fallback evidence was recorded.",
       });
 
