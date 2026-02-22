@@ -100,4 +100,17 @@ export default defineSchema({
     sourceType: v.union(v.literal("simulated"), v.literal("web"), v.literal("api")),
     createdAt: v.number(),
   }).index("by_job_createdAt", ["jobId", "createdAt"]),
+
+  sources: defineTable({
+    jobId: v.id("researchJobs"),
+    taskId: v.optional(v.id("researchTasks")),
+    rank: v.number(),
+    url: v.string(),
+    title: v.string(),
+    snippet: v.optional(v.string()),
+    provider: v.union(v.literal("duckduckgo"), v.literal("fallback")),
+    createdAt: v.number(),
+  })
+    .index("by_job_rank", ["jobId", "rank"])
+    .index("by_job_createdAt", ["jobId", "createdAt"]),
 });

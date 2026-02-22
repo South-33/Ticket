@@ -11,6 +11,12 @@ import {
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "expired"]);
 
+type WebSearchResult = {
+  title: string;
+  url: string;
+  snippet?: string;
+};
+
 function detectDomain(prompt: string) {
   const value = prompt.toLowerCase();
   const hasFlight = /(flight|airport|layover|airline|fare)/.test(value);
@@ -35,6 +41,141 @@ function detectDomain(prompt: string) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function decodeHtml(value: string) {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ");
+}
+
+function stripHtml(value: string) {
+  return decodeHtml(value.replace(/<[^>]*>/g, " ")).replace(/\s+/g, " ").trim();
+}
+
+function unwrapDuckDuckGoUrl(rawHref: string) {
+  const href = decodeHtml(rawHref.trim());
+  if (!href) {
+    return null;
+  }
+
+  if (href.startsWith("http://") || href.startsWith("https://")) {
+    try {
+      const parsed = new URL(href);
+      const redirectTarget = parsed.searchParams.get("uddg");
+      if (redirectTarget) {
+        return decodeURIComponent(redirectTarget);
+      }
+      return href;
+    } catch {
+      return null;
+    }
+  }
+
+  if (href.startsWith("/l/?")) {
+    try {
+      const parsed = new URL(`https://duckduckgo.com${href}`);
+      const redirectTarget = parsed.searchParams.get("uddg");
+      if (redirectTarget) {
+        return decodeURIComponent(redirectTarget);
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function parseDuckDuckGoResults(html: string, maxResults: number) {
+  const blocks = Array.from(html.matchAll(/<div[^>]*class="[^"]*result[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/g));
+  const output: WebSearchResult[] = [];
+  const seen = new Set<string>();
+
+  for (const match of blocks) {
+    const block = match[1] ?? "";
+    const linkMatch = block.match(/<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!linkMatch) {
+      continue;
+    }
+
+    const unwrapped = unwrapDuckDuckGoUrl(linkMatch[1] ?? "");
+    if (!unwrapped || seen.has(unwrapped)) {
+      continue;
+    }
+
+    const title = stripHtml(linkMatch[2] ?? "");
+    if (!title) {
+      continue;
+    }
+
+    const snippetMatch = block.match(/<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/);
+    const snippet = snippetMatch ? stripHtml(snippetMatch[1] ?? "") : undefined;
+
+    seen.add(unwrapped);
+    output.push({
+      title,
+      url: unwrapped,
+      snippet,
+    });
+
+    if (output.length >= maxResults) {
+      break;
+    }
+  }
+
+  return output;
+}
+
+async function runDuckDuckGoSearch(query: string, maxResults: number) {
+  const endpoint = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  const response = await fetch(endpoint, {
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+      accept: "text/html,application/xhtml+xml",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`DuckDuckGo search failed: ${response.status}`);
+  }
+
+  const html = await response.text();
+  return parseDuckDuckGoResults(html, maxResults);
+}
+
+function buildSearchQuery(prompt: string, domain: string) {
+  const base = prompt.trim();
+  if (!base) {
+    return "best travel deals";
+  }
+
+  if (domain === "flight") {
+    return `${base} flight deals promos booking`;
+  }
+  if (domain === "concert") {
+    return `${base} concert tickets presale resale deals`;
+  }
+  if (domain === "train") {
+    return `${base} train tickets passes discounts`;
+  }
+
+  return `${base} deals offers`;
+}
+
+function createSynthesisSummary(sources: { title: string; url: string }[]) {
+  if (sources.length === 0) {
+    return "No reliable source links were captured yet. Kept a placeholder lead so the pipeline can continue; next step is adding fallback providers.";
+  }
+
+  const labels = sources.slice(0, 3).map((source) => source.title);
+  return `Collected ${sources.length} web leads. Strongest early leads: ${labels.join("; ")}. All prices still require live verification before booking.`;
 }
 
 export async function createResearchJobForPrompt(
@@ -145,6 +286,16 @@ export const getLatestJobForThread = query({
           createdAt: v.number(),
         }),
       ),
+      sources: v.array(
+        v.object({
+          rank: v.number(),
+          title: v.string(),
+          url: v.string(),
+          snippet: v.optional(v.string()),
+          provider: v.string(),
+          createdAt: v.number(),
+        }),
+      ),
     }),
   ),
   handler: async (ctx, args) => {
@@ -159,7 +310,7 @@ export const getLatestJobForThread = query({
       return null;
     }
 
-    const [tasks, findings] = await Promise.all([
+    const [tasks, findings, sources] = await Promise.all([
       ctx.db
         .query("researchTasks")
         .withIndex("by_job_order", (q) => q.eq("jobId", selectedJob._id))
@@ -170,6 +321,11 @@ export const getLatestJobForThread = query({
         .withIndex("by_job_createdAt", (q) => q.eq("jobId", selectedJob._id))
         .order("desc")
         .take(4),
+      ctx.db
+        .query("sources")
+        .withIndex("by_job_rank", (q) => q.eq("jobId", selectedJob._id))
+        .order("asc")
+        .take(5),
     ]);
 
     return {
@@ -197,6 +353,14 @@ export const getLatestJobForThread = query({
           sourceType: finding.sourceType,
           createdAt: finding.createdAt,
         })),
+      sources: sources.map((source) => ({
+        rank: source.rank,
+        title: source.title,
+        url: source.url,
+        snippet: source.snippet,
+        provider: source.provider,
+        createdAt: source.createdAt,
+      })),
     };
   },
 });
@@ -207,6 +371,29 @@ export const getJobInternal = internalQuery({
   },
   handler: async (ctx, args) => {
     return await ctx.db.get(args.researchJobId);
+  },
+});
+
+export const getProjectGoalInternal = internalQuery({
+  args: {
+    projectGoalId: v.id("projectGoals"),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db.get(args.projectGoalId);
+  },
+});
+
+export const listSourcesForJobInternal = internalQuery({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    limit: v.number(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("sources")
+      .withIndex("by_job_rank", (q) => q.eq("jobId", args.researchJobId))
+      .order("asc")
+      .take(args.limit);
   },
 });
 
@@ -330,10 +517,11 @@ export const addFindingInternal = internalMutation({
   returns: v.null(),
   handler: async (ctx, args) => {
     let taskId: Id<"researchTasks"> | undefined;
-    if (args.taskKey) {
+    const taskKey = args.taskKey;
+    if (taskKey) {
       const task = await ctx.db
         .query("researchTasks")
-        .withIndex("by_job_taskKey", (q) => q.eq("jobId", args.researchJobId).eq("key", args.taskKey!))
+        .withIndex("by_job_taskKey", (q) => q.eq("jobId", args.researchJobId).eq("key", taskKey))
         .unique();
       taskId = task?._id;
     }
@@ -349,6 +537,63 @@ export const addFindingInternal = internalMutation({
     });
 
     return null;
+  },
+});
+
+export const addSourcesInternal = internalMutation({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    taskKey: v.optional(v.string()),
+    sources: v.array(
+      v.object({
+        rank: v.number(),
+        url: v.string(),
+        title: v.string(),
+        snippet: v.optional(v.string()),
+        provider: v.union(v.literal("duckduckgo"), v.literal("fallback")),
+      }),
+    ),
+  },
+  returns: v.number(),
+  handler: async (ctx, args) => {
+    let taskId: Id<"researchTasks"> | undefined;
+    const taskKey = args.taskKey;
+    if (taskKey) {
+      const task = await ctx.db
+        .query("researchTasks")
+        .withIndex("by_job_taskKey", (q) => q.eq("jobId", args.researchJobId).eq("key", taskKey))
+        .unique();
+      taskId = task?._id;
+    }
+
+    const existing = await ctx.db
+      .query("sources")
+      .withIndex("by_job_rank", (q) => q.eq("jobId", args.researchJobId))
+      .order("asc")
+      .take(200);
+    const seenUrls = new Set(existing.map((source) => source.url));
+    const now = Date.now();
+
+    let inserted = 0;
+    for (const source of args.sources) {
+      if (seenUrls.has(source.url)) {
+        continue;
+      }
+      seenUrls.add(source.url);
+      await ctx.db.insert("sources", {
+        jobId: args.researchJobId,
+        taskId,
+        rank: source.rank,
+        url: source.url,
+        title: source.title,
+        snippet: source.snippet,
+        provider: source.provider,
+        createdAt: now,
+      });
+      inserted += 1;
+    }
+
+    return inserted;
   },
 });
 
@@ -370,6 +615,19 @@ export const runJobInternal = internalAction({
       return null;
     }
 
+    const goal = await ctx.runQuery(internal.research.getProjectGoalInternal, {
+      projectGoalId: job.projectGoalId,
+    });
+    if (!goal) {
+      await ctx.runMutation(internal.research.patchJobInternal, {
+        researchJobId: args.researchJobId,
+        status: "failed",
+        stage: "Research failed",
+        error: "Project goal not found",
+      });
+      return null;
+    }
+
     try {
       await ctx.runMutation(internal.research.patchJobInternal, {
         researchJobId: args.researchJobId,
@@ -385,12 +643,12 @@ export const runJobInternal = internalAction({
         key: "plan",
         status: "running",
       });
-      await sleep(450);
+      await sleep(250);
       await ctx.runMutation(internal.research.patchTaskInternal, {
         researchJobId: args.researchJobId,
         key: "plan",
         status: "completed",
-        output: "Generated branches for route checks, deal checks, and constraints.",
+        output: "Generated scan strategy with one live web search branch.",
       });
 
       await ctx.runMutation(internal.research.patchJobInternal, {
@@ -403,31 +661,60 @@ export const runJobInternal = internalAction({
         key: "scan",
         status: "running",
       });
-      await sleep(500);
 
-      await ctx.runMutation(internal.research.addFindingInternal, {
-        researchJobId: args.researchJobId,
-        taskKey: "scan",
-        title: "Nearby-airport branch detected",
-        summary: "Found a lower median fare trend when allowing nearby airports for departure and arrival.",
-        confidence: 0.72,
-        sourceType: "simulated",
-      });
+      const searchQuery = buildSearchQuery(goal.prompt, goal.domain);
+      let webResults: WebSearchResult[] = [];
 
-      await ctx.runMutation(internal.research.addFindingInternal, {
-        researchJobId: args.researchJobId,
-        taskKey: "scan",
-        title: "Split-ticket branch worth evaluating",
-        summary: "Potential savings from split itineraries with longer layovers; needs live fare verification.",
-        confidence: 0.64,
-        sourceType: "simulated",
-      });
+      try {
+        webResults = await runDuckDuckGoSearch(searchQuery, 6);
+      } catch {
+        webResults = [];
+      }
+
+      if (webResults.length > 0) {
+        await ctx.runMutation(internal.research.addSourcesInternal, {
+          researchJobId: args.researchJobId,
+          taskKey: "scan",
+          sources: webResults.map((result, index) => ({
+            rank: index + 1,
+            url: result.url,
+            title: result.title,
+            snippet: result.snippet,
+            provider: "duckduckgo" as const,
+          })),
+        });
+
+        const top = webResults.slice(0, 2);
+        for (const result of top) {
+          await ctx.runMutation(internal.research.addFindingInternal, {
+            researchJobId: args.researchJobId,
+            taskKey: "scan",
+            title: result.title,
+            summary: result.snippet ?? "Captured a relevant source lead for this query.",
+            confidence: 0.62,
+            sourceType: "web",
+          });
+        }
+      } else {
+        await ctx.runMutation(internal.research.addFindingInternal, {
+          researchJobId: args.researchJobId,
+          taskKey: "scan",
+          title: "Live web scan fallback used",
+          summary:
+            "Web search provider returned no parsed results for this run. Pipeline remained healthy and created a fallback lead.",
+          confidence: 0.38,
+          sourceType: "simulated",
+        });
+      }
 
       await ctx.runMutation(internal.research.patchTaskInternal, {
         researchJobId: args.researchJobId,
         key: "scan",
         status: "completed",
-        output: "Collected preliminary evidence from simulated branches.",
+        output:
+          webResults.length > 0
+            ? `Collected ${webResults.length} real web source leads.`
+            : "No parsed web leads; fallback evidence was recorded.",
       });
 
       await ctx.runMutation(internal.research.patchJobInternal, {
@@ -442,12 +729,28 @@ export const runJobInternal = internalAction({
         key: "synthesize",
         status: "running",
       });
-      await sleep(500);
+
+      const sourceDocs = await ctx.runQuery(internal.research.listSourcesForJobInternal, {
+        researchJobId: args.researchJobId,
+        limit: 6,
+      });
+
+      await ctx.runMutation(internal.research.addFindingInternal, {
+        researchJobId: args.researchJobId,
+        taskKey: "synthesize",
+        title: "Early shortlist shell",
+        summary: createSynthesisSummary(
+          sourceDocs.map((source: { title: string; url: string }) => ({ title: source.title, url: source.url })),
+        ),
+        confidence: sourceDocs.length > 0 ? 0.66 : 0.42,
+        sourceType: sourceDocs.length > 0 ? "web" : "simulated",
+      });
+
       await ctx.runMutation(internal.research.patchTaskInternal, {
         researchJobId: args.researchJobId,
         key: "synthesize",
         status: "completed",
-        output: "Prepared ranked shortlist shell (cheapest/value/convenience).",
+        output: "Built a shortlist summary from captured source leads.",
       });
 
       await ctx.runMutation(internal.research.patchJobInternal, {
@@ -456,7 +759,7 @@ export const runJobInternal = internalAction({
         stage: "Verifying freshness",
         progress: 92,
       });
-      await sleep(350);
+      await sleep(200);
 
       await ctx.runMutation(internal.research.patchJobInternal, {
         researchJobId: args.researchJobId,

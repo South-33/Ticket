@@ -76,6 +76,12 @@ Why this approach:
 
 ## 5) Deep Research Strategy (Inspired by GPT Researcher)
 
+Reference implementation path for local study:
+
+- `C:\Users\Venom\Documents\CODE\.vscode\Project\gpt-researcher`
+
+Use it as a pattern library for planner/executor/synthesis structure, not as a strict runtime dependency for this stack.
+
 Adopt:
 
 - Planner -> branch executors -> synthesizer

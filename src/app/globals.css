@@ -547,6 +547,25 @@ body.resizing-sidebar * {
   margin-bottom: 0;
 }
 
+.research-status-sources {
+  margin-top: 0.7rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.research-status-sources a {
+  font-size: 0.73rem;
+  color: var(--text-secondary);
+  text-decoration: none;
+  border-bottom: 1px dashed transparent;
+  width: fit-content;
+}
+
+.research-status-sources a:hover {
+  color: var(--text-primary);
+  border-bottom-color: var(--text-primary);
+}
+
 /* Global Smooth Scrollbar for Body/Root (Lenis) */
 ::-webkit-scrollbar {
   width: 10px;

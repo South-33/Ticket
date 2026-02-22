@@ -555,7 +555,7 @@ export function Chat() {
                 )}
                 {latestResearchJob.tasks.length > 0 && (
                   <ul className="research-status-tasks">
-                    {latestResearchJob.tasks.map((task) => (
+                    {latestResearchJob.tasks.map((task: { key: string; label: string; status: string }) => (
                       <li key={task.key} className={clsx("research-status-task", `status-${task.status}`)}>
                         <span>{task.label}</span>
                         <span>{toResearchStatusLabel(task.status)}</span>
@@ -565,10 +565,24 @@ export function Chat() {
                 )}
                 {!isResearchActive && latestResearchJob.findings.length > 0 && (
                   <div className="research-status-findings">
-                    {latestResearchJob.findings.map((finding) => (
+                    {latestResearchJob.findings.map((finding: { title: string; summary: string; createdAt: number }) => (
                       <p key={`${finding.title}-${finding.createdAt}`}>
                         <strong>{finding.title}:</strong> {finding.summary}
                       </p>
+                    ))}
+                  </div>
+                )}
+                {latestResearchJob.sources.length > 0 && (
+                  <div className="research-status-sources">
+                    {latestResearchJob.sources.map((source: { url: string; rank: number; title: string }) => (
+                      <a
+                        key={`${source.url}-${source.rank}`}
+                        href={source.url}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        [{source.rank}] {source.title}
+                      </a>
                     ))}
                   </div>
                 )}
