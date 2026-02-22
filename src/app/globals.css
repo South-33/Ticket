@@ -12,7 +12,7 @@
   --font-mono: "JetBrains Mono", monospace;
 
   --input-side-fade-color: var(--bg-color);
-  --input-side-fade-size: 5.4rem;
+  --input-side-fade-size: 5rem;
 
   --transition-slow: 0.8s cubic-bezier(0.16, 1, 0.3, 1);
   --transition-fast: 0.3s cubic-bezier(0.16, 1, 0.3, 1);
@@ -566,7 +566,7 @@ body.resizing-sidebar * {
   right: 0;
   height: 5rem;
   background: linear-gradient(to bottom, var(--bg-color) 1%, transparent);
-  z-index: 100;
+  z-index: 90;
   pointer-events: none;
 }
 
@@ -578,7 +578,7 @@ body.resizing-sidebar * {
   right: 0;
   height: 3.5rem;
   background: linear-gradient(to top, var(--bg-color) 1%, transparent);
-  z-index: 100;
+  z-index: 90;
   pointer-events: none;
 }
 
@@ -615,6 +615,7 @@ body.resizing-sidebar * {
   flex-direction: column;
   gap: 3rem;
   transition: opacity 500ms ease;
+  position: relative;
 }
 
 .research-status {
@@ -907,9 +908,14 @@ body.resizing-sidebar * {
 }
 
 @keyframes slideUpFade {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
   }
 }
 
@@ -942,6 +948,8 @@ body.resizing-sidebar * {
   grid-column: 3;
   justify-self: end;
   width: 100%;
+  position: relative;
+  z-index: 55;
 }
 
 .message.user .message-meta {
@@ -973,11 +981,15 @@ body.resizing-sidebar * {
   grid-column: 1;
   justify-self: start;
   width: 100%;
+  position: relative;
+  z-index: 55;
 }
 
 .response-container {
   grid-column: 2;
   width: 100%;
+  position: relative;
+  z-index: 35;
 }
 
 .message.ai .message-meta::before {
@@ -1198,7 +1210,7 @@ body.resizing-sidebar * {
   bottom: 0;
   right: 0;
   left: 320px;
-  z-index: 100;
+  z-index: 45;
   pointer-events: none;
 }
 
@@ -1224,16 +1236,18 @@ body.resizing-sidebar * {
   padding-bottom: 0.5rem;
 }
 
-.input-container::before {
-  content: "";
+.input-fade-layer {
   position: absolute;
-  bottom: -3rem;
-  left: -2rem;
-  right: -2rem;
-  height: 12rem;
-  background: linear-gradient(to bottom, transparent, var(--bg-color) 50%, var(--bg-color) 100%);
+  top: -5rem;
+  bottom: -20rem;
+  left: calc(-1 * var(--input-side-fade-size));
+  right: calc(-1 * var(--input-side-fade-size));
   z-index: 0;
   pointer-events: none;
+  background: var(--input-side-fade-color);
+  border-radius: 6px;
+  filter: blur(36px);
+  opacity: 1;
 }
 
 .input-container::after {
@@ -1256,25 +1270,6 @@ body.resizing-sidebar * {
   margin-bottom: 2px;
   color: var(--text-primary);
   font-weight: 700;
-}
-
-.input-side-fade {
-  position: absolute;
-  bottom: -3rem;
-  width: var(--input-side-fade-size);
-  height: 3rem;
-  z-index: 0;
-  pointer-events: none;
-}
-
-.input-side-fade-left {
-  left: calc(-1 * var(--input-side-fade-size));
-  background: linear-gradient(to right, transparent, var(--input-side-fade-color));
-}
-
-.input-side-fade-right {
-  right: calc(-1 * var(--input-side-fade-size));
-  background: linear-gradient(to right, var(--input-side-fade-color), transparent);
 }
 
 textarea {

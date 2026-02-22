@@ -960,8 +960,7 @@ function AuthenticatedChat() {
             <div className="input-grid">
               <form className="input-container" onSubmit={(event) => void handleSend(event)}>
                 <span className="input-prefix">_&gt;</span>
-                <span className="input-side-fade input-side-fade-left" aria-hidden />
-                <span className="input-side-fade input-side-fade-right" aria-hidden />
+                <span className="input-fade-layer" aria-hidden />
 
                 <textarea
                   id="userInput"
