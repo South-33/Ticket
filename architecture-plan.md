@@ -356,7 +356,11 @@ Locking these now prevents painful refactors later.
 - Memory confirmation policy
   - Explicit confirmation required for sensitive facts
 - Job retry policy
-  - Max attempts, backoff curve, and terminal failure handling
+  - `MAX_JOB_ATTEMPTS = 3`
+  - Backoff curve: `30s -> 120s -> 300s`
+  - Retryable error codes: `provider_rate_limited`, `provider_unavailable`, `unknown_error`
+  - Terminal error codes: `provider_key_missing`, `task_missing`, `goal_missing`
+  - Persist retry metadata on jobs/tasks: `attempt`, `nextRunAt`, `lastErrorCode` / `errorCode`
 - Domain rollout order
   - Flights first, then trains, then concerts
 - Cost and latency budgets

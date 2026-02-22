@@ -8,38 +8,87 @@ import {
   query,
   type MutationCtx,
 } from "./_generated/server";
+import { paginationOptsValidator } from "convex/server";
 import {
   extractWithTavily,
   searchWebWithTavily,
   type SearchLead,
 } from "./researchProvider";
+import {
+  buildFollowUpQuestion,
+  detectDomain,
+  detectMode,
+  extractSlotsFromPrompt,
+  mergeSlots,
+  missingSlots,
+  summarizeConstraints,
+} from "./researchIntake";
+import { buildRankedResultsFromCandidates } from "./researchRanking";
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "expired"]);
+const MAX_PAGE_SIZE = 50;
+const MAX_JOB_ATTEMPTS = 3;
+const RETRY_BACKOFF_MS = [30_000, 120_000, 300_000] as const;
 
-function detectDomain(prompt: string) {
-  const value = prompt.toLowerCase();
-  const hasFlight = /(flight|airport|layover|airline|fare)/.test(value);
-  const hasTrain = /(train|rail|station|eurail)/.test(value);
-  const hasConcert = /(concert|show|gig|ticketmaster|seatgeek|event)/.test(value);
+type CandidateCategory = "cheapest" | "best_value" | "most_convenient";
 
-  const count = Number(hasFlight) + Number(hasTrain) + Number(hasConcert);
-  if (count >= 2) {
-    return "mixed" as const;
-  }
-  if (hasFlight) {
-    return "flight" as const;
-  }
-  if (hasTrain) {
-    return "train" as const;
-  }
-  if (hasConcert) {
-    return "concert" as const;
-  }
-  return "general" as const;
-}
+type CandidateDraft = {
+  category: CandidateCategory;
+  title: string;
+  summary: string;
+  confidence: number;
+  verificationStatus: "needs_live_check" | "partially_verified" | "verified";
+  primarySourceUrl?: string;
+  sourceUrls: string[];
+};
+
+type ResearchErrorCode =
+  | "provider_key_missing"
+  | "provider_rate_limited"
+  | "provider_unavailable"
+  | "task_missing"
+  | "goal_missing"
+  | "unknown_error";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function assertPageSize(numItems: number) {
+  if (numItems < 1 || numItems > MAX_PAGE_SIZE) {
+    throw new ConvexError(`paginationOpts.numItems must be between 1 and ${MAX_PAGE_SIZE}`);
+  }
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function classifyResearchError(error: unknown): { code: ResearchErrorCode; retryable: boolean } {
+  const message = errorMessage(error);
+
+  if (/TAVILY_API_KEY is not configured/i.test(message)) {
+    return { code: "provider_key_missing", retryable: false };
+  }
+  if (/429|rate limit/i.test(message)) {
+    return { code: "provider_rate_limited", retryable: true };
+  }
+  if (/tavily.*failed:\s*5\d\d|fetch failed|network|timeout/i.test(message)) {
+    return { code: "provider_unavailable", retryable: true };
+  }
+  if (/Research task not found/i.test(message)) {
+    return { code: "task_missing", retryable: false };
+  }
+  if (/Project goal not found/i.test(message)) {
+    return { code: "goal_missing", retryable: false };
+  }
+
+  return { code: "unknown_error", retryable: true };
+}
+
+function computeRetryDelayMs(attempt: number) {
+  const idx = Math.max(0, Math.min(RETRY_BACKOFF_MS.length - 1, attempt - 1));
+  return RETRY_BACKOFF_MS[idx];
 }
 
 function summarizeExtractedContent(value: string | undefined) {
@@ -81,6 +130,77 @@ function createSynthesisSummary(sources: { title: string; url: string }[]) {
   return `Collected ${sources.length} web leads. Strongest early leads: ${labels.join("; ")}. All prices still require live verification before booking.`;
 }
 
+function buildCandidateDrafts(goal: { prompt: string; domain: string }, sources: { title: string; url: string }[]): CandidateDraft[] {
+  const top = sources.slice(0, 4);
+  const sourceUrls = top.map((source) => source.url);
+  const primary = sourceUrls[0];
+  const routeHint = goal.domain === "flight" ? "route and airport alternatives" : "option alternatives";
+
+  if (top.length === 0) {
+    return [
+      {
+        category: "cheapest",
+        title: "Lowest-Cost Lead Pending",
+        summary:
+          "No reliable live source links were captured in this run. Re-run search or broaden query constraints before presenting a bookable cheapest option.",
+        confidence: 0.25,
+        verificationStatus: "needs_live_check",
+        sourceUrls: [],
+      },
+      {
+        category: "best_value",
+        title: "Best-Value Lead Pending",
+        summary:
+          "Value recommendation is blocked until at least one credible source is available for comparison across total cost and tradeoffs.",
+        confidence: 0.22,
+        verificationStatus: "needs_live_check",
+        sourceUrls: [],
+      },
+      {
+        category: "most_convenient",
+        title: "Convenience Lead Pending",
+        summary:
+          "Convenience recommendation needs validated timing and transfer details from live sources before ranking can be trusted.",
+        confidence: 0.2,
+        verificationStatus: "needs_live_check",
+        sourceUrls: [],
+      },
+    ];
+  }
+
+  return [
+    {
+      category: "cheapest",
+      title: "Cheapest Candidate (Web Lead)",
+      summary:
+        "Prioritize the strongest low-cost source first, then verify total payable amount including fees and baggage before booking.",
+      confidence: 0.58,
+      verificationStatus: "needs_live_check",
+      primarySourceUrl: primary,
+      sourceUrls,
+    },
+    {
+      category: "best_value",
+      title: "Best Value Candidate (Balanced)",
+      summary: `Balance total price against ${routeHint}, transfer burden, and policy flexibility using the top ranked source set.`,
+      confidence: 0.62,
+      verificationStatus: "partially_verified",
+      primarySourceUrl: sourceUrls[1] ?? primary,
+      sourceUrls,
+    },
+    {
+      category: "most_convenient",
+      title: "Most Convenient Candidate",
+      summary:
+        "Favor fewer transfers and simpler booking flow while staying within acceptable budget variance from the low-cost candidate.",
+      confidence: 0.55,
+      verificationStatus: "needs_live_check",
+      primarySourceUrl: sourceUrls[2] ?? primary,
+      sourceUrls,
+    },
+  ];
+}
+
 export async function createResearchJobForPrompt(
   ctx: MutationCtx,
   args: {
@@ -92,6 +212,27 @@ export async function createResearchJobForPrompt(
 ) {
   const now = Date.now();
   const domain = detectDomain(args.prompt);
+  const mode = detectMode(args.prompt);
+
+  const confirmedFacts = await ctx.db
+    .query("userMemoryFacts")
+    .withIndex("by_user_status_updatedAt", (q) => q.eq("userId", args.userId).eq("status", "confirmed"))
+    .order("desc")
+    .take(60);
+
+  const memorySlots = confirmedFacts.reduce<Record<string, string>>((acc, fact) => {
+    if (!acc[fact.key]) {
+      acc[fact.key] = fact.value;
+    }
+    return acc;
+  }, {});
+
+  const promptSlots = extractSlotsFromPrompt(args.prompt, domain);
+  const mergedSlots = mergeSlots(promptSlots, memorySlots);
+  const missingFieldList = missingSlots(domain, mergedSlots);
+  const followUpQuestion = buildFollowUpQuestion(domain, missingFieldList);
+  const goalStatus = missingFieldList.length > 0 ? "awaiting_input" : "ready";
+  const jobStatus = missingFieldList.length > 0 ? "awaiting_input" : "planned";
 
   const projectGoalId = await ctx.db.insert("projectGoals", {
     userId: args.userId,
@@ -99,20 +240,78 @@ export async function createResearchJobForPrompt(
     promptMessageId: args.promptMessageId,
     prompt: args.prompt,
     domain,
-    status: "ready",
+    status: goalStatus,
+    mode,
+    missingFields: missingFieldList,
+    followUpQuestion,
+    constraintSummary: summarizeConstraints(mergedSlots),
     createdAt: now,
     updatedAt: now,
   });
+
+  const slotKeys = Array.from(new Set([...Object.keys(mergedSlots), ...missingFieldList]));
+  await Promise.all(
+    slotKeys.map((key) =>
+      ctx.db.insert("projectGoalSlots", {
+        projectGoalId,
+        key,
+        value: mergedSlots[key],
+        status: mergedSlots[key] ? "provided" : "missing",
+        sourceType: promptSlots[key] ? "prompt" : mergedSlots[key] ? "memory" : "prompt",
+        isSensitive: key === "nationality" || key === "ageBand",
+        createdAt: now,
+        updatedAt: now,
+      }),
+    ),
+  );
+
+  for (const [key, value] of Object.entries(promptSlots)) {
+    if (!value) {
+      continue;
+    }
+    const isSensitive = key === "nationality" || key === "ageBand";
+    const existingFact = await ctx.db
+      .query("userMemoryFacts")
+      .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", key))
+      .order("desc")
+      .take(1);
+
+    if (!existingFact[0]) {
+      await ctx.db.insert("userMemoryFacts", {
+        userId: args.userId,
+        key,
+        value,
+        sourceType: "inferred",
+        confidence: isSensitive ? 0.45 : 0.66,
+        status: isSensitive ? "proposed" : "confirmed",
+        isSensitive,
+        createdAt: now,
+        updatedAt: now,
+      });
+      continue;
+    }
+
+    await ctx.db.patch(existingFact[0]._id, {
+      value,
+      sourceType: "inferred",
+      confidence: isSensitive ? 0.45 : 0.66,
+      status: isSensitive ? "proposed" : "confirmed",
+      isSensitive,
+      updatedAt: now,
+    });
+  }
 
   const researchJobId = await ctx.db.insert("researchJobs", {
     userId: args.userId,
     threadId: args.threadId,
     promptMessageId: args.promptMessageId,
     projectGoalId,
-    status: "planned",
-    stage: "Queued",
+    status: jobStatus,
+    stage: jobStatus === "planned" ? "Queued" : "Awaiting Required Details",
     progress: 0,
     attempt: 0,
+    missingFields: missingFieldList,
+    followUpQuestion,
     createdAt: now,
     updatedAt: now,
   });
@@ -124,6 +323,7 @@ export async function createResearchJobForPrompt(
       label: "Build search plan",
       order: 0,
       status: "queued",
+      attempt: 0,
       createdAt: now,
       updatedAt: now,
     }),
@@ -133,6 +333,7 @@ export async function createResearchJobForPrompt(
       label: "Scan candidate sources",
       order: 1,
       status: "queued",
+      attempt: 0,
       createdAt: now,
       updatedAt: now,
     }),
@@ -142,18 +343,24 @@ export async function createResearchJobForPrompt(
       label: "Synthesize shortlist",
       order: 2,
       status: "queued",
+      attempt: 0,
       createdAt: now,
       updatedAt: now,
     }),
   ]);
 
-  await ctx.scheduler.runAfter(0, internal.research.runJobInternal, {
-    researchJobId,
-  });
+  if (jobStatus === "planned") {
+    await ctx.scheduler.runAfter(0, internal.research.runJobInternal, {
+      researchJobId,
+    });
+  }
 
   return {
     researchJobId,
     projectGoalId,
+    jobStatus,
+    missingFields: missingFieldList,
+    followUpQuestion,
   };
 }
 
@@ -169,6 +376,10 @@ export const getLatestJobForThread = query({
       stage: v.string(),
       progress: v.number(),
       error: v.optional(v.string()),
+      lastErrorCode: v.optional(v.string()),
+      nextRunAt: v.optional(v.number()),
+      missingFields: v.optional(v.array(v.string())),
+      followUpQuestion: v.optional(v.string()),
       startedAt: v.optional(v.number()),
       completedAt: v.optional(v.number()),
       updatedAt: v.number(),
@@ -176,7 +387,10 @@ export const getLatestJobForThread = query({
         v.object({
           key: v.string(),
           label: v.string(),
+          attempt: v.number(),
           status: v.string(),
+          errorCode: v.optional(v.string()),
+          nextRunAt: v.optional(v.number()),
           updatedAt: v.number(),
         }),
       ),
@@ -199,6 +413,30 @@ export const getLatestJobForThread = query({
           createdAt: v.number(),
         }),
       ),
+      candidates: v.array(
+        v.object({
+          category: v.string(),
+          title: v.string(),
+          summary: v.string(),
+          confidence: v.number(),
+          verificationStatus: v.string(),
+          primarySourceUrl: v.optional(v.string()),
+          sourceUrls: v.array(v.string()),
+          updatedAt: v.number(),
+        }),
+      ),
+      rankedResults: v.array(
+        v.object({
+          category: v.string(),
+          rank: v.number(),
+          score: v.number(),
+          title: v.string(),
+          rationale: v.string(),
+          verificationStatus: v.string(),
+          sourceUrls: v.array(v.string()),
+          updatedAt: v.number(),
+        }),
+      ),
     }),
   ),
   handler: async (ctx, args) => {
@@ -213,7 +451,7 @@ export const getLatestJobForThread = query({
       return null;
     }
 
-    const [tasks, findings, sources] = await Promise.all([
+    const [tasks, findings, sources, candidates, rankedResults] = await Promise.all([
       ctx.db
         .query("researchTasks")
         .withIndex("by_job_order", (q) => q.eq("jobId", selectedJob._id))
@@ -229,6 +467,16 @@ export const getLatestJobForThread = query({
         .withIndex("by_job_rank", (q) => q.eq("jobId", selectedJob._id))
         .order("asc")
         .take(5),
+      ctx.db
+        .query("candidates")
+        .withIndex("by_job_updatedAt", (q) => q.eq("jobId", selectedJob._id))
+        .order("desc")
+        .take(8),
+      ctx.db
+        .query("rankedResults")
+        .withIndex("by_job_rank", (q) => q.eq("jobId", selectedJob._id))
+        .order("asc")
+        .take(10),
     ]);
 
     return {
@@ -237,13 +485,20 @@ export const getLatestJobForThread = query({
       stage: selectedJob.stage,
       progress: selectedJob.progress,
       error: selectedJob.error,
+      lastErrorCode: selectedJob.lastErrorCode,
+      nextRunAt: selectedJob.nextRunAt,
+      missingFields: selectedJob.missingFields,
+      followUpQuestion: selectedJob.followUpQuestion,
       startedAt: selectedJob.startedAt,
       completedAt: selectedJob.completedAt,
       updatedAt: selectedJob.updatedAt,
       tasks: tasks.map((task) => ({
         key: task.key,
         label: task.label,
+        attempt: task.attempt,
         status: task.status,
+        errorCode: task.errorCode,
+        nextRunAt: task.nextRunAt,
         updatedAt: task.updatedAt,
       })),
       findings: findings
@@ -263,6 +518,203 @@ export const getLatestJobForThread = query({
         snippet: source.snippet,
         provider: source.provider,
         createdAt: source.createdAt,
+      })),
+      candidates: candidates
+        .slice()
+        .reverse()
+        .map((candidate) => ({
+          category: candidate.category,
+          title: candidate.title,
+          summary: candidate.summary,
+          confidence: candidate.confidence,
+          verificationStatus: candidate.verificationStatus,
+          primarySourceUrl: candidate.primarySourceUrl,
+          sourceUrls: candidate.sourceUrls,
+          updatedAt: candidate.updatedAt,
+        })),
+      rankedResults: rankedResults.map((ranked) => ({
+        category: ranked.category,
+        rank: ranked.rank,
+        score: ranked.score,
+        title: ranked.title,
+        rationale: ranked.rationale,
+        verificationStatus: ranked.verificationStatus,
+        sourceUrls: ranked.sourceUrls,
+        updatedAt: ranked.updatedAt,
+      })),
+    };
+  },
+});
+
+export const listJobsByThread = query({
+  args: {
+    threadId: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    assertPageSize(args.paginationOpts.numItems);
+
+    const result = await ctx.db
+      .query("researchJobs")
+      .withIndex("by_thread_updatedAt", (q) => q.eq("threadId", args.threadId))
+      .order("desc")
+      .paginate(args.paginationOpts);
+
+    return {
+      ...result,
+      page: result.page.map((job) => ({
+        researchJobId: job._id,
+        status: job.status,
+        stage: job.stage,
+        progress: job.progress,
+        lastErrorCode: job.lastErrorCode,
+        nextRunAt: job.nextRunAt,
+        missingFields: job.missingFields,
+        updatedAt: job.updatedAt,
+      })),
+    };
+  },
+});
+
+export const listSourcesByJob = query({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    assertPageSize(args.paginationOpts.numItems);
+
+    const result = await ctx.db
+      .query("sources")
+      .withIndex("by_job_rank", (q) => q.eq("jobId", args.researchJobId))
+      .order("asc")
+      .paginate(args.paginationOpts);
+
+    return {
+      ...result,
+      page: result.page.map((source) => ({
+        rank: source.rank,
+        title: source.title,
+        url: source.url,
+        snippet: source.snippet,
+        provider: source.provider,
+        createdAt: source.createdAt,
+      })),
+    };
+  },
+});
+
+export const listCandidatesByJob = query({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    assertPageSize(args.paginationOpts.numItems);
+
+    const result = await ctx.db
+      .query("candidates")
+      .withIndex("by_job_updatedAt", (q) => q.eq("jobId", args.researchJobId))
+      .order("desc")
+      .paginate(args.paginationOpts);
+
+    return {
+      ...result,
+      page: result.page.map((candidate) => ({
+        category: candidate.category,
+        title: candidate.title,
+        summary: candidate.summary,
+        confidence: candidate.confidence,
+        verificationStatus: candidate.verificationStatus,
+        primarySourceUrl: candidate.primarySourceUrl,
+        sourceUrls: candidate.sourceUrls,
+        updatedAt: candidate.updatedAt,
+      })),
+    };
+  },
+});
+
+export const listTasksByJob = query({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    assertPageSize(args.paginationOpts.numItems);
+
+    const result = await ctx.db
+      .query("researchTasks")
+      .withIndex("by_job_order", (q) => q.eq("jobId", args.researchJobId))
+      .order("asc")
+      .paginate(args.paginationOpts);
+
+    return {
+      ...result,
+      page: result.page.map((task) => ({
+        key: task.key,
+        label: task.label,
+        order: task.order,
+        status: task.status,
+        attempt: task.attempt,
+        errorCode: task.errorCode,
+        nextRunAt: task.nextRunAt,
+        updatedAt: task.updatedAt,
+      })),
+    };
+  },
+});
+
+export const listFindingsByJob = query({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    assertPageSize(args.paginationOpts.numItems);
+
+    const result = await ctx.db
+      .query("findings")
+      .withIndex("by_job_createdAt", (q) => q.eq("jobId", args.researchJobId))
+      .order("desc")
+      .paginate(args.paginationOpts);
+
+    return {
+      ...result,
+      page: result.page.map((finding) => ({
+        title: finding.title,
+        summary: finding.summary,
+        confidence: finding.confidence,
+        sourceType: finding.sourceType,
+        createdAt: finding.createdAt,
+      })),
+    };
+  },
+});
+
+export const listRankedResultsByJob = query({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    assertPageSize(args.paginationOpts.numItems);
+
+    const result = await ctx.db
+      .query("rankedResults")
+      .withIndex("by_job_rank", (q) => q.eq("jobId", args.researchJobId))
+      .order("asc")
+      .paginate(args.paginationOpts);
+
+    return {
+      ...result,
+      page: result.page.map((ranked) => ({
+        category: ranked.category,
+        rank: ranked.rank,
+        score: ranked.score,
+        title: ranked.title,
+        rationale: ranked.rationale,
+        verificationStatus: ranked.verificationStatus,
+        updatedAt: ranked.updatedAt,
       })),
     };
   },
@@ -319,7 +771,9 @@ export const patchJobInternal = internalMutation({
     ),
     stage: v.optional(v.string()),
     progress: v.optional(v.number()),
-    error: v.optional(v.string()),
+    error: v.optional(v.union(v.string(), v.null())),
+    lastErrorCode: v.optional(v.union(v.string(), v.null())),
+    nextRunAt: v.optional(v.union(v.number(), v.null())),
     attemptDelta: v.optional(v.number()),
     startedNow: v.optional(v.boolean()),
     completedNow: v.optional(v.boolean()),
@@ -346,7 +800,13 @@ export const patchJobInternal = internalMutation({
       patch.progress = args.progress;
     }
     if (args.error !== undefined) {
-      patch.error = args.error;
+      patch.error = args.error ?? undefined;
+    }
+    if (args.lastErrorCode !== undefined) {
+      patch.lastErrorCode = args.lastErrorCode ?? undefined;
+    }
+    if (args.nextRunAt !== undefined) {
+      patch.nextRunAt = args.nextRunAt ?? undefined;
     }
     if (args.attemptDelta !== undefined) {
       patch.attempt = current.attempt + args.attemptDelta;
@@ -375,8 +835,11 @@ export const patchTaskInternal = internalMutation({
       v.literal("skipped"),
       v.literal("timeout"),
     ),
+    attemptDelta: v.optional(v.number()),
     output: v.optional(v.string()),
-    error: v.optional(v.string()),
+    error: v.optional(v.union(v.string(), v.null())),
+    errorCode: v.optional(v.union(v.string(), v.null())),
+    nextRunAt: v.optional(v.union(v.number(), v.null())),
   },
   returns: v.null(),
   handler: async (ctx, args) => {
@@ -390,10 +853,9 @@ export const patchTaskInternal = internalMutation({
     }
 
     const now = Date.now();
-    await ctx.db.patch(task._id, {
+    const patch: Record<string, unknown> = {
       status: args.status,
-      output: args.output,
-      error: args.error,
+      attempt: task.attempt + (args.attemptDelta ?? 0),
       updatedAt: now,
       startedAt: args.status === "running" ? now : task.startedAt,
       completedAt:
@@ -403,7 +865,22 @@ export const patchTaskInternal = internalMutation({
         args.status === "timeout"
           ? now
           : task.completedAt,
-    });
+    };
+
+    if (args.output !== undefined) {
+      patch.output = args.output;
+    }
+    if (args.error !== undefined) {
+      patch.error = args.error ?? undefined;
+    }
+    if (args.errorCode !== undefined) {
+      patch.errorCode = args.errorCode ?? undefined;
+    }
+    if (args.nextRunAt !== undefined) {
+      patch.nextRunAt = args.nextRunAt ?? undefined;
+    }
+
+    await ctx.db.patch(task._id, patch);
     return null;
   },
 });
@@ -500,6 +977,111 @@ export const addSourcesInternal = internalMutation({
   },
 });
 
+export const replaceCandidatesInternal = internalMutation({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    candidates: v.array(
+      v.object({
+        category: v.union(
+          v.literal("cheapest"),
+          v.literal("best_value"),
+          v.literal("most_convenient"),
+        ),
+        title: v.string(),
+        summary: v.string(),
+        confidence: v.number(),
+        verificationStatus: v.union(
+          v.literal("needs_live_check"),
+          v.literal("partially_verified"),
+          v.literal("verified"),
+        ),
+        primarySourceUrl: v.optional(v.string()),
+        sourceUrls: v.array(v.string()),
+      }),
+    ),
+  },
+  returns: v.number(),
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("candidates")
+      .withIndex("by_job_updatedAt", (q) => q.eq("jobId", args.researchJobId))
+      .order("desc")
+      .take(20);
+
+    await Promise.all(existing.map((candidate) => ctx.db.delete(candidate._id)));
+
+    const now = Date.now();
+    for (const candidate of args.candidates) {
+      await ctx.db.insert("candidates", {
+        jobId: args.researchJobId,
+        category: candidate.category,
+        title: candidate.title,
+        summary: candidate.summary,
+        confidence: candidate.confidence,
+        verificationStatus: candidate.verificationStatus,
+        primarySourceUrl: candidate.primarySourceUrl,
+        sourceUrls: candidate.sourceUrls,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    return args.candidates.length;
+  },
+});
+
+export const replaceRankedResultsInternal = internalMutation({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    rankedResults: v.array(
+      v.object({
+        category: v.union(
+          v.literal("cheapest"),
+          v.literal("best_value"),
+          v.literal("most_convenient"),
+        ),
+        rank: v.number(),
+        score: v.number(),
+        title: v.string(),
+        rationale: v.string(),
+        verificationStatus: v.union(
+          v.literal("needs_live_check"),
+          v.literal("partially_verified"),
+          v.literal("verified"),
+        ),
+        sourceUrls: v.array(v.string()),
+      }),
+    ),
+  },
+  returns: v.number(),
+  handler: async (ctx, args) => {
+    const existing = await ctx.db
+      .query("rankedResults")
+      .withIndex("by_job_rank", (q) => q.eq("jobId", args.researchJobId))
+      .order("asc")
+      .take(20);
+    await Promise.all(existing.map((row) => ctx.db.delete(row._id)));
+
+    const now = Date.now();
+    for (const ranked of args.rankedResults) {
+      await ctx.db.insert("rankedResults", {
+        jobId: args.researchJobId,
+        category: ranked.category,
+        rank: ranked.rank,
+        score: ranked.score,
+        title: ranked.title,
+        rationale: ranked.rationale,
+        verificationStatus: ranked.verificationStatus,
+        sourceUrls: ranked.sourceUrls,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    return args.rankedResults.length;
+  },
+});
+
 export const runJobInternal = internalAction({
   args: {
     researchJobId: v.id("researchJobs"),
@@ -527,11 +1109,20 @@ export const runJobInternal = internalAction({
         status: "failed",
         stage: "Research failed",
         error: "Project goal not found",
+        lastErrorCode: "goal_missing",
+        nextRunAt: null,
       });
       return null;
     }
 
+    let activeTaskKey: "plan" | "scan" | "synthesize" | undefined;
+
     try {
+      const plannerHints = await ctx.runQuery(internal.knowledge.getPlannerHintsInternal, {
+        domain: goal.domain,
+        asOfMs: Date.now(),
+      });
+
       await ctx.runMutation(internal.research.patchJobInternal, {
         researchJobId: args.researchJobId,
         status: "running",
@@ -539,20 +1130,46 @@ export const runJobInternal = internalAction({
         progress: 8,
         attemptDelta: 1,
         startedNow: true,
+        error: null,
+        lastErrorCode: null,
+        nextRunAt: null,
       });
 
+      activeTaskKey = "plan";
       await ctx.runMutation(internal.research.patchTaskInternal, {
         researchJobId: args.researchJobId,
         key: "plan",
         status: "running",
+        attemptDelta: 1,
+        error: null,
+        errorCode: null,
+        nextRunAt: null,
       });
       await sleep(250);
       await ctx.runMutation(internal.research.patchTaskInternal, {
         researchJobId: args.researchJobId,
         key: "plan",
         status: "completed",
-        output: "Generated scan strategy with one live web search branch.",
+        output:
+          plannerHints.length > 0
+            ? `Generated scan strategy with ${plannerHints.length} planner hints from active playbooks.`
+            : "Generated scan strategy with one live web search branch.",
+        error: null,
+        errorCode: null,
+        nextRunAt: null,
       });
+      activeTaskKey = undefined;
+
+      if (plannerHints.length > 0) {
+        await ctx.runMutation(internal.research.addFindingInternal, {
+          researchJobId: args.researchJobId,
+          taskKey: "plan",
+          title: "Planner hints injected",
+          summary: plannerHints.slice(0, 3).join(" | "),
+          confidence: 0.7,
+          sourceType: "simulated",
+        });
+      }
 
       await ctx.runMutation(internal.research.patchJobInternal, {
         researchJobId: args.researchJobId,
@@ -563,7 +1180,12 @@ export const runJobInternal = internalAction({
         researchJobId: args.researchJobId,
         key: "scan",
         status: "running",
+        attemptDelta: 1,
+        error: null,
+        errorCode: null,
+        nextRunAt: null,
       });
+      activeTaskKey = "scan";
 
       const searchQuery = buildSearchQuery(goal.prompt, goal.domain);
       let webResults: SearchLead[] = [];
@@ -584,8 +1206,13 @@ export const runJobInternal = internalAction({
               .map((item) => [item.url, item.rawContent ?? ""]),
           );
         }
-      } catch {
-        webResults = [];
+      } catch (error) {
+        const message = errorMessage(error);
+        if (/TAVILY_API_KEY is not configured/i.test(message)) {
+          webResults = [];
+        } else {
+          throw error;
+        }
       }
 
       if (webResults.length > 0) {
@@ -645,7 +1272,11 @@ export const runJobInternal = internalAction({
           webResults.length > 0
             ? `Collected ${webResults.length} real web source leads and extracted ${extractedByUrl.size} page summaries.`
             : "No parsed web leads; fallback evidence was recorded.",
+        error: null,
+        errorCode: null,
+        nextRunAt: null,
       });
+      activeTaskKey = undefined;
 
       await ctx.runMutation(internal.research.patchJobInternal, {
         researchJobId: args.researchJobId,
@@ -658,11 +1289,35 @@ export const runJobInternal = internalAction({
         researchJobId: args.researchJobId,
         key: "synthesize",
         status: "running",
+        attemptDelta: 1,
+        error: null,
+        errorCode: null,
+        nextRunAt: null,
       });
+      activeTaskKey = "synthesize";
 
       const sourceDocs = await ctx.runQuery(internal.research.listSourcesForJobInternal, {
         researchJobId: args.researchJobId,
         limit: 6,
+      });
+
+      const candidateDrafts = buildCandidateDrafts(
+        {
+          prompt: goal.prompt,
+          domain: goal.domain,
+        },
+        sourceDocs.map((source: { title: string; url: string }) => ({ title: source.title, url: source.url })),
+      );
+
+      await ctx.runMutation(internal.research.replaceCandidatesInternal, {
+        researchJobId: args.researchJobId,
+        candidates: candidateDrafts,
+      });
+
+      const ranked = buildRankedResultsFromCandidates(candidateDrafts);
+      await ctx.runMutation(internal.research.replaceRankedResultsInternal, {
+        researchJobId: args.researchJobId,
+        rankedResults: ranked,
       });
 
       await ctx.runMutation(internal.research.addFindingInternal, {
@@ -681,7 +1336,11 @@ export const runJobInternal = internalAction({
         key: "synthesize",
         status: "completed",
         output: "Built a shortlist summary from captured source leads.",
+        error: null,
+        errorCode: null,
+        nextRunAt: null,
       });
+      activeTaskKey = undefined;
 
       await ctx.runMutation(internal.research.patchJobInternal, {
         researchJobId: args.researchJobId,
@@ -696,16 +1355,70 @@ export const runJobInternal = internalAction({
         status: "completed",
         stage: "Research complete",
         progress: 100,
+        error: null,
+        lastErrorCode: null,
+        nextRunAt: null,
         completedNow: true,
       });
 
       return null;
     } catch (error) {
+      const { code, retryable } = classifyResearchError(error);
+      const message = errorMessage(error);
+      const now = Date.now();
+
+      if (activeTaskKey) {
+        await ctx.runMutation(internal.research.patchTaskInternal, {
+          researchJobId: args.researchJobId,
+          key: activeTaskKey,
+          status: "failed",
+          error: message,
+          errorCode: code,
+        });
+      }
+
+      const latestJob = await ctx.runQuery(internal.research.getJobInternal, {
+        researchJobId: args.researchJobId,
+      });
+      const attempt = latestJob?.attempt ?? job.attempt;
+
+      if (retryable && attempt < MAX_JOB_ATTEMPTS) {
+        const delayMs = computeRetryDelayMs(attempt);
+        const nextRunAt = now + delayMs;
+
+        await ctx.runMutation(internal.research.patchJobInternal, {
+          researchJobId: args.researchJobId,
+          status: "planned",
+          stage: "Retry scheduled",
+          error: message,
+          lastErrorCode: code,
+          nextRunAt,
+        });
+
+        if (activeTaskKey) {
+          await ctx.runMutation(internal.research.patchTaskInternal, {
+            researchJobId: args.researchJobId,
+            key: activeTaskKey,
+            status: "queued",
+            error: null,
+            errorCode: code,
+            nextRunAt,
+          });
+        }
+
+        await ctx.scheduler.runAfter(delayMs, internal.research.runJobInternal, {
+          researchJobId: args.researchJobId,
+        });
+        return null;
+      }
+
       await ctx.runMutation(internal.research.patchJobInternal, {
         researchJobId: args.researchJobId,
         status: "failed",
         stage: "Research failed",
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
+        lastErrorCode: code,
+        nextRunAt: null,
       });
       return null;
     }

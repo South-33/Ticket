@@ -64,6 +64,19 @@ function toResearchStatusLabel(status: string) {
   }
 }
 
+function toCandidateLabel(category: string) {
+  if (category === "cheapest") {
+    return "Cheapest";
+  }
+  if (category === "best_value") {
+    return "Best Value";
+  }
+  if (category === "most_convenient") {
+    return "Most Convenient";
+  }
+  return category;
+}
+
 function getReasoningText(message: UIMessage) {
   return message.parts
     .filter((part) => part.type === "reasoning")
@@ -553,6 +566,14 @@ export function Chat() {
                 {latestResearchJob.error && (
                   <p className="research-status-error">{latestResearchJob.error}</p>
                 )}
+                {latestResearchJob.followUpQuestion && (
+                  <p className="research-status-followup">{latestResearchJob.followUpQuestion}</p>
+                )}
+                {latestResearchJob.missingFields && latestResearchJob.missingFields.length > 0 && (
+                  <p className="research-status-missing">
+                    Missing: {latestResearchJob.missingFields.join(", ")}
+                  </p>
+                )}
                 {latestResearchJob.tasks.length > 0 && (
                   <ul className="research-status-tasks">
                     {latestResearchJob.tasks.map((task: { key: string; label: string; status: string }) => (
@@ -584,6 +605,62 @@ export function Chat() {
                         [{source.rank}] {source.title}
                       </a>
                     ))}
+                  </div>
+                )}
+                {!isResearchActive && latestResearchJob.candidates.length > 0 && (
+                  <div className="research-candidates">
+                    {latestResearchJob.candidates.map(
+                      (candidate: {
+                        category: string;
+                        title: string;
+                        summary: string;
+                        confidence: number;
+                        verificationStatus: string;
+                        primarySourceUrl?: string;
+                        updatedAt: number;
+                      }) => (
+                        <article key={`${candidate.category}-${candidate.updatedAt}`} className="research-candidate">
+                          <div className="research-candidate-head">
+                            <span>{toCandidateLabel(candidate.category)}</span>
+                            <span>{Math.round(candidate.confidence * 100)}%</span>
+                          </div>
+                          <h4>{candidate.title}</h4>
+                          <p>{candidate.summary}</p>
+                          <p className="research-candidate-verification">
+                            Verification: {candidate.verificationStatus.replaceAll("_", " ")}
+                          </p>
+                          {candidate.primarySourceUrl && (
+                            <a href={candidate.primarySourceUrl} target="_blank" rel="noreferrer">
+                              Open primary source
+                            </a>
+                          )}
+                        </article>
+                      ),
+                    )}
+                  </div>
+                )}
+                {!isResearchActive && latestResearchJob.rankedResults.length > 0 && (
+                  <div className="research-ranked-results">
+                    {latestResearchJob.rankedResults.map(
+                      (result: {
+                        category: string;
+                        rank: number;
+                        score: number;
+                        title: string;
+                        rationale: string;
+                        verificationStatus: string;
+                        updatedAt: number;
+                      }) => (
+                        <article key={`${result.category}-${result.rank}-${result.updatedAt}`} className="research-ranked-result">
+                          <div>
+                            #{result.rank} {toCandidateLabel(result.category)} - {result.score}
+                          </div>
+                          <p>{result.title}</p>
+                          <small>{result.rationale}</small>
+                          <small>{result.verificationStatus.replaceAll("_", " ")}</small>
+                        </article>
+                      ),
+                    )}
                   </div>
                 )}
               </section>

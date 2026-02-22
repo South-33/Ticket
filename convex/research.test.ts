@@ -2,6 +2,8 @@ import { convexTest } from "convex-test";
 import { describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
+import { createResearchJobForPrompt } from "./research";
 import schema from "./schema";
 import { modules } from "./test.setup";
 
@@ -71,6 +73,7 @@ async function seedJob(
           label: "Build search plan",
           order: 0,
           status: "queued",
+          attempt: 0,
           createdAt: now,
           updatedAt: now,
         }),
@@ -80,6 +83,7 @@ async function seedJob(
           label: "Scan candidate sources",
           order: 1,
           status: "queued",
+          attempt: 0,
           createdAt: now,
           updatedAt: now,
         }),
@@ -89,6 +93,7 @@ async function seedJob(
           label: "Synthesize shortlist",
           order: 2,
           status: "queued",
+          attempt: 0,
           createdAt: now,
           updatedAt: now,
         }),
@@ -190,6 +195,8 @@ describe("research pipeline", () => {
       expect(latest?.sources).toHaveLength(2);
       expect(latest?.sources[0]?.url).toContain("example.com/deal-1");
       expect(latest?.sources[0]?.provider).toBe("tavily");
+      expect(latest?.candidates).toHaveLength(3);
+      expect(latest?.rankedResults).toHaveLength(3);
       expect(
         latest?.findings.some(
           (finding: { title: string }) => finding.title === "Content extraction pass completed",
@@ -208,7 +215,17 @@ describe("research pipeline", () => {
           .withIndex("by_job_rank", (q) => q.eq("jobId", researchJobId))
           .order("asc")
           .take(10);
-        return { job, findings, sources };
+        const candidates = await ctx.db
+          .query("candidates")
+          .withIndex("by_job_updatedAt", (q) => q.eq("jobId", researchJobId))
+          .order("desc")
+          .take(10);
+        const rankedResults = await ctx.db
+          .query("rankedResults")
+          .withIndex("by_job_rank", (q) => q.eq("jobId", researchJobId))
+          .order("asc")
+          .take(10);
+        return { job, findings, sources, candidates, rankedResults };
       });
 
       expect(persisted.job?.status).toBe("completed");
@@ -216,6 +233,8 @@ describe("research pipeline", () => {
       expect(persisted.findings.some((finding) => finding.sourceType === "web")).toBe(true);
       expect(persisted.sources).toHaveLength(2);
       expect(persisted.sources[0]?.provider).toBe("tavily");
+      expect(persisted.candidates).toHaveLength(3);
+      expect(persisted.rankedResults).toHaveLength(3);
     } finally {
       vi.unstubAllGlobals();
       if (priorApiKey === undefined) {
@@ -312,10 +331,348 @@ describe("research pipeline", () => {
 
       expect(latest?.status).toBe("completed");
       expect(latest?.sources).toHaveLength(0);
+      expect(latest?.candidates).toHaveLength(3);
+      expect(latest?.rankedResults).toHaveLength(3);
       expect(
         latest?.findings.some((finding: { title: string }) => finding.title === "Tavily scan fallback used"),
       ).toBe(true);
     } finally {
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
+    }
+  });
+
+  test("creates awaiting_input job when required slots are missing", async () => {
+    const t = convexTest(schema, modules);
+
+    const created = await t.run(async (ctx) => {
+      return await createResearchJobForPrompt(ctx as unknown as MutationCtx, {
+        userId: DEMO_USER_ID,
+        threadId: "thread-intake",
+        promptMessageId: "pm-intake",
+        prompt: "I want a flight to Frankfurt",
+      });
+    });
+
+    const latest = await t.query(api.research.getLatestJobForThread, {
+      threadId: "thread-intake",
+    });
+
+    expect(created.jobStatus).toBe("awaiting_input");
+    expect(created.missingFields.length).toBeGreaterThan(0);
+    expect(latest?.status).toBe("awaiting_input");
+    expect(latest?.followUpQuestion).toBeTruthy();
+    expect(latest?.missingFields?.length).toBeGreaterThan(0);
+  });
+
+  test("paginates jobs and enforces page-size limits", async () => {
+    const t = convexTest(schema, modules);
+    const threadId = "thread-pagination-jobs";
+
+    await seedJob(t, { threadId, status: "completed", updatedAt: 100 });
+    await seedJob(t, { threadId, status: "running", updatedAt: 200 });
+    await seedJob(t, { threadId, status: "planned", updatedAt: 300 });
+
+    const first = await t.query(api.research.listJobsByThread, {
+      threadId,
+      paginationOpts: {
+        numItems: 2,
+        cursor: null,
+      },
+    });
+
+    expect(first.page).toHaveLength(2);
+    expect(first.page[0]?.status).toBe("planned");
+    expect(first.page[1]?.status).toBe("running");
+    expect(first.isDone).toBe(false);
+
+    const second = await t.query(api.research.listJobsByThread, {
+      threadId,
+      paginationOpts: {
+        numItems: 2,
+        cursor: first.continueCursor,
+      },
+    });
+
+    expect(second.page).toHaveLength(1);
+    expect(second.page[0]?.status).toBe("completed");
+    expect(second.isDone).toBe(true);
+
+    await expect(
+      t.query(api.research.listJobsByThread, {
+        threadId,
+        paginationOpts: {
+          numItems: 51,
+          cursor: null,
+        },
+      }),
+    ).rejects.toThrowError("paginationOpts.numItems must be between 1 and 50");
+  });
+
+  test("injects knowledge planner hints into plan findings", async () => {
+    const t = convexTest(schema, modules);
+    const threadId = "thread-knowledge";
+    const researchJobId = await seedJob(t, {
+      threadId,
+      status: "planned",
+      withTasks: true,
+    });
+
+    await t.run(async (ctx) => {
+      const now = Date.now();
+      const docId = await ctx.db.insert("knowledgeDocs", {
+        slug: "flights-core",
+        title: "Flights Core",
+        kind: "flights",
+        status: "active",
+        summary: "Flight booking playbook",
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      await ctx.db.insert("knowledgeItems", {
+        docId,
+        key: "fare-rule",
+        content: "Prefer direct carriers first for hidden-fee detection.",
+        confidence: 0.84,
+        priority: 90,
+        status: "active",
+        sourceUrls: ["https://example.com/playbook"],
+        createdAt: now,
+        updatedAt: now,
+      });
+    });
+
+    await t.action(internal.research.runJobInternal, {
+      researchJobId,
+    });
+
+    const latest = await t.query(api.research.getLatestJobForThread, {
+      threadId,
+    });
+
+    expect(
+      latest?.findings.some((finding: { title: string }) => finding.title === "Planner hints injected"),
+    ).toBe(true);
+  });
+
+  test("paginates ranked results by job", async () => {
+    const t = convexTest(schema, modules);
+    const threadId = "thread-ranked-pagination";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    delete process.env.TAVILY_API_KEY;
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const first = await t.query(api.research.listRankedResultsByJob, {
+        researchJobId,
+        paginationOpts: {
+          numItems: 2,
+          cursor: null,
+        },
+      });
+
+      expect(first.page).toHaveLength(2);
+      expect(first.page[0]?.rank).toBe(1);
+      expect(first.page[1]?.rank).toBe(2);
+      expect(first.isDone).toBe(false);
+
+      const second = await t.query(api.research.listRankedResultsByJob, {
+        researchJobId,
+        paginationOpts: {
+          numItems: 2,
+          cursor: first.continueCursor,
+        },
+      });
+
+      expect(second.page).toHaveLength(1);
+      expect(second.page[0]?.rank).toBe(3);
+      expect(second.isDone).toBe(true);
+    } finally {
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
+    }
+  });
+
+  test("paginates tasks and findings by job", async () => {
+    const t = convexTest(schema, modules);
+    const threadId = "thread-task-finding-pagination";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    delete process.env.TAVILY_API_KEY;
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const taskPage = await t.query(api.research.listTasksByJob, {
+        researchJobId,
+        paginationOpts: {
+          numItems: 2,
+          cursor: null,
+        },
+      });
+
+      expect(taskPage.page).toHaveLength(2);
+      expect(taskPage.page[0]?.order).toBe(0);
+      expect(taskPage.page[1]?.order).toBe(1);
+
+      const findingPage = await t.query(api.research.listFindingsByJob, {
+        researchJobId,
+        paginationOpts: {
+          numItems: 2,
+          cursor: null,
+        },
+      });
+
+      expect(findingPage.page.length).toBeGreaterThan(0);
+      expect(findingPage.page.length).toBeLessThanOrEqual(2);
+      expect(findingPage.page[0]?.title).toBeTruthy();
+    } finally {
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
+    }
+  });
+
+  test("schedules retry metadata on transient provider failure", async () => {
+    const t = convexTest(schema, modules);
+    const threadId = "thread-retry-once";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    process.env.TAVILY_API_KEY = "test-tavily-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("api.tavily.com/search")) {
+          return {
+            ok: false,
+            status: 500,
+            json: async () => ({}),
+          } as Response;
+        }
+        return {
+          ok: true,
+          json: async () => ({}),
+        } as Response;
+      }),
+    );
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const state = await t.run(async (ctx) => {
+        const job = await ctx.db.get("researchJobs", researchJobId);
+        const scanTask = await ctx.db
+          .query("researchTasks")
+          .withIndex("by_job_taskKey", (q) => q.eq("jobId", researchJobId).eq("key", "scan"))
+          .unique();
+        return { job, scanTask };
+      });
+
+      expect(state.job?.status).toBe("planned");
+      expect(state.job?.stage).toBe("Retry scheduled");
+      expect(state.job?.attempt).toBe(1);
+      expect(state.job?.lastErrorCode).toBe("provider_unavailable");
+      expect(state.job?.nextRunAt).toBeGreaterThan(Date.now());
+
+      expect(state.scanTask?.status).toBe("queued");
+      expect(state.scanTask?.attempt).toBe(1);
+      expect(state.scanTask?.errorCode).toBe("provider_unavailable");
+      expect(state.scanTask?.nextRunAt).toBeTruthy();
+    } finally {
+      vi.unstubAllGlobals();
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
+    }
+  });
+
+  test("fails terminally after max retry attempts", async () => {
+    const t = convexTest(schema, modules);
+    const threadId = "thread-retry-terminal";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    process.env.TAVILY_API_KEY = "test-tavily-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("api.tavily.com/search")) {
+          return {
+            ok: false,
+            status: 500,
+            json: async () => ({}),
+          } as Response;
+        }
+        return {
+          ok: true,
+          json: async () => ({}),
+        } as Response;
+      }),
+    );
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const job = await t.run(async (ctx) => {
+        return await ctx.db.get("researchJobs", researchJobId);
+      });
+
+      expect(job?.status).toBe("failed");
+      expect(job?.attempt).toBe(3);
+      expect(job?.lastErrorCode).toBe("provider_unavailable");
+      expect(job?.nextRunAt).toBeUndefined();
+    } finally {
+      vi.unstubAllGlobals();
       if (priorApiKey === undefined) {
         delete process.env.TAVILY_API_KEY;
       } else {

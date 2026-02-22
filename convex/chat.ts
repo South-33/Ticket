@@ -19,7 +19,7 @@ import {
   toPreview,
 } from "./agent";
 import { createResearchJobForPrompt } from "./research";
-import { components, internal } from "./_generated/api";
+import { api, components, internal } from "./_generated/api";
 import {
   internalAction,
   internalMutation,
@@ -478,12 +478,38 @@ export const sendPrompt = mutation({
       lastMessageAt: Date.now(),
     });
 
-    const { researchJobId } = await createResearchJobForPrompt(ctx, {
+    const research = await createResearchJobForPrompt(ctx, {
       userId: DEMO_USER_ID,
       threadId: args.threadId,
       promptMessageId: messageId,
       prompt,
     });
+
+    if (research.jobStatus === "awaiting_input") {
+      const followUpMessage =
+        research.followUpQuestion ??
+        "I need a few missing trip details before I can run deep research. Share them and I will continue.";
+
+      await chatAgent.saveMessage(ctx, {
+        threadId: args.threadId,
+        userId: DEMO_USER_ID,
+        message: {
+          role: "assistant",
+          content: followUpMessage,
+        },
+      });
+
+      await ctx.db.patch(state._id, {
+        preview: toPreview(followUpMessage),
+        lastMessageAt: Date.now(),
+      });
+
+      await ctx.scheduler.runAfter(0, api.memory.generateUserMemorySnapshot, {
+        userId: DEMO_USER_ID,
+      });
+
+      return { promptMessageId: messageId, researchJobId: research.researchJobId };
+    }
 
     await ctx.scheduler.runAfter(0, internal.chat.generateReplyInternal, {
       threadId: args.threadId,
@@ -491,7 +517,11 @@ export const sendPrompt = mutation({
       prompt,
     });
 
-    return { promptMessageId: messageId, researchJobId };
+    await ctx.scheduler.runAfter(0, api.memory.generateUserMemorySnapshot, {
+      userId: DEMO_USER_ID,
+    });
+
+    return { promptMessageId: messageId, researchJobId: research.researchJobId };
   },
 });
 
