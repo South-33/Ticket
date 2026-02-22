@@ -259,6 +259,182 @@ function freshnessLabel(recheckAfter: number | undefined) {
   return recheckAfter <= Date.now() ? "stale" : "fresh";
 }
 
+type ResearchTaskView = {
+  key: string;
+  label: string;
+  status: string;
+};
+
+type ResearchFindingView = {
+  title: string;
+  summary: string;
+  createdAt: number;
+};
+
+type ResearchSourceView = {
+  url: string;
+  rank: number;
+  title: string;
+};
+
+type ResearchCandidateView = {
+  category: string;
+  title: string;
+  summary: string;
+  confidence: number;
+  verificationStatus: string;
+  estimatedTotalUsd: number;
+  travelMinutes: number;
+  transferCount: number;
+  recheckAfter: number;
+  primarySourceUrl?: string;
+  updatedAt: number;
+};
+
+type RankedResultView = {
+  category: string;
+  rank: number;
+  score: number;
+  title: string;
+  rationale: string;
+  verificationStatus: string;
+  recheckAfter: number;
+  updatedAt: number;
+};
+
+type ResearchJobView = {
+  researchJobId: string;
+  status: string;
+  stage: string;
+  progress: number;
+  lastErrorCode?: string;
+  nextRunAt?: number;
+  error?: string;
+  followUpQuestion?: string;
+  missingFields?: string[];
+  tasks: ResearchTaskView[];
+  findings: ResearchFindingView[];
+  sources: ResearchSourceView[];
+  candidates: ResearchCandidateView[];
+  rankedResults: RankedResultView[];
+};
+
+function ResearchStatusPanel({
+  latestResearchJob,
+  isResearchActive,
+  onRecheckNow,
+}: {
+  latestResearchJob: ResearchJobView;
+  isResearchActive: boolean;
+  onRecheckNow: () => Promise<void>;
+}) {
+  return (
+    <section className="research-status" aria-live="polite">
+      <div className="research-status-head">
+        <span>Research Pipeline</span>
+        <span>{latestResearchJob.stage}</span>
+      </div>
+      <div className="research-status-progress-track">
+        <div
+          className="research-status-progress-fill"
+          style={{ width: `${Math.min(100, Math.max(0, latestResearchJob.progress))}%` }}
+        />
+      </div>
+      <div className="research-status-meta">
+        <span>{toResearchStatusLabel(latestResearchJob.status)}</span>
+        <span>{latestResearchJob.progress}%</span>
+      </div>
+      {(latestResearchJob.lastErrorCode || latestResearchJob.nextRunAt) && (
+        <p className="research-status-runtime">
+          {latestResearchJob.lastErrorCode ? `Code: ${latestResearchJob.lastErrorCode}` : ""}
+          {latestResearchJob.lastErrorCode && latestResearchJob.nextRunAt ? " | " : ""}
+          {latestResearchJob.nextRunAt ? `Next retry: ${formatUtcTimestamp(latestResearchJob.nextRunAt)}` : ""}
+        </p>
+      )}
+      {latestResearchJob.error && <p className="research-status-error">{latestResearchJob.error}</p>}
+      {!isResearchActive && latestResearchJob.status !== "awaiting_input" && (
+        <button className="research-status-recheck" type="button" onClick={() => void onRecheckNow()}>
+          Recheck Live Data
+        </button>
+      )}
+      {latestResearchJob.followUpQuestion && (
+        <p className="research-status-followup">{latestResearchJob.followUpQuestion}</p>
+      )}
+      {latestResearchJob.missingFields && latestResearchJob.missingFields.length > 0 && (
+        <p className="research-status-missing">Missing: {latestResearchJob.missingFields.join(", ")}</p>
+      )}
+      {latestResearchJob.tasks.length > 0 && (
+        <ul className="research-status-tasks">
+          {latestResearchJob.tasks.map((task) => (
+            <li key={task.key} className={clsx("research-status-task", `status-${task.status}`)}>
+              <span>{task.label}</span>
+              <span>{toResearchStatusLabel(task.status)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {!isResearchActive && latestResearchJob.findings.length > 0 && (
+        <div className="research-status-findings">
+          {latestResearchJob.findings.map((finding) => (
+            <p key={`${finding.title}-${finding.createdAt}`}>
+              <strong>{finding.title}:</strong> {finding.summary}
+            </p>
+          ))}
+        </div>
+      )}
+      {latestResearchJob.sources.length > 0 && (
+        <div className="research-status-sources">
+          {latestResearchJob.sources.map((source) => (
+            <a key={`${source.url}-${source.rank}`} href={source.url} target="_blank" rel="noreferrer">
+              [{source.rank}] {source.title}
+            </a>
+          ))}
+        </div>
+      )}
+      {!isResearchActive && latestResearchJob.candidates.length > 0 && (
+        <div className="research-candidates">
+          {latestResearchJob.candidates.map((candidate) => (
+            <article key={`${candidate.category}-${candidate.updatedAt}`} className="research-candidate">
+              <div className="research-candidate-head">
+                <span>{toCandidateLabel(candidate.category)}</span>
+                <span>{Math.round(candidate.confidence * 100)}%</span>
+              </div>
+              <h4>{candidate.title}</h4>
+              <p>{candidate.summary}</p>
+              <p className="research-candidate-metrics">
+                ${candidate.estimatedTotalUsd} total - {candidate.travelMinutes}m - {candidate.transferCount} transfer(s)
+              </p>
+              <p className="research-candidate-verification">
+                Verification: {candidate.verificationStatus.replaceAll("_", " ")} ({freshnessLabel(candidate.recheckAfter)})
+              </p>
+              {candidate.primarySourceUrl && (
+                <a href={candidate.primarySourceUrl} target="_blank" rel="noreferrer">
+                  Open primary source
+                </a>
+              )}
+            </article>
+          ))}
+        </div>
+      )}
+      {!isResearchActive && latestResearchJob.rankedResults.length > 0 && (
+        <div className="research-ranked-results">
+          {latestResearchJob.rankedResults.map((result) => (
+            <article key={`${result.category}-${result.rank}-${result.updatedAt}`} className="research-ranked-result">
+              <div>
+                #{result.rank} {toCandidateLabel(result.category)} - {result.score}
+              </div>
+              <p>{result.title}</p>
+              <small>{result.rationale}</small>
+              <small>{result.verificationStatus.replaceAll("_", " ")}</small>
+              <small>freshness: {freshnessLabel(result.recheckAfter)}</small>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function getReasoningText(message: UIMessage) {
   return message.parts
     .filter((part) => part.type === "reasoning")
@@ -309,7 +485,7 @@ function getReasoningKeyPoints(reasoning: string) {
   return points;
 }
 
-function Message({ message, index }: { message: UIMessage; index: number }) {
+function Message({ message }: { message: UIMessage }) {
   const reasoning = getReasoningText(message);
   const [visibleText, smoothTextState] = useSmoothText(message.text ?? "", {
     startStreaming: message.status === "streaming",
@@ -332,7 +508,7 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
 
   if (message.role === "user") {
     return (
-      <div className="message user" style={{ animationDelay: `${Math.min(index * 0.08, 0.6)}s` }}>
+      <div className="message user">
         <div className="message-wrapper">
           <div className="message-meta">User Query</div>
           <div className="message-content">{message.text}</div>
@@ -350,7 +526,7 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
   }
 
   return (
-    <div className="message ai" style={{ animationDelay: `${Math.min(index * 0.08, 0.6)}s` }}>
+    <div className="message ai">
       {(displayReasoning || isReasoningTypewriterActive) && (
         <div className="reasoning-container">
           <div className={clsx("reasoning-block", isReasoningExpanded && "open")}>
@@ -723,145 +899,11 @@ function AuthenticatedChat() {
   };
 
   const researchStatusPanel = latestResearchJob ? (
-    <section className="research-status" aria-live="polite">
-      <div className="research-status-head">
-        <span>Research Pipeline</span>
-        <span>{latestResearchJob.stage}</span>
-      </div>
-      <div className="research-status-progress-track">
-        <div
-          className="research-status-progress-fill"
-          style={{ width: `${Math.min(100, Math.max(0, latestResearchJob.progress))}%` }}
-        />
-      </div>
-      <div className="research-status-meta">
-        <span>{toResearchStatusLabel(latestResearchJob.status)}</span>
-        <span>{latestResearchJob.progress}%</span>
-      </div>
-      {(latestResearchJob.lastErrorCode || latestResearchJob.nextRunAt) && (
-        <p className="research-status-runtime">
-          {latestResearchJob.lastErrorCode ? `Code: ${latestResearchJob.lastErrorCode}` : ""}
-          {latestResearchJob.lastErrorCode && latestResearchJob.nextRunAt ? " | " : ""}
-          {latestResearchJob.nextRunAt
-            ? `Next retry: ${formatUtcTimestamp(latestResearchJob.nextRunAt)}`
-            : ""}
-        </p>
-      )}
-      {latestResearchJob.error && (
-        <p className="research-status-error">{latestResearchJob.error}</p>
-      )}
-      {!isResearchActive && latestResearchJob.status !== "awaiting_input" && (
-        <button className="research-status-recheck" type="button" onClick={() => void handleRecheckNow()}>
-          Recheck Live Data
-        </button>
-      )}
-      {latestResearchJob.followUpQuestion && (
-        <p className="research-status-followup">{latestResearchJob.followUpQuestion}</p>
-      )}
-      {latestResearchJob.missingFields && latestResearchJob.missingFields.length > 0 && (
-        <p className="research-status-missing">
-          Missing: {latestResearchJob.missingFields.join(", ")}
-        </p>
-      )}
-      {latestResearchJob.tasks.length > 0 && (
-        <ul className="research-status-tasks">
-          {latestResearchJob.tasks.map((task: { key: string; label: string; status: string }) => (
-            <li key={task.key} className={clsx("research-status-task", `status-${task.status}`)}>
-              <span>{task.label}</span>
-              <span>{toResearchStatusLabel(task.status)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {!isResearchActive && latestResearchJob.findings.length > 0 && (
-        <div className="research-status-findings">
-          {latestResearchJob.findings.map((finding: { title: string; summary: string; createdAt: number }) => (
-            <p key={`${finding.title}-${finding.createdAt}`}>
-              <strong>{finding.title}:</strong> {finding.summary}
-            </p>
-          ))}
-        </div>
-      )}
-      {latestResearchJob.sources.length > 0 && (
-        <div className="research-status-sources">
-          {latestResearchJob.sources.map((source: { url: string; rank: number; title: string }) => (
-            <a
-              key={`${source.url}-${source.rank}`}
-              href={source.url}
-              target="_blank"
-              rel="noreferrer"
-            >
-              [{source.rank}] {source.title}
-            </a>
-          ))}
-        </div>
-      )}
-      {!isResearchActive && latestResearchJob.candidates.length > 0 && (
-        <div className="research-candidates">
-          {latestResearchJob.candidates.map(
-            (candidate: {
-              category: string;
-              title: string;
-              summary: string;
-              confidence: number;
-              verificationStatus: string;
-              estimatedTotalUsd: number;
-              travelMinutes: number;
-              transferCount: number;
-              recheckAfter: number;
-              primarySourceUrl?: string;
-              updatedAt: number;
-            }) => (
-              <article key={`${candidate.category}-${candidate.updatedAt}`} className="research-candidate">
-                <div className="research-candidate-head">
-                  <span>{toCandidateLabel(candidate.category)}</span>
-                  <span>{Math.round(candidate.confidence * 100)}%</span>
-                </div>
-                <h4>{candidate.title}</h4>
-                <p>{candidate.summary}</p>
-                <p className="research-candidate-metrics">
-                  ${candidate.estimatedTotalUsd} total - {candidate.travelMinutes}m - {candidate.transferCount} transfer(s)
-                </p>
-                <p className="research-candidate-verification">
-                  Verification: {candidate.verificationStatus.replaceAll("_", " ")} ({freshnessLabel(candidate.recheckAfter)})
-                </p>
-                {candidate.primarySourceUrl && (
-                  <a href={candidate.primarySourceUrl} target="_blank" rel="noreferrer">
-                    Open primary source
-                  </a>
-                )}
-              </article>
-            ),
-          )}
-        </div>
-      )}
-      {!isResearchActive && latestResearchJob.rankedResults.length > 0 && (
-        <div className="research-ranked-results">
-          {latestResearchJob.rankedResults.map(
-            (result: {
-              category: string;
-              rank: number;
-              score: number;
-              title: string;
-              rationale: string;
-              verificationStatus: string;
-              recheckAfter: number;
-              updatedAt: number;
-            }) => (
-              <article key={`${result.category}-${result.rank}-${result.updatedAt}`} className="research-ranked-result">
-                <div>
-                  #{result.rank} {toCandidateLabel(result.category)} - {result.score}
-                </div>
-                <p>{result.title}</p>
-                <small>{result.rationale}</small>
-                <small>{result.verificationStatus.replaceAll("_", " ")}</small>
-                <small>freshness: {freshnessLabel(result.recheckAfter)}</small>
-              </article>
-            ),
-          )}
-        </div>
-      )}
-    </section>
+    <ResearchStatusPanel
+      latestResearchJob={latestResearchJob}
+      isResearchActive={isResearchActive}
+      onRecheckNow={handleRecheckNow}
+    />
   ) : null;
 
   return (
@@ -939,14 +981,14 @@ function AuthenticatedChat() {
           >
             {showIntro ? (
               <>
-                <div className="message user" style={{ animationDelay: "0.5s" }}>
+                <div className="message user">
                   <div className="message-wrapper">
                     <div className="message-meta">User Query</div>
                     <div className="message-content">What do you do?</div>
                   </div>
                 </div>
 
-                <div className="message ai" style={{ animationDelay: "0.7s" }}>
+                <div className="message ai">
                   <div className="response-container">
                     <div className="message-meta">Aura Response</div>
                     <div
@@ -960,8 +1002,8 @@ function AuthenticatedChat() {
                 </div>
               </>
             ) : (
-              visibleMessages.map((message, index) => (
-                <Message key={message.key} message={message} index={index} />
+              visibleMessages.map((message) => (
+                <Message key={message.key} message={message} />
               ))
             )}
           </div>
