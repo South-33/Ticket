@@ -24,6 +24,9 @@ const TYPEWRITER_INITIAL_DELAY_MS = 0;
 const TYPEWRITER_MIN_DELAY_MS = 0;
 const TYPEWRITER_VARIANCE_MS = 2;
 const TYPEWRITER_PUNCTUATION_PAUSE_MS = 25;
+const THREAD_SWITCH_FADE_MS = 500;
+const THREAD_SWITCH_REVEAL_DELAY_MS = 120;
+const THREAD_SWITCH_FAILSAFE_MS = 5000;
 
 const PLACEHOLDER_HISTORY = [
   "Top Travel Destinations in Germany",
@@ -228,18 +231,18 @@ export function Chat() {
           setSessionVersion((v) => v + 1);
         }
         if (composingNew) {
-          // New session: no data to load, fade in immediately
-          window.setTimeout(() => setIsFadingOut(false), 50);
+          // New session: fade out first, then fade straight back in
+          setIsFadingOut(false);
         } else {
-          // Existing thread: stay invisible until messages arrive
+          // Existing thread: stay invisible until target messages are ready.
           waitingForDataRef.current = true;
-          // Safety fallback — fade in after 1s regardless (faster than 2s for better UX)
+          // Failsafe: avoid staying hidden forever if something goes wrong.
           dataWaitTimerRef.current = window.setTimeout(() => {
             waitingForDataRef.current = false;
             setIsFadingOut(false);
-          }, 1000);
+          }, THREAD_SWITCH_FAILSAFE_MS);
         }
-      }, 350);
+      }, THREAD_SWITCH_FADE_MS);
     },
     [activeThreadId, isComposingNew, isFadingOut, setSessionVersion, setActiveThreadId, setIsComposingNew],
   );
@@ -277,7 +280,7 @@ export function Chat() {
     };
   }, [isFadingOut]);
 
-  // Fade back in once the target thread's messages have loaded
+  // Fade back in once the target thread's messages have loaded and scroll is settled.
   useEffect(() => {
     if (waitingForDataRef.current && visibleMessages.length > 0) {
       waitingForDataRef.current = false;
@@ -285,18 +288,29 @@ export function Chat() {
         window.clearTimeout(dataWaitTimerRef.current);
         dataWaitTimerRef.current = null;
       }
-      setIsFadingOut(false);
+      window.requestAnimationFrame(() => {
+        window.scrollTo(0, document.documentElement.scrollHeight);
+        window.requestAnimationFrame(() => {
+          dataWaitTimerRef.current = window.setTimeout(() => {
+            setIsFadingOut(false);
+            dataWaitTimerRef.current = null;
+          }, THREAD_SWITCH_REVEAL_DELAY_MS);
+        });
+      });
     }
   }, [visibleMessages.length]);
 
   useEffect(() => {
+    if (isFadingOut || waitingForDataRef.current) {
+      return;
+    }
     const timer = window.setTimeout(() => {
       window.scrollTo(0, document.documentElement.scrollHeight);
     }, 50);
     return () => {
       window.clearTimeout(timer);
     };
-  }, [visibleMessages.length, isStreaming, introHtml]);
+  }, [visibleMessages.length, introHtml, isStreaming, isFadingOut]);
 
   useEffect(() => {
     if (!showIntro) {

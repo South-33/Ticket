@@ -40,14 +40,31 @@ body {
   --scrollbar-track-alpha: 0;
   --scrollbar-thumb-alpha: 0.7;
   --scrollbar-thumb-hover-alpha: 0.9;
+  --scrollbar-fade-mask-opacity: 0;
+  --scrollbar-fade-mask-width: 14px;
   display: flex;
   position: relative;
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--scrollbar-fade-mask-width);
+  background: var(--bg-color);
+  opacity: var(--scrollbar-fade-mask-opacity);
+  pointer-events: none;
+  z-index: 10001;
+  transition: opacity 500ms ease;
 }
 
 body.chat-switching {
   --scrollbar-track-alpha: 0;
   --scrollbar-thumb-alpha: 0;
   --scrollbar-thumb-hover-alpha: 0;
+  --scrollbar-fade-mask-opacity: 1;
 }
 
 ::selection {
@@ -77,7 +94,7 @@ body.chat-switching {
 }
 
 .grid-bg {
-  position: absolute;
+  position: fixed;
   top: 0;
   right: 0;
   bottom: 0;
@@ -426,7 +443,7 @@ body.resizing-sidebar * {
   display: flex;
   flex-direction: column;
   gap: 3rem;
-  transition: opacity 350ms ease;
+  transition: opacity 500ms ease;
 }
 
 /* Global Smooth Scrollbar for Body/Root (Lenis) */
@@ -436,14 +453,14 @@ body.resizing-sidebar * {
 
 ::-webkit-scrollbar-track {
   background: rgba(0, 0, 0, var(--scrollbar-track-alpha));
-  transition: background-color 350ms ease;
+  transition: background-color 500ms ease;
 }
 
 ::-webkit-scrollbar-thumb {
   background: rgba(0, 0, 0, var(--scrollbar-thumb-alpha));
   border-radius: 20px;
   border: 2px solid var(--bg-color);
-  transition: background-color 350ms ease;
+  transition: background-color 500ms ease;
 }
 
 ::-webkit-scrollbar-thumb:hover {
@@ -886,15 +903,10 @@ textarea::placeholder {
   cursor: not-allowed;
 }
 
-.sidebar,
 .chat-header,
 .input-wrapper {
   opacity: 0;
   animation: fadeIn 1s var(--transition-slow) forwards;
-}
-
-.sidebar {
-  animation-delay: 0.2s;
 }
 
 
