@@ -257,6 +257,189 @@ describe("research pipeline", () => {
     }
   });
 
+  test("derives candidate metrics from extracted evidence signals", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const threadId = "thread-evidence-signals";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    process.env.TAVILY_API_KEY = "test-tavily-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("api.tavily.com/search")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  title: "Direct carrier flash sale",
+                  url: "https://example.com/lead-direct",
+                  content: "From $412 direct flight 11h 20m baggage included",
+                },
+                {
+                  title: "One stop value option",
+                  url: "https://example.com/lead-value",
+                  content: "$568 one stop 12h 45m flexible change policy",
+                },
+                {
+                  title: "Budget layover option",
+                  url: "https://example.com/lead-cheap",
+                  content: "$455 two stops 15h 10m non-refundable",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        if (url.includes("api.tavily.com/extract")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  url: "https://example.com/lead-direct",
+                  raw_content: "Book direct on official site. Direct flight 11h 10m. $412 with carry-on included.",
+                },
+                {
+                  url: "https://example.com/lead-value",
+                  raw_content: "Flexible fare available at USD 568 with one transfer and 12h 40m travel time.",
+                },
+                {
+                  url: "https://example.com/lead-cheap",
+                  raw_content: "Two stops, 15h 5m route from $455, strict non-refundable policy.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          json: async () => ({}),
+        } as Response;
+      }),
+    );
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const latest = await t.query(api.research.getLatestJobForThread, {
+        threadId,
+      });
+
+      expect(latest?.status).toBe("completed");
+      expect(latest?.candidates).toHaveLength(3);
+
+      const byCategory = new Map(
+        (latest?.candidates ?? []).map((candidate) => [candidate.category, candidate]),
+      );
+      const cheapest = byCategory.get("cheapest");
+      const value = byCategory.get("best_value");
+      const convenient = byCategory.get("most_convenient");
+
+      expect(cheapest?.estimatedTotalUsd).toBe(412);
+      expect(value?.estimatedTotalUsd).toBe(455);
+      expect(convenient?.estimatedTotalUsd).toBe(491);
+
+      expect(convenient?.travelMinutes).toBeLessThanOrEqual(value?.travelMinutes ?? 0);
+      expect(value?.travelMinutes).toBeLessThanOrEqual(cheapest?.travelMinutes ?? 0);
+
+      expect(convenient?.transferCount).toBeLessThanOrEqual(value?.transferCount ?? 0);
+      expect(value?.transferCount).toBeLessThanOrEqual(cheapest?.transferCount ?? 0);
+    } finally {
+      vi.unstubAllGlobals();
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
+    }
+  });
+
+  test("falls back to baseline metrics when evidence has no numeric signals", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const threadId = "thread-evidence-fallback";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    process.env.TAVILY_API_KEY = "test-tavily-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("api.tavily.com/search")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  title: "Generic travel blog",
+                  url: "https://example.com/no-signals",
+                  content: "General travel advice without fares or schedule numbers.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        if (url.includes("api.tavily.com/extract")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  url: "https://example.com/no-signals",
+                  raw_content: "Tips about airports and comfort but no price, stop, or duration values.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          json: async () => ({}),
+        } as Response;
+      }),
+    );
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const latest = await t.query(api.research.getLatestJobForThread, {
+        threadId,
+      });
+
+      const byCategory = new Map(
+        (latest?.candidates ?? []).map((candidate) => [candidate.category, candidate]),
+      );
+
+      expect(byCategory.get("cheapest")?.estimatedTotalUsd).toBe(702);
+      expect(byCategory.get("best_value")?.estimatedTotalUsd).toBe(796);
+      expect(byCategory.get("most_convenient")?.estimatedTotalUsd).toBe(860);
+      expect(byCategory.get("most_convenient")?.transferCount).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
+    }
+  });
+
   test("does not rerun terminal jobs", async () => {
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-terminal";
