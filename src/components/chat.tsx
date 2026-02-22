@@ -24,7 +24,6 @@ const TYPEWRITER_INITIAL_DELAY_MS = 0;
 const TYPEWRITER_MIN_DELAY_MS = 0;
 const TYPEWRITER_VARIANCE_MS = 2;
 const TYPEWRITER_PUNCTUATION_PAUSE_MS = 25;
-const SIDEBAR_WIDTH = 320;
 
 const PLACEHOLDER_HISTORY = [
   "Top Travel Destinations in Germany",
@@ -46,17 +45,12 @@ function getReasoningText(message: UIMessage) {
 }
 
 function Message({ message, index }: { message: UIMessage; index: number }) {
-  const [visibleText] = useSmoothText(message.text ?? "", {
+  const [visibleText, smoothTextState] = useSmoothText(message.text ?? "", {
+    charsPerSec: 44,
     startStreaming: message.status === "streaming",
   });
   const [isReasoningOpen, setIsReasoningOpen] = useState(true);
-
-  // Keep it open while streaming
-  useEffect(() => {
-    if (message.status === "streaming") {
-      setIsReasoningOpen(true);
-    }
-  }, [message.status]);
+  const isReasoningExpanded = message.status === "streaming" || isReasoningOpen;
 
   if (message.role === "system") {
     return null;
@@ -75,9 +69,10 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
 
   const reasoning = getReasoningText(message);
   const safetyFallback = message.status === "failed" && !(message.text ?? "").trim();
-  const displayText = (safetyFallback ? "Response blocked by safety policies." : visibleText).trim();
+  const displayText = safetyFallback ? "Response blocked by safety policies." : visibleText;
+  const isTypewriterActive = message.status === "streaming" || smoothTextState.isStreaming;
 
-  if (!displayText && !reasoning) {
+  if (!displayText.trim() && !reasoning && !isTypewriterActive) {
     return null;
   }
 
@@ -85,15 +80,15 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
     <div className="message ai" style={{ animationDelay: `${Math.min(index * 0.08, 0.6)}s` }}>
       {reasoning && (
         <div className="reasoning-container">
-          <div className={clsx("reasoning-block", isReasoningOpen && "open")}>
+          <div className={clsx("reasoning-block", isReasoningExpanded && "open")}>
             <button
               className="reasoning-summary"
-              onClick={() => setIsReasoningOpen(!isReasoningOpen)}
+              onClick={() => setIsReasoningOpen((current) => !current)}
               type="button"
             >
               Synthesis Process
             </button>
-            <div className={clsx("reasoning-accordion", isReasoningOpen && "open")}>
+            <div className={clsx("reasoning-accordion", isReasoningExpanded && "open")}>
               <div className="reasoning-content-wrapper">
                 <div className="message-content reasoning-content">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{reasoning}</ReactMarkdown>
@@ -106,12 +101,12 @@ function Message({ message, index }: { message: UIMessage; index: number }) {
 
       <div className="response-container">
         <div className="message-meta">
-          {message.status === "streaming" ? "Aura Processing" : "Aura Response"}
+          {isTypewriterActive ? "Aura Processing" : "Aura Response"}
         </div>
-        {displayText && (
+        {(displayText || isTypewriterActive) && (
           <div className="message-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText}</ReactMarkdown>
-            {message.status === "streaming" && <span className="typewriter-cursor" />}
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText.trim()}</ReactMarkdown>
+            {isTypewriterActive && <span className="typewriter-cursor" />}
           </div>
         )}
       </div>
@@ -128,7 +123,7 @@ export function Chat() {
   );
 
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const [isComposingNew, setIsComposingNew] = useState(false);
+  const [isComposingNew, setIsComposingNew] = useState(true);
   const [draft, setDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [introHtml, setIntroHtml] = useState("");
@@ -136,7 +131,6 @@ export function Chat() {
   const [isFeedScrolling, setIsFeedScrolling] = useState(false);
   const [isFadingOut, setIsFadingOut] = useState(false);
   const [sessionVersion, setSessionVersion] = useState(0);
-  const [isMobile, setIsMobile] = useState(false);
 
   const sidebarRef = useRef<HTMLElement | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
@@ -181,18 +175,6 @@ export function Chat() {
   const startNew = useCallback(() => {
     switchThread(null, true);
   }, [switchThread]);
-
-  useEffect(() => {
-    if (!threads || isComposingNew) {
-      return;
-    }
-    if (activeThreadId && threads.some((thread) => thread.threadId === activeThreadId)) {
-      return;
-    }
-    if (threads.length > 0) {
-      setActiveThreadId(threads[0].threadId);
-    }
-  }, [activeThreadId, isComposingNew, threads]);
 
   const activeThread = useMemo(
     () => threads?.find((thread) => thread.threadId === activeThreadId),
@@ -293,18 +275,6 @@ export function Chat() {
   }, [showIntro, sessionVersion]);
 
   useEffect(() => {
-    const updateMobileState = () => {
-      setIsMobile(window.innerWidth <= 760);
-    };
-
-    updateMobileState();
-    window.addEventListener("resize", updateMobileState);
-    return () => {
-      window.removeEventListener("resize", updateMobileState);
-    };
-  }, []);
-
-  useEffect(() => {
     return () => {
       if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
       if (fadingTimerRef.current !== null) window.clearTimeout(fadingTimerRef.current);
@@ -373,8 +343,6 @@ export function Chat() {
       setIsFeedScrolling(false);
     }, 140);
   };
-
-  const effectiveSidebarWidth = isMobile ? undefined : SIDEBAR_WIDTH;
 
   return (
     <div className="oracle-shell">

@@ -11,6 +11,9 @@
   --font-serif: "Cormorant Garamond", serif;
   --font-mono: "JetBrains Mono", monospace;
 
+  --input-side-fade-color: var(--bg-color);
+  --input-side-fade-size: 6rem;
+
   --transition-slow: 0.8s cubic-bezier(0.16, 1, 0.3, 1);
   --transition-fast: 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -65,7 +68,10 @@ body {
 
 .grid-bg {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 320px;
   background-size: 30px 30px;
   background-image:
     linear-gradient(to right, var(--grid-color) 1px, transparent 1px),
@@ -75,15 +81,15 @@ body {
 }
 
 .ascii-canvas-container {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 120vw;
-  height: 120vh;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
   z-index: 0;
   pointer-events: none;
   opacity: 0.08;
+  overflow: hidden;
   mask-image: radial-gradient(circle at center, black 20%, transparent 70%);
   -webkit-mask-image: radial-gradient(circle at center, black 20%, transparent 70%);
 }
@@ -689,6 +695,7 @@ body.resizing-sidebar * {
 }
 
 .input-grid {
+  position: relative;
   pointer-events: auto;
 }
 
@@ -703,9 +710,9 @@ body.resizing-sidebar * {
   grid-column: 2;
   width: 100%;
   position: relative;
+  isolation: isolate;
   display: flex;
   align-items: flex-end;
-  border-bottom: 2px solid var(--text-primary);
   padding-bottom: 0.5rem;
 }
 
@@ -713,15 +720,32 @@ body.resizing-sidebar * {
   content: "";
   position: absolute;
   bottom: -3rem;
-  left: -2rem;
-  right: -2rem;
+  left: calc(-1 * var(--input-side-fade-size));
+  right: calc(-1 * var(--input-side-fade-size));
   height: 12rem;
-  background: linear-gradient(to bottom, transparent, var(--bg-color) 50%, var(--bg-color) 100%);
-  z-index: -1;
+  background:
+    linear-gradient(to bottom, transparent, var(--bg-color) 50%, var(--bg-color) 100%),
+    linear-gradient(to left, transparent, var(--input-side-fade-color)) left / var(--input-side-fade-size) 100% no-repeat,
+    linear-gradient(to right, transparent, var(--input-side-fade-color)) right / var(--input-side-fade-size) 100% no-repeat;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.input-container::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--text-primary);
+  z-index: 2;
   pointer-events: none;
 }
 
 .input-prefix {
+  position: relative;
+  z-index: 1;
   font-size: 1.2rem;
   margin-right: 1rem;
   margin-bottom: 2px;
@@ -730,6 +754,8 @@ body.resizing-sidebar * {
 }
 
 textarea {
+  position: relative;
+  z-index: 1;
   flex-grow: 1;
   background: transparent;
   border: none;
@@ -750,6 +776,8 @@ textarea::placeholder {
 }
 
 .send-btn {
+  position: relative;
+  z-index: 1;
   background: transparent;
   border: none;
   cursor: pointer;
@@ -796,6 +824,10 @@ textarea::placeholder {
 }
 
 @media (max-width: 980px) {
+  .grid-bg {
+    left: 280px;
+  }
+
   .sidebar {
     width: 280px;
   }
@@ -818,6 +850,10 @@ textarea::placeholder {
 }
 
 @media (max-width: 760px) {
+  .grid-bg {
+    left: 0;
+  }
+
   body {
     overflow-y: auto;
   }
