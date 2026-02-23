@@ -7,8 +7,10 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "convex:dev": "convex dev",
+    "convex:dev": "node scripts/convex-dev-with-playbooks.mjs",
     "convex:codegen": "convex codegen",
+    "playbooks:sync": "node scripts/sync-playbooks.mjs",
+    "playbooks:watch": "node scripts/watch-playbooks.mjs",
     "test": "vitest",
     "test:once": "vitest run",
     "test:coverage": "vitest run --coverage --coverage.reporter=text"

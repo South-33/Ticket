@@ -4,7 +4,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { api, internal } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
-import { validateAssistantEnvelope } from "./chat";
+import { buildSystemPrompt, validateAssistantEnvelope } from "./chat";
 
 const DEMO_USER_ID = "demo-user";
 const AUTH_IDENTITY = {
@@ -281,6 +281,34 @@ describe("chat intake flow", () => {
     expect(parsed.envelope.skillOps.action).toBe("load");
   });
 
+  test("buildSystemPrompt includes playbook alias and user markdown disambiguation rules", () => {
+    const prompt = buildSystemPrompt({
+      currentTitle: "Trip planning",
+      latestUserPrompt: "Can you use flights.md for this?",
+      currentUtcIso: "2026-02-23T00:00:00.000Z",
+      profile: null,
+      confirmedFacts: [],
+      preferenceHints: [],
+      skillCatalog: {
+        availableSkills: [
+          {
+            slug: "general",
+            kind: "general",
+            title: "General Playbook",
+            summary: "Always-on guidance",
+          },
+        ],
+        generalHints: [],
+      },
+      activeSkillPacks: [],
+      activeSkillHints: [],
+      forceDirectReply: false,
+    });
+
+    expect(prompt).toContain("treat them as playbook aliases");
+    expect(prompt).toContain("analyze the user-provided content directly");
+  });
+
   test("thread skill packs decrement per user prompt turn", async () => {
     const testConvex = convexTest(schema, modules);
     registerAgentComponent(testConvex);
@@ -288,12 +316,15 @@ describe("chat intake flow", () => {
 
     const created = await t.mutation(api.chat.createThread, {});
 
-    await t.mutation(api.knowledge.upsertKnowledgeDoc, {
+    await t.mutation(api.playbooks.upsertPlaybook, {
       slug: "flights",
       title: "Flights",
+      description: "flight tactics",
       kind: "flights",
+      scope: "conditional",
+      riskClass: "safe",
       status: "active",
-      summary: "flight tactics",
+      contentMarkdown: "# flights\n\nFlight playbook",
     });
 
     const loaded = await t.mutation(internal.chat.applySkillOpsInternal, {

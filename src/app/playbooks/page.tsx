@@ -1,5 +1,5 @@
 import { PlaybookAdmin } from "@/components/knowledge-admin";
 
-export default function KnowledgePage() {
+export default function PlaybooksPage() {
   return <PlaybookAdmin />;
 }

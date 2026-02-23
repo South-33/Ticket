@@ -380,48 +380,29 @@ export default defineSchema({
     .index("by_thread_createdAt", ["threadId", "createdAt"])
     .index("by_user_createdAt", ["userId", "createdAt"]),
 
-  knowledgeDocs: defineTable({
+  playbooks: defineTable({
     slug: v.string(),
     title: v.string(),
-    kind: v.union(v.literal("skills"), v.literal("flights"), v.literal("train"), v.literal("concert")),
+    description: v.optional(v.string()),
+    kind: v.union(
+      v.literal("general"),
+      v.literal("flights"),
+      v.literal("train"),
+      v.literal("concert"),
+      v.literal("flights_grey_tactics"),
+    ),
+    scope: v.union(v.literal("always"), v.literal("conditional"), v.literal("opt_in")),
+    riskClass: v.union(v.literal("safe"), v.literal("grey")),
     status: v.union(v.literal("draft"), v.literal("active"), v.literal("archived")),
-    summary: v.optional(v.string()),
+    contentMarkdown: v.string(),
+    sourceFile: v.optional(v.string()),
     createdByUserId: v.optional(v.string()),
     updatedByUserId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_slug", ["slug"])
-    .index("by_kind_status", ["kind", "status"])
-    .index("by_kind_status_updatedAt", ["kind", "status", "updatedAt"])
     .index("by_status_updatedAt", ["status", "updatedAt"])
-    .index("by_updatedAt", ["updatedAt"]),
-
-  knowledgeItems: defineTable({
-    docId: v.id("knowledgeDocs"),
-    key: v.string(),
-    content: v.string(),
-    confidence: v.number(),
-    priority: v.number(),
-    status: v.union(v.literal("draft"), v.literal("active"), v.literal("stale")),
-    sourceUrls: v.array(v.string()),
-    expiresAt: v.optional(v.number()),
-    createdByUserId: v.optional(v.string()),
-    updatedByUserId: v.optional(v.string()),
-    createdAt: v.number(),
-    updatedAt: v.number(),
-  })
-    .index("by_doc_status_priority", ["docId", "status", "priority"])
-    .index("by_doc_updatedAt", ["docId", "updatedAt"])
-    .index("by_doc_key", ["docId", "key"]),
-
-  knowledgeLinks: defineTable({
-    fromDocId: v.id("knowledgeDocs"),
-    toDocId: v.id("knowledgeDocs"),
-    label: v.string(),
-    createdByUserId: v.optional(v.string()),
-    createdAt: v.number(),
-  })
-    .index("by_fromDoc", ["fromDocId"])
-    .index("by_toDoc", ["toDocId"]),
+    .index("by_kind_status_updatedAt", ["kind", "status", "updatedAt"])
+    .index("by_scope_status_updatedAt", ["scope", "status", "updatedAt"]),
 });

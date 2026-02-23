@@ -10,9 +10,10 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - Keep `architecture-plan.md` as the implementation source of truth and update it when architecture decisions or constraints change.
 - Keep `tools.md` up to date whenever tool contracts/channels/schema change (add/remove/rename tools, validation loops, or apply behavior), so new agents can immediately see the current tool map.
 - Keep `system-prompt.md` up to date whenever any system prompt is added/removed/modified (location, trigger, input context, or output contract), so prompt behavior remains auditable.
-- Canonical playbook markdown scaffolds live under `playbooks/` (`general.md`, `flights.md`, `flights_grey_tactics.md`, `train.md`, `concert.md`); curate there first, then publish active items into Convex knowledge docs for runtime injection.
+- Canonical playbook markdown scaffolds live under `playbooks/` (`general.md`, `flights.md`, `flights_grey_tactics.md`, `train.md`, `concert.md`); runtime reads synced copies from Convex `playbooks` table.
+- Use `pnpm convex:dev` during development so playbook file edits auto-sync (`playbooks:watch`) while Convex dev is running.
 - `playbooks/flights.md` includes an explicit `Experimental (Unproven) Tactics` section; these tactics are for search expansion only and should always be labeled `experimental` (never presented as reliable without route-level revalidation).
-- Product direction now includes a PR-style community signal loop for flight knowledge (proposal -> testing -> temporary active -> promoted/invalidated/expired) so volatile finds can be injected quickly without contaminating verified core tactics.
+- Product direction now includes a PR-style community signal loop for flight playbooks (proposal -> testing -> temporary active -> promoted/invalidated/expired) so volatile finds can be injected quickly without contaminating verified core tactics.
 - Grey-tactics consent default scope is thread-level; only persist beyond a thread when the user explicitly asks to remember that preference.
 - Chat intake (`sendPrompt`) no longer starts/resumes research heuristically; research jobs now start only when `generateReplyInternal` emits valid `ResearchOps.start` with required criteria and at least one selected skill.
 - Product direction: researcher and chatbot are distinct actors; researcher can request user clarifications mid-run, chatbot mediates user interaction, and the user-facing UI should expose this runtime trace clearly (expandable panel/pop-up style is preferred).

@@ -1126,9 +1126,9 @@ describe("research pipeline", () => {
     ).rejects.toThrowError("paginationOpts.numItems must be between 1 and 50");
   });
 
-  test("injects knowledge planner hints into plan findings", async () => {
+  test("injects playbook planner hints into plan findings", async () => {
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
-    const threadId = "thread-knowledge";
+    const threadId = "thread-playbook-hints";
     const researchJobId = await seedJob(t, {
       threadId,
       status: "planned",
@@ -1137,24 +1137,15 @@ describe("research pipeline", () => {
 
     await t.run(async (ctx) => {
       const now = Date.now();
-      const docId = await ctx.db.insert("knowledgeDocs", {
-        slug: "flights-core",
+      await ctx.db.insert("playbooks", {
+        slug: "flights",
         title: "Flights Core",
+        description: "Flight booking playbook",
         kind: "flights",
+        scope: "conditional",
+        riskClass: "safe",
         status: "active",
-        summary: "Flight booking playbook",
-        createdAt: now,
-        updatedAt: now,
-      });
-
-      await ctx.db.insert("knowledgeItems", {
-        docId,
-        key: "fare-rule",
-        content: "Prefer direct carriers first for hidden-fee detection.",
-        confidence: 0.84,
-        priority: 90,
-        status: "active",
-        sourceUrls: ["https://example.com/playbook"],
+        contentMarkdown: "Prefer direct carriers first for hidden-fee detection.",
         createdAt: now,
         updatedAt: now,
       });

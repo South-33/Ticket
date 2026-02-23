@@ -3202,7 +3202,7 @@ export const runJobInternal = internalAction({
         const plannerHints =
           job.skillHintsSnapshot && job.skillHintsSnapshot.length > 0
             ? job.skillHintsSnapshot
-            : await ctx.runQuery(internal.knowledge.getPlannerHintsInternal, {
+            : await ctx.runQuery(internal.playbooks.getPlannerHintsInternal, {
                 domain: goal.domain,
                 asOfMs: Date.now(),
               });

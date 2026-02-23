@@ -14,6 +14,7 @@ import { createPortal } from "react-dom";
 import Image from "next/image";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useLenis } from "lenis/react";
 import { api } from "@convex/_generated/api";
 import { ChatCanvas } from "@/components/chat-canvas";
 import { hasConfiguredClerk } from "@/lib/clerk-env";
@@ -755,6 +756,9 @@ const TYPEWRITER_PUNCTUATION_PAUSE_MS = 25;
 const THREAD_SWITCH_FADE_MS = 500;
 const THREAD_SWITCH_REVEAL_DELAY_MS = 120;
 const THREAD_SWITCH_FAILSAFE_MS = 5000;
+const AUTO_FOLLOW_ATTACH_THRESHOLD_PX = 56;
+const AUTO_FOLLOW_DETACH_THRESHOLD_PX = 120;
+const AUTO_FOLLOW_SMOOTH_DURATION_S = 0.32;
 
 const hasClerk = hasConfiguredClerk();
 const SIDEBAR_HISTORY_CACHE_KEY_PREFIX = "aura:sidebarHistory:v1";
@@ -1089,12 +1093,155 @@ function extractTaggedPayload(raw: string, tag: string) {
   return match?.[1]?.trim();
 }
 
+function formatSkillSlugLabel(slug: string) {
+  return slug
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, " ")
+    .trim();
+}
+
+function parseSkillLoadNote(raw: string) {
+  const tagged = extractTaggedPayload(raw, "SkillOps");
+  if (!tagged) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(tagged) as unknown;
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+
+    const action = (parsed as { action?: unknown }).action;
+    if (action !== "load") {
+      return null;
+    }
+
+    const skillsRaw = (parsed as { skills?: unknown }).skills;
+    if (!Array.isArray(skillsRaw)) {
+      return null;
+    }
+
+    const skills = Array.from(
+      new Set(
+        skillsRaw
+          .filter((value): value is string => typeof value === "string")
+          .map((value) => formatSkillSlugLabel(value))
+          .filter((value) => value.length > 0),
+      ),
+    );
+
+    if (skills.length === 0) {
+      return null;
+    }
+
+    if (skills.length === 1) {
+      return `Loaded \`${skills[0]}\` skill.`;
+    }
+
+    return `Loaded ${skills.map((skill) => `\`${skill}\``).join(", ")} skills.`;
+  } catch {
+    return null;
+  }
+}
+
+function formatMemoryStoreLabel(store: string) {
+  if (store === "profile") {
+    return "profile memory";
+  }
+  if (store === "preference") {
+    return "preference memory";
+  }
+  return "fact memory";
+}
+
+function parseMemoryOpsNotes(raw: string) {
+  const tagged = extractTaggedPayload(raw, "MemoryOps");
+  if (!tagged) {
+    return [] as string[];
+  }
+
+  try {
+    const parsed = JSON.parse(tagged) as unknown;
+    if (!Array.isArray(parsed)) {
+      return [] as string[];
+    }
+
+    const notes: string[] = [];
+    for (const operation of parsed) {
+      if (!operation || typeof operation !== "object") {
+        continue;
+      }
+      const action = (operation as { action?: unknown }).action;
+      const store = (operation as { store?: unknown }).store;
+      const key = (operation as { key?: unknown }).key;
+      const value = (operation as { value?: unknown }).value;
+
+      if (
+        (action !== "add" && action !== "update" && action !== "delete")
+        || (store !== "fact" && store !== "preference" && store !== "profile")
+      ) {
+        continue;
+      }
+
+      const keyLabel = typeof key === "string" && key.trim().length > 0 ? `\`${key.trim()}\`` : "`item`";
+      const storeLabel = formatMemoryStoreLabel(store);
+      const valueLabel = typeof value === "string" && value.trim().length > 0 ? ` (\`${value.trim()}\`)` : "";
+
+      if (action === "delete") {
+        notes.push(`Removed ${keyLabel} from ${storeLabel}.`);
+      } else if (action === "add") {
+        notes.push(`Saved ${keyLabel}${valueLabel} to ${storeLabel}.`);
+      } else {
+        notes.push(`Updated ${keyLabel}${valueLabel} in ${storeLabel}.`);
+      }
+    }
+
+    return notes;
+  } catch {
+    return [] as string[];
+  }
+}
+
+function findTagOpenIndex(raw: string, tag: string) {
+  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`<${escapedTag}(?:\\s|>)`, "i");
+  return raw.search(regex);
+}
+
+function parseAssistantEventNotes(raw: string, memoryNote: string | null, skillLoadNote: string | null) {
+  const events: Array<{ order: number; note: string }> = [];
+
+  const memoryOpsNotes = parseMemoryOpsNotes(raw);
+  if (memoryOpsNotes.length > 0) {
+    const order = findTagOpenIndex(raw, "MemoryOps");
+    const baseOrder = order === -1 ? Number.MAX_SAFE_INTEGER - 2 : order;
+    for (let index = 0; index < memoryOpsNotes.length; index += 1) {
+      events.push({ order: baseOrder + index * 0.001, note: memoryOpsNotes[index] });
+    }
+  }
+
+  if (skillLoadNote) {
+    const order = findTagOpenIndex(raw, "SkillOps");
+    events.push({ order: order === -1 ? Number.MAX_SAFE_INTEGER - 1 : order, note: skillLoadNote });
+  }
+
+  if (memoryNote) {
+    const order = findTagOpenIndex(raw, "MemoryNote");
+    events.push({ order: order === -1 ? Number.MAX_SAFE_INTEGER : order, note: memoryNote });
+  }
+
+  return events.sort((a, b) => a.order - b.order).map((event) => event.note);
+}
+
 function stripAssistantEnvelope(raw: string) {
   return raw
     .replace(/<ContractVersion>[\s\S]*?<\/ContractVersion>/gi, "")
     .replace(/<Response>[\s\S]*?<\/Response>/gi, "")
     .replace(/<MemoryOps>[\s\S]*?<\/MemoryOps>/gi, "")
     .replace(/<ResearchOps>[\s\S]*?<\/ResearchOps>/gi, "")
+    .replace(/<SkillOps>[\s\S]*?<\/SkillOps>/gi, "")
     .replace(/<TitleOps>[\s\S]*?<\/TitleOps>/gi, "")
     .replace(/<MemoryNote>[\s\S]*?<\/MemoryNote>/gi, "")
     .trim();
@@ -1102,10 +1249,14 @@ function stripAssistantEnvelope(raw: string) {
 
 function parseAssistantOutput(raw: string) {
   const response = extractTaggedPayload(raw, "Response") ?? stripAssistantEnvelope(raw) ?? raw;
-  const memoryNote = extractTaggedPayload(raw, "MemoryNote");
+  const memoryNote = extractTaggedPayload(raw, "MemoryNote") ?? null;
+  const skillLoadNote = parseSkillLoadNote(raw);
+  const eventNotes = parseAssistantEventNotes(raw, memoryNote, skillLoadNote);
   return {
     response: response.trim(),
     memoryNote,
+    skillLoadNote,
+    eventNotes,
   };
 }
 
@@ -1164,10 +1315,19 @@ function Message({ message }: { message: UIMessage }) {
   const isReasoningExpanded = isReasoningOpen;
   const isReasoningTypewriterActive = message.status === "streaming" || smoothReasoningState.isStreaming;
   const displayReasoning = isReasoningTypewriterActive ? visibleReasoning : reasoning;
+  const eventNotes = assistantPayload.eventNotes;
   const reasoningKeyPoints = useMemo(
     () => getReasoningKeyPoints(displayReasoning),
     [displayReasoning],
   );
+  const collapsedReasoningPoints = useMemo(
+    () => [
+      ...reasoningKeyPoints,
+      ...eventNotes,
+    ],
+    [reasoningKeyPoints, eventNotes],
+  );
+  const hasReasoningPanelContent = Boolean(displayReasoning || isReasoningTypewriterActive || eventNotes.length > 0);
 
   if (message.role === "system") {
     return null;
@@ -1194,7 +1354,7 @@ function Message({ message }: { message: UIMessage }) {
 
   return (
     <div className="message ai">
-      {(displayReasoning || isReasoningTypewriterActive) && (
+      {hasReasoningPanelContent && (
         <div className="reasoning-container">
           <div className={clsx("reasoning-block", isReasoningExpanded && "open")}>
             <button
@@ -1202,27 +1362,36 @@ function Message({ message }: { message: UIMessage }) {
               onClick={() => setIsReasoningOpen((current) => !current)}
               type="button"
             >
-              Synthesis Process
+              Reasoning Process
             </button>
             <div className={clsx("reasoning-points-shell", !isReasoningExpanded && "visible")}>
-              {reasoningKeyPoints.length > 0 && (
+              {collapsedReasoningPoints.length > 0 && (
                 <ul className="reasoning-points">
-                  {reasoningKeyPoints.map((point) => (
-                    <li key={point}>{point}</li>
+                  {collapsedReasoningPoints.map((point, index) => (
+                    <li key={`${point}-${index}`}>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{point}</ReactMarkdown>
+                    </li>
                   ))}
                 </ul>
               )}
             </div>
             <div className={clsx("reasoning-accordion", isReasoningExpanded && "open")}>
               <div className="reasoning-content-wrapper">
-                <div className="message-content reasoning-content">
-                  {isReasoningTypewriterActive ? (
+                <div className={clsx("message-content reasoning-content", isReasoningTypewriterActive && "is-streaming") }>
+                  {(displayReasoning || isReasoningTypewriterActive) && (
                     <>
-                      <span className="streaming-text">{displayReasoning}</span>
-                      <span className="typewriter-cursor reasoning-cursor" />
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayReasoning}</ReactMarkdown>
+                      {isReasoningTypewriterActive && <span className="typewriter-cursor reasoning-cursor" />}
                     </>
-                  ) : (
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayReasoning.trim()}</ReactMarkdown>
+                  )}
+                  {eventNotes.length > 0 && (
+                    <ul className="reasoning-points reasoning-points-inline">
+                      {eventNotes.map((note, index) => (
+                        <li key={`${note}-${index}`}>
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>{note}</ReactMarkdown>
+                        </li>
+                      ))}
+                    </ul>
                   )}
                 </div>
               </div>
@@ -1236,23 +1405,24 @@ function Message({ message }: { message: UIMessage }) {
           {isTypewriterActive ? "Aura Processing" : "Aura Response"}
         </div>
         {(displayText || isTypewriterActive) && (
-          <div className="message-content">
-            {isTypewriterActive ? (
-              <>
-                <span className="streaming-text">{displayText}</span>
-                <span className="typewriter-cursor" />
-              </>
-            ) : (
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText.trim()}</ReactMarkdown>
-            )}
+          <div className={clsx("message-content", isTypewriterActive && "is-streaming")}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText}</ReactMarkdown>
+            {isTypewriterActive && <span className="typewriter-cursor" />}
           </div>
-        )}
-        {!!assistantPayload.memoryNote && !isTypewriterActive && (
-          <p className="assistant-memory-note">Memory updated: {assistantPayload.memoryNote}</p>
         )}
       </div>
     </div>
   );
+}
+
+function isEditableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return true;
+  }
+  return target.isContentEditable;
 }
 
 function AuthenticatedChat() {
@@ -1269,6 +1439,7 @@ function AuthenticatedChat() {
   const [isComposingNew, setIsComposingNew] = useState(true);
   const [draft, setDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [awaitingAssistantThreadId, setAwaitingAssistantThreadId] = useState<string | null>(null);
   const [introHtml, setIntroHtml] = useState("");
   const [isIntroTyping, setIsIntroTyping] = useState(false);
   const [isFeedScrolling, setIsFeedScrolling] = useState(false);
@@ -1295,8 +1466,40 @@ function AuthenticatedChat() {
   const fadingTimerRef = useRef<number | null>(null);
   const dataWaitTimerRef = useRef<number | null>(null);
   const waitingForDataRef = useRef(false);
+  const autoFollowEnabledRef = useRef(true);
+  const lastScrollPositionRef = useRef(0);
+  const lenis = useLenis();
   const effectiveUserId = user?.id ?? lastKnownUserId ?? undefined;
   const sidebarHistoryCacheKey = useMemo(() => getSidebarHistoryCacheKey(effectiveUserId), [effectiveUserId]);
+
+  const getCurrentScrollPosition = useCallback(() => {
+    if (lenis) {
+      return lenis.actualScroll;
+    }
+    return window.scrollY;
+  }, [lenis]);
+
+  const getBottomDistance = useCallback(() => {
+    if (lenis) {
+      return Math.max(0, lenis.limit - lenis.actualScroll);
+    }
+    return Math.max(0, document.documentElement.scrollHeight - (window.scrollY + window.innerHeight));
+  }, [lenis]);
+
+  const isNearBottom = useCallback(
+    (threshold = AUTO_FOLLOW_ATTACH_THRESHOLD_PX) => getBottomDistance() <= threshold,
+    [getBottomDistance],
+  );
+
+  const scrollToPageBottom = useCallback(() => {
+    if (lenis) {
+      const target = Math.max(0, lenis.limit);
+      lenis.scrollTo(target, { duration: AUTO_FOLLOW_SMOOTH_DURATION_S, force: true });
+      return;
+    }
+    const target = document.documentElement.scrollHeight;
+    window.scrollTo({ top: target, behavior: "smooth" });
+  }, [lenis]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1333,6 +1536,7 @@ function AuthenticatedChat() {
     (newThreadId: string | null, composingNew: boolean) => {
       if (isFadingOut) return;
       if (!composingNew && newThreadId === activeThreadId && !isComposingNew) return;
+      setAwaitingAssistantThreadId(null);
       setIsFadingOut(true);
       waitingForDataRef.current = false;
       if (fadingTimerRef.current !== null) window.clearTimeout(fadingTimerRef.current);
@@ -1398,11 +1602,69 @@ function AuthenticatedChat() {
     [activeThreadIdForMessages, isComposingNew, messageFeed.results],
   );
 
+  const latestTurnAssistantMessage = useMemo(() => {
+    for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+      const message = visibleMessages[i];
+      if (message.role === "assistant") {
+        return message;
+      }
+      if (message.role === "user") {
+        return null;
+      }
+    }
+    return null;
+  }, [visibleMessages]);
+
+  const latestTurnAssistantIsRenderable = useMemo(() => {
+    if (!latestTurnAssistantMessage) {
+      return false;
+    }
+    if (latestTurnAssistantMessage.status === "streaming" || latestTurnAssistantMessage.status === "failed") {
+      return true;
+    }
+
+    const parsed = parseAssistantOutput(latestTurnAssistantMessage.text ?? "");
+    if (parsed.response.trim().length > 0 || parsed.eventNotes.length > 0) {
+      return true;
+    }
+    return getReasoningText(latestTurnAssistantMessage).trim().length > 0;
+  }, [latestTurnAssistantMessage]);
+
   const isStreaming = visibleMessages.some(
     (message) => message.role === "assistant" && message.status === "streaming",
   );
+  const isAwaitingAssistant =
+    awaitingAssistantThreadId !== null
+    && activeThreadIdForMessages === awaitingAssistantThreadId
+    && (!latestTurnAssistantMessage
+      || latestTurnAssistantMessage.status === "streaming"
+      || !latestTurnAssistantIsRenderable);
+  const isWaitingForAssistantMessage =
+    awaitingAssistantThreadId !== null
+    && activeThreadIdForMessages === awaitingAssistantThreadId
+    && !latestTurnAssistantIsRenderable;
+  const isOutputting = isSubmitting || isAwaitingAssistant || isStreaming;
   const showIntro = visibleMessages.length === 0 && !isStreaming;
   const isResearchActive = !!latestResearchJob && !TERMINAL_RESEARCH_STATUSES.has(latestResearchJob.status);
+
+  useEffect(() => {
+    if (!awaitingAssistantThreadId || activeThreadIdForMessages !== awaitingAssistantThreadId) {
+      return;
+    }
+
+    if (
+      latestTurnAssistantMessage
+      && latestTurnAssistantMessage.status !== "streaming"
+      && latestTurnAssistantIsRenderable
+    ) {
+      setAwaitingAssistantThreadId(null);
+    }
+  }, [
+    activeThreadIdForMessages,
+    awaitingAssistantThreadId,
+    latestTurnAssistantIsRenderable,
+    latestTurnAssistantMessage,
+  ]);
 
   useEffect(() => {
     document.body.classList.toggle("chat-switching", isFadingOut);
@@ -1420,7 +1682,9 @@ function AuthenticatedChat() {
         dataWaitTimerRef.current = null;
       }
       window.requestAnimationFrame(() => {
-        window.scrollTo(0, document.documentElement.scrollHeight);
+        autoFollowEnabledRef.current = true;
+        scrollToPageBottom();
+        lastScrollPositionRef.current = getCurrentScrollPosition();
         window.requestAnimationFrame(() => {
           dataWaitTimerRef.current = window.setTimeout(() => {
             setIsFadingOut(false);
@@ -1429,19 +1693,33 @@ function AuthenticatedChat() {
         });
       });
     }
-  }, [visibleMessages.length]);
+  }, [getCurrentScrollPosition, scrollToPageBottom, visibleMessages.length]);
 
   useEffect(() => {
     if (isFadingOut || waitingForDataRef.current) {
       return;
     }
-    const timer = window.setTimeout(() => {
-      window.scrollTo(0, document.documentElement.scrollHeight);
-    }, 50);
-    return () => {
-      window.clearTimeout(timer);
+    if (!isOutputting) {
+      return;
+    }
+    if (!autoFollowEnabledRef.current) {
+      return;
+    }
+
+    let frame = 0;
+    const followTick = () => {
+      if (isFadingOut || waitingForDataRef.current || !autoFollowEnabledRef.current) {
+        return;
+      }
+      scrollToPageBottom();
+      frame = window.requestAnimationFrame(followTick);
     };
-  }, [visibleMessages.length, introHtml, isStreaming, isFadingOut]);
+
+    frame = window.requestAnimationFrame(followTick);
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [isFadingOut, isOutputting, scrollToPageBottom]);
 
   useEffect(() => {
     if (!showIntro) {
@@ -1499,6 +1777,120 @@ function AuthenticatedChat() {
   }, [showIntro, sessionVersion]);
 
   useEffect(() => {
+    const markFeedScrolling = () => {
+      setIsFeedScrolling((current) => (current ? current : true));
+      if (scrollIdleTimerRef.current !== null) {
+        window.clearTimeout(scrollIdleTimerRef.current);
+      }
+      scrollIdleTimerRef.current = window.setTimeout(() => {
+        setIsFeedScrolling(false);
+      }, 140);
+    };
+
+    const syncFollowFromCurrentPosition = () => {
+      const current = getCurrentScrollPosition();
+      const bottomDistance = getBottomDistance();
+      const outputting = isStreaming || isAwaitingAssistant;
+      const movedUp = current < lastScrollPositionRef.current - 1;
+
+      if (outputting) {
+        if (movedUp && bottomDistance > AUTO_FOLLOW_DETACH_THRESHOLD_PX) {
+          autoFollowEnabledRef.current = false;
+        } else if (bottomDistance <= AUTO_FOLLOW_ATTACH_THRESHOLD_PX) {
+          autoFollowEnabledRef.current = true;
+        }
+      } else {
+        autoFollowEnabledRef.current = bottomDistance <= AUTO_FOLLOW_ATTACH_THRESHOLD_PX;
+      }
+
+      lastScrollPositionRef.current = current;
+      markFeedScrolling();
+    };
+
+    const syncCurrentWithoutMarking = () => {
+      lastScrollPositionRef.current = getCurrentScrollPosition();
+      if (!isStreaming && !isAwaitingAssistant) {
+        autoFollowEnabledRef.current = isNearBottom(AUTO_FOLLOW_ATTACH_THRESHOLD_PX);
+      }
+    };
+
+    syncCurrentWithoutMarking();
+
+    let unsubscribeLenis: (() => void) | null = null;
+    if (lenis) {
+      unsubscribeLenis = lenis.on("scroll", syncFollowFromCurrentPosition);
+    } else {
+      window.addEventListener("scroll", syncFollowFromCurrentPosition, { passive: true });
+    }
+
+    const handleResize = () => {
+      if (isNearBottom(AUTO_FOLLOW_ATTACH_THRESHOLD_PX)) {
+        autoFollowEnabledRef.current = true;
+      }
+      lastScrollPositionRef.current = getCurrentScrollPosition();
+    };
+
+    window.addEventListener("resize", handleResize);
+
+    return () => {
+      if (unsubscribeLenis) {
+        unsubscribeLenis();
+      } else {
+        window.removeEventListener("scroll", syncFollowFromCurrentPosition);
+      }
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [
+    getBottomDistance,
+    getCurrentScrollPosition,
+    isAwaitingAssistant,
+    isNearBottom,
+    isStreaming,
+    lenis,
+  ]);
+
+  useEffect(() => {
+    const handleKeydownCapture = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) {
+        return;
+      }
+      if (event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+      if (event.key.length !== 1) {
+        return;
+      }
+      if (isEditableTarget(event.target)) {
+        return;
+      }
+
+      const selection = window.getSelection();
+      if (selection && selection.toString().trim().length > 0) {
+        return;
+      }
+
+      event.preventDefault();
+      setDraft((current) => `${current}${event.key}`);
+      window.requestAnimationFrame(() => {
+        const textarea = textareaRef.current;
+        if (!textarea) {
+          return;
+        }
+        textarea.focus();
+        const cursorPos = textarea.value.length;
+        textarea.setSelectionRange(cursorPos, cursorPos);
+        textarea.style.height = "28px";
+        textarea.style.height = `${Math.min(textarea.scrollHeight, 150)}px`;
+      });
+    };
+
+    window.addEventListener("keydown", handleKeydownCapture);
+    return () => {
+      window.removeEventListener("keydown", handleKeydownCapture);
+    };
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
       if (fadingTimerRef.current !== null) window.clearTimeout(fadingTimerRef.current);
@@ -1523,6 +1915,11 @@ function AuthenticatedChat() {
     }
 
     setDraft("");
+    autoFollowEnabledRef.current = true;
+    window.requestAnimationFrame(() => {
+      scrollToPageBottom();
+      lastScrollPositionRef.current = getCurrentScrollPosition();
+    });
     if (textareaRef.current) {
       textareaRef.current.style.height = "28px";
     }
@@ -1533,6 +1930,16 @@ function AuthenticatedChat() {
       if (!threadId) {
         const created = await createThread({});
         threadId = created.threadId;
+        setIsFadingOut(true);
+        waitingForDataRef.current = true;
+        if (dataWaitTimerRef.current !== null) {
+          window.clearTimeout(dataWaitTimerRef.current);
+        }
+        dataWaitTimerRef.current = window.setTimeout(() => {
+          waitingForDataRef.current = false;
+          setIsFadingOut(false);
+          dataWaitTimerRef.current = null;
+        }, THREAD_SWITCH_FAILSAFE_MS);
         setIsComposingNew(false);
         setActiveThreadId(threadId);
       }
@@ -1541,7 +1948,12 @@ function AuthenticatedChat() {
         return;
       }
 
+      setAwaitingAssistantThreadId(threadId);
+
       await sendPrompt({ threadId, prompt });
+    } catch (error) {
+      setAwaitingAssistantThreadId(null);
+      throw error;
     } finally {
       setIsSubmitting(false);
     }
@@ -1686,9 +2098,21 @@ function AuthenticatedChat() {
                 </div>
               </>
             ) : (
-              visibleMessages.map((message) => (
-                <Message key={message.key} message={message} />
-              ))
+              <>
+                {visibleMessages.map((message) => (
+                  <Message key={message.key} message={message} />
+                ))}
+                {isWaitingForAssistantMessage && (
+                  <div className="message ai pending-assistant">
+                    <div className="response-container">
+                      <div className="message-meta">Aura Response</div>
+                      <div className="message-content">
+                        <span className="typewriter-cursor" aria-label="Generating response" />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
 

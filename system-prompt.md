@@ -20,13 +20,14 @@ Update this file whenever any prompt text, prompt location, trigger condition, o
 
 ## Skill/Playbook Injection Rules (Current)
 
-- Runtime does not read `playbooks/*.md` directly; prompts consume curated knowledge from Convex (`knowledgeDocs` + `knowledgeItems`).
-- Chat sees `availableSkills` catalog + general hints from active knowledge docs via `getSkillCatalogForChatInternal`.
+- Runtime reads active playbooks from Convex `playbooks` table (synced from local `playbooks/*.md`).
+- Chat sees `availableSkills` catalog + general playbook guidance via `getSkillCatalogForChatInternal`.
 - `general` is the canonical global skill slug (legacy alias `skills` is accepted and normalized).
 - Non-general packs are loaded by `SkillOps.load` into thread-scoped `threadSkillPacks` with user-turn TTL counters.
 - Active pack counters are injected every turn; model can refresh packs before expiry.
 - Domain and optional skills are selected by model through `ResearchOps.start.selectedSkills` and resolved via `getSkillPackBySlugsInternal`.
 - `flights_grey_tactics` must only be used after explicit user opt-in; default consent scope is thread-level.
+- If user references internal playbook names like `flights.md`, treat as playbook alias; if user pasted their own markdown content, analyze that user content directly.
 
 ## Maintenance Checklist
 

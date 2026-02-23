@@ -10,7 +10,7 @@ Build a conversational travel and ticket research agent that:
 - Persists user context across sessions (`user.md` concept)
 - Uses deep research to discover non-obvious options, promos, and constraints
 - Ranks options into clear decisions (`cheapest`, `best value`, `most convenient`)
-- Supports multiple verticals (flights, trains, concerts) through curated knowledge
+- Supports multiple verticals (flights, trains, concerts) through curated playbooks
 
 This plan is optimized for the current stack: Next.js + Convex + TypeScript + Gemini.
 
@@ -18,7 +18,7 @@ This plan is optimized for the current stack: Next.js + Convex + TypeScript + Ge
 
 Use markdown as a human-facing layer, with Convex tables as source of truth.
 
-- `general.md` (global index, published as `general` knowledge doc; legacy `skills` alias accepted)
+- `general.md` (global index, synced to Convex `playbooks` table as slug `general`; legacy `skills` alias accepted)
   - General strategy playbook
   - References domain playbooks (`flights.md`, `train.md`, `concert.md`)
 - `flights.md`, `train.md`, `concert.md` (global domain playbooks)
@@ -57,9 +57,9 @@ Why this approach:
 
 ### 3.4 Knowledge Layer
 
-- Curated playbook storage (`general` + domain docs)
-- Retrieval and injection into planning stage
-- Confidence and expiration metadata per knowledge item
+- Curated playbook storage (`general` + domain docs) in Convex `playbooks`
+- Retrieval and injection into chat/research prompts
+- Keep structure simple: full markdown per playbook row, minimal metadata
 
 ## 4) Request Lifecycle (Prompt -> Final)
 
@@ -123,21 +123,19 @@ Improve for this product:
 - `userMemorySnapshots`
   - Generated markdown snapshots (`user.md`) for display/debug
 
-## 6.3 Knowledge tables
+## 6.3 Playbook table
 
-- `knowledgeDocs`
-  - `general` (legacy alias: `skills`), `flights`, `train`, `concert`
-- `knowledgeItems`
-  - Individual tactics/heuristics with source and confidence
-- `knowledgeLinks`
-  - Cross-doc links (e.g., `general` -> `flights`)
+- `playbooks`
+  - One row per playbook (`general`, `flights`, `train`, `concert`, `flights_grey_tactics`)
+  - Stores full markdown in `contentMarkdown`
+  - Includes `scope` (`always|conditional|opt_in`) and `riskClass` (`safe|grey`)
 
 ## 6.4 Essential indexes
 
 - By user and recency (`by_user_updatedAt`)
 - By job status and recency (`by_status_updatedAt`)
 - By task job + status (`by_job_status`)
-- By domain + priority for knowledge retrieval (`by_doc_priority`)
+- By slug/status/scope for playbook retrieval and runtime injection
 
 ## 7) Memory Policy (Critical)
 
@@ -237,15 +235,15 @@ Implementation notes (current):
 - Candidate/Ranked records persist freshness metadata (`verifiedAt`, `recheckAfter`)
 - UI can trigger manual live recheck, which re-queues job + tasks and reruns pipeline
 - Candidate metric defaults are now adjusted by extracted source evidence (price, duration, transfer cues, policy/baggage/booking signals)
-- Knowledge curation now has authenticated admin surfaces for docs/items/links, maintenance to stale expired tactics, and markdown regeneration query output
-- Optional editor allowlist via `KNOWLEDGE_EDITOR_IDS` controls knowledge write access when configured
+- Playbook curation now has authenticated admin surfaces for markdown docs, maintenance to stale expired tactics, and regeneration query output
+- Optional editor allowlist via `PLAYBOOK_EDITOR_IDS` (fallback `KNOWLEDGE_EDITOR_IDS`) controls playbook write access when configured
 
 Target direction (locked):
 
 - Final candidate ranking should become LLM-led (domain + skill steered), with code-level guardrails for validation/recovery/safety.
 - Deterministic weighted ranking remains as a temporary fallback path until LLM ranking verifier gates are complete.
 
-## 12) Knowledge Curation Workflow
+## 12) Playbook Curation Workflow
 
 For `general.md` and domain playbooks:
 
@@ -254,7 +252,7 @@ For `general.md` and domain playbooks:
 3. Deduplicate and cluster
 4. Attach evidence + confidence + expiry
 5. Human review for activation
-6. Publish to runtime knowledge tables
+6. Sync markdown playbooks into Convex `playbooks` table
 7. Regenerate markdown docs from active entries
 
 Quality gate:
@@ -296,7 +294,7 @@ Implementation notes (current):
 - Memory operation application now records per-op audits (`applied`/`skipped` + reason + confidence) in `memoryOpAuditEvents` and surfaces recent activity in account settings.
 - Chat now injects a skill catalog (available skill slugs + general guidance) and the model decides whether to emit `ResearchOps.start`.
 - `ResearchOps.start` is semantically validated before apply (required domain criteria + at least one valid selected skill slug).
-- Research runs now persist pinned skill context on job creation/resume (`selectedSkillSlugs`, `skillHintsSnapshot`, `skillPackDigest`) so planning is stable for the run and does not drift with later knowledge edits.
+- Research runs now persist pinned skill context on job creation/resume (`selectedSkillSlugs`, `skillHintsSnapshot`, `skillPackDigest`) so planning is stable for the run and does not drift with later playbook edits.
 
 Evaluate with fixed benchmark scenarios per domain:
 
@@ -354,9 +352,9 @@ Evaluate with fixed benchmark scenarios per domain:
 
 ## 17) Immediate Next Steps
 
-1. Implement schema for memory/jobs/knowledge/candidates
+1. Implement schema for memory/jobs/playbooks/candidates
 2. Implement minimal function surface (`submitPrompt`, planner, executor, synthesizer)
-3. Implement `general` + `flights` knowledge retrieval in planner
+3. Implement `general` + `flights` playbook retrieval in planner
 4. Ship one end-to-end flight flow before adding train/concert
 
 ## 18) Convex Constraints and Reliability Rules
@@ -646,7 +644,7 @@ When this section conflicts with older sections, this section wins.
 - [x] Ship behind feature flag (`llm_research_pipeline_v1`) with safe fallback path.
 - [ ] Promote to default only after quality gates pass on benchmark suite.
 
-## 26) Community Signal PR Loop for Flights (Living Knowledge)
+## 26) Community Signal PR Loop for Flights (Living Playbooks)
 
 Goal:
 
@@ -655,20 +653,20 @@ Goal:
 
 ### 26.1 Scope and source of truth
 
-- Runtime source of truth remains Convex knowledge tables.
-- `playbooks/flights.md` remains the canonical playbook scaffold and is regenerated/published from active curated entries.
+- Runtime source of truth is Convex `playbooks` table synced from `playbooks/*.md`.
+- `playbooks/flights.md` remains the canonical scaffold and syncs to runtime via `playbooks:sync`.
 - Do not directly trust one-off findings from a single run; all findings enter the PR loop first.
 
 ### 26.2 New data model additions
 
-- `knowledgeProposals`
+- `playbookProposals`
   - Candidate findings submitted by research runs or admins.
   - Example types: promo code, fare-rule quirk, channel-specific discount, route-level anomaly.
-- `knowledgeProposalEvents`
+- `playbookProposalEvents`
   - Evidence events attached to a proposal (confirm/fail/expired/abuse/no-longer-working).
-- `knowledgeProposalReviews`
+- `playbookProposalReviews`
   - Reviewer decisions (agent or human) with rationale and confidence.
-- `knowledgeProposalUsage`
+- `playbookProposalUsage`
   - Runtime attempts and outcomes when a proposal is surfaced to users.
 
 Recommended key fields:
@@ -730,7 +728,7 @@ Demotion triggers:
 ### 26.8 Implementation checklist
 
 - [ ] Add Convex tables/indexes for proposals, events, reviews, usage.
-- [ ] Add `KnowledgeProposalOps` internal functions (`submit`, `triage`, `review`, `promote`, `demote`, `expire`).
+- [ ] Add `PlaybookProposalOps` internal functions (`submit`, `triage`, `review`, `promote`, `demote`, `expire`).
 - [ ] Add reviewer agent job that processes proposal queues on schedule.
 - [ ] Add runtime injection path for `active_temp` signals into planning context.
 - [ ] Add stale cleanup job and usage-based invalidation.

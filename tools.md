@@ -79,7 +79,7 @@ Validation status:
   - `{"action":"noop"}`
 - Backend apply path:
   - `convex/chat.ts` -> validate + resolve selected skill slugs
-  - `convex/knowledge.ts` -> `getSkillPackBySlugsInternal` (pins selected skill hints for the run)
+  - `convex/playbooks.ts` -> `getSkillPackBySlugsInternal` (pins selected playbook context for the run)
   - `convex/research.ts` -> `startResearchFromOpsInternal`
 
 Validation status:
@@ -88,7 +88,7 @@ Validation status:
 - Repair loop on malformed output: **Yes** (up to 2 repair attempts)
 - Semantic validation before apply: **Yes**
   - must include at least one selected skill
-  - selected skill slugs must exist in active knowledge docs
+  - selected skill slugs must exist in active playbooks
   - required criteria must be complete for selected domain (missing can be satisfied by confirmed facts)
 - Runtime hard check in research mutation: **Yes**
   - rejects empty selected skill list
@@ -111,7 +111,7 @@ Validation status:
 - Envelope JSON schema validation: **Yes**
 - Repair loop on malformed output: **Yes** (up to 2 repair attempts)
 - Semantic validation before apply: **Yes**
-  - selected skill slugs must exist in active knowledge docs
+  - selected skill slugs must exist in active playbooks
   - `general` is always-on and not loaded as a thread pack
 - Runtime behavior:
   - thread-scoped active packs
@@ -159,7 +159,7 @@ Validation status:
 ### MemoryNote
 
 - Tag: `<MemoryNote>`
-- Purpose: short optional note shown in UI (e.g., "Memory updated: ...").
+- Purpose: short optional note shown in UI (e.g., "Assistant note: ...").
 - Does not mutate memory.
 
 ## Where this is implemented
@@ -170,7 +170,7 @@ Validation status:
 - Memory op audit query + storage: `convex/memory.ts`
 - Research op validation and start orchestration: `convex/chat.ts`
 - Skill pack load/refresh + turn TTL state: `convex/chat.ts` (`threadSkillPacks`)
-- Skill catalog + selected-skill resolution: `convex/knowledge.ts`
+- Playbook catalog + selected-skill resolution: `convex/playbooks.ts`
 - Research start/resume + skill hint snapshot persistence: `convex/research.ts`
 - Title apply validation and normalization: `convex/chat.ts`
 - UI envelope stripping, memory note display, and memory activity list: `src/components/chat.tsx`
