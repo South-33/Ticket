@@ -21,6 +21,7 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - Clarification plumbing is in place (`requestUserClarificationInternal`, `submitClarificationAnswerInternal`, pending-request query), and chat now handles pending clarification answers then re-queues research automatically.
 - Current flight runtime behavior: if scan quality remains weak on numeric fare evidence and `flexibilityLevel` is missing (with core route/date present), research can pause and request a date-flexibility clarification before synthesis.
 - Planner runtime now includes an LLM planner contract with schema validation + repair attempts; if model output is invalid/unavailable, the pipeline falls back to a deterministic planner strategy instead of failing the run.
+- Ranking runtime now attempts LLM-based category prioritization with schema validation/repair; it falls back to deterministic scoring when model output is unavailable/invalid.
 
 ## Reference Docs
 - Convex best practices: https://docs.convex.dev/understanding/best-practices
@@ -40,5 +41,5 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 ## Supplemental Reading (Non-Authoritative)
 - Advanced tool calling deep dive: https://sparkco.ai/blog/advanced-tool-calling-in-llm-agents-a-deep-dive
 - Tool-calling optimization eval write-up: https://www.useparagon.com/learn/rag-best-practices-optimizing-tool-calling/
-- SkillsBench paper (skills design benchmark): https://arxiv.org/abs/2602.12670
+- SkillsBench paper (skills design benchmark): https://arxiv.org/html/2602.12670v1
 - Use these for strategy ideas and evaluation heuristics, not API/SDK truth.

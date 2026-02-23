@@ -41,6 +41,7 @@ const MAX_RESEARCH_SCAN_ROUNDS = 2;
 const MAX_PROMOTED_CONTEXT_SOURCES = 4;
 const QUALITY_CONTINUE_THRESHOLD = 0.66;
 const MAX_PLANNER_REPAIR_ATTEMPTS = 2;
+const MAX_RANKING_REPAIR_ATTEMPTS = 2;
 
 const plannerEvidenceFocusValues = [
   "price_total",
@@ -59,6 +60,19 @@ const plannerOutputSchema = z.object({
   subqueries: z.array(z.string().min(6).max(220)).min(1).max(5),
   evidenceFocus: z.array(z.enum(plannerEvidenceFocusValues)).min(1).max(6),
   qualityGate: z.string().min(12).max(300),
+});
+
+const rankingCategorySchema = z.enum(["cheapest", "best_value", "most_convenient"]);
+
+const rankingOutputSchema = z.object({
+  rankings: z.array(
+    z.object({
+      category: rankingCategorySchema,
+      rank: z.number().int().min(1).max(5),
+      score: z.number().int().min(1).max(100),
+      rationale: z.string().min(12).max(280),
+    }),
+  ).min(1).max(3),
 });
 
 type ResearchJobStatus =
@@ -98,6 +112,14 @@ type PlannerOutput = z.infer<typeof plannerOutputSchema>;
 
 type PlannerPlanResult = {
   plan: PlannerOutput;
+  mode: "llm" | "fallback";
+  validationErrors: string[];
+};
+
+type RankedResultRow = ReturnType<typeof buildRankedResultsFromCandidates>[number];
+
+type RankingResult = {
+  rankedResults: RankedResultRow[];
   mode: "llm" | "fallback";
   validationErrors: string[];
 };
@@ -1098,6 +1120,171 @@ async function generatePlannerPlan(args: {
 
   return {
     plan: fallback,
+    mode: "fallback",
+    validationErrors,
+  };
+}
+
+function buildRankingPrompt(args: {
+  prompt: string;
+  domain: ResearchDomain;
+  constraintSummary?: string;
+  candidates: CandidateDraft[];
+}) {
+  const candidateInput = args.candidates.map((candidate) => ({
+    category: candidate.category,
+    title: candidate.title,
+    estimatedTotalUsd: candidate.estimatedTotalUsd,
+    travelMinutes: candidate.travelMinutes,
+    transferCount: candidate.transferCount,
+    flexibilityScore: Number(candidate.flexibilityScore.toFixed(2)),
+    baggageScore: Number(candidate.baggageScore.toFixed(2)),
+    bookingEaseScore: Number(candidate.bookingEaseScore.toFixed(2)),
+    freshnessScore: Number(candidate.freshnessScore.toFixed(2)),
+    confidence: Number(candidate.confidence.toFixed(2)),
+  }));
+
+  return [
+    "You are a ranking model for travel research options.",
+    "Rank candidate categories for final output quality.",
+    "Return only JSON matching the schema.",
+    "",
+    `domain: ${args.domain}`,
+    `user_prompt: ${compactText(args.prompt)}`,
+    `constraints: ${compactText(args.constraintSummary ?? "none")}`,
+    `candidates: ${JSON.stringify(candidateInput)}`,
+    "",
+    "JSON schema:",
+    "{",
+    '  "rankings": [',
+    '    {"category":"cheapest|best_value|most_convenient","rank":1,"score":1..100,"rationale":"string"}',
+    "  ]",
+    "}",
+    "",
+    "Rules:",
+    "- Include each category at most once.",
+    "- Lower rank number means better overall recommendation.",
+    "- Keep rationale concise and evidence-oriented.",
+    "- No markdown, comments, or extra keys.",
+  ].join("\n");
+}
+
+function parseRankingOutput(raw: string) {
+  try {
+    const parsed = JSON.parse(extractJsonFromModelOutput(raw));
+    const result = rankingOutputSchema.safeParse(parsed);
+    if (!result.success) {
+      return {
+        rankings: null,
+        errors: result.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
+      };
+    }
+
+    const seen = new Set<string>();
+    for (const item of result.data.rankings) {
+      if (seen.has(item.category)) {
+        return {
+          rankings: null,
+          errors: [`duplicate_category: ${item.category}`],
+        };
+      }
+      seen.add(item.category);
+    }
+
+    return {
+      rankings: result.data.rankings,
+      errors: [] as string[],
+    };
+  } catch (error) {
+    return {
+      rankings: null,
+      errors: [`ranking_json_parse_error: ${errorMessage(error)}`],
+    };
+  }
+}
+
+function mergeLlmRankingWithBaseline(args: {
+  baseline: RankedResultRow[];
+  llmRankings: z.infer<typeof rankingOutputSchema>["rankings"];
+}): RankedResultRow[] {
+  const baselineByCategory = new Map(args.baseline.map((item) => [item.category, item] as const));
+  const ordered = args.llmRankings
+    .slice()
+    .sort((a, b) => a.rank - b.rank)
+    .map((item) => item.category);
+  const remaining = args.baseline.map((item) => item.category).filter((category) => !ordered.includes(category));
+  const finalOrder = [...ordered, ...remaining];
+
+  return finalOrder
+    .map((category, index) => {
+      const base = baselineByCategory.get(category);
+      if (!base) {
+        return null;
+      }
+      const llmEntry = args.llmRankings.find((item) => item.category === category);
+      return {
+        ...base,
+        rank: index + 1,
+        score: llmEntry ? llmEntry.score : base.score,
+        rationale: llmEntry ? llmEntry.rationale : base.rationale,
+      };
+    })
+    .filter((item): item is RankedResultRow => !!item);
+}
+
+async function generateLlmRanking(args: {
+  prompt: string;
+  domain: ResearchDomain;
+  constraintSummary?: string;
+  candidates: CandidateDraft[];
+}): Promise<RankingResult> {
+  const baseline = buildRankedResultsFromCandidates(args.candidates);
+  const validationErrors: string[] = [];
+
+  if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
+    validationErrors.push("ranking_model_api_key_missing");
+    return {
+      rankedResults: baseline,
+      mode: "fallback",
+      validationErrors,
+    };
+  }
+
+  let rankingPrompt = buildRankingPrompt(args);
+  for (let attempt = 0; attempt <= MAX_RANKING_REPAIR_ATTEMPTS; attempt += 1) {
+    try {
+      const result = await generateText({
+        model: google("gemini-flash-lite-latest"),
+        prompt: rankingPrompt,
+      });
+
+      const parsed = parseRankingOutput(result.text);
+      if (parsed.rankings) {
+        return {
+          rankedResults: mergeLlmRankingWithBaseline({
+            baseline,
+            llmRankings: parsed.rankings,
+          }),
+          mode: "llm",
+          validationErrors,
+        };
+      }
+
+      validationErrors.push(...parsed.errors);
+      rankingPrompt = [
+        buildRankingPrompt(args),
+        "",
+        "Validation failed. Re-emit corrected JSON only.",
+        ...parsed.errors.map((error) => `- ${error}`),
+      ].join("\n");
+    } catch (error) {
+      validationErrors.push(`ranking_model_error: ${errorMessage(error)}`);
+      break;
+    }
+  }
+
+  return {
+    rankedResults: baseline,
     mode: "fallback",
     validationErrors,
   };
@@ -3413,10 +3600,41 @@ export const runJobInternal = internalAction({
           candidates: candidateDrafts,
         });
 
-        const ranked = buildRankedResultsFromCandidates(candidateDrafts);
+        const rankingResult = await generateLlmRanking({
+          prompt: goal.prompt,
+          domain: goal.domain,
+          constraintSummary: goal.constraintSummary,
+          candidates: candidateDrafts,
+        });
+        const ranked = rankingResult.rankedResults;
         await ctx.runMutation(internal.research.replaceRankedResultsInternal, {
           researchJobId: args.researchJobId,
           rankedResults: ranked,
+        });
+
+        await ctx.runMutation(internal.research.addFindingInternal, {
+          researchJobId: args.researchJobId,
+          taskKey: "synthesize",
+          title: rankingResult.mode === "llm" ? "LLM ranking applied" : "Ranking fallback used",
+          summary:
+            rankingResult.mode === "llm"
+              ? "Applied model-ranked ordering across candidate categories with rationale outputs."
+              : "Used deterministic ranking fallback because ranking model output was unavailable or invalid.",
+          confidence: rankingResult.mode === "llm" ? 0.74 : 0.58,
+          sourceType: "api",
+        });
+        await ctx.runMutation(internal.research.addDialogueEventInternal, {
+          researchJobId: args.researchJobId,
+          actor: "researcher",
+          kind: "decision",
+          message:
+            rankingResult.mode === "llm"
+              ? "LLM ranking completed for final prioritization."
+              : "Ranking fallback applied to keep run stable.",
+          detail:
+            rankingResult.validationErrors.length > 0
+              ? rankingResult.validationErrors.slice(0, 3).join(" | ")
+              : `ranked_count=${ranked.length}`,
         });
 
         await ctx.runMutation(internal.research.addFindingInternal, {

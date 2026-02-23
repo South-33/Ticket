@@ -557,8 +557,9 @@ When this section conflicts with older sections, this section wins.
 - [x] Chat now consumes pending clarification requests, accepts user answers, and re-queues research automatically.
 - [x] Flight scan now quality-gates into clarification when numeric fare evidence remains thin and `flexibilityLevel` is missing.
 - [x] Planner stage now supports an LLM planner contract (structured JSON + repair attempts) with deterministic fallback when model output is unavailable/invalid.
+- [x] Ranking stage now supports LLM prioritization with schema validation/repair and deterministic fallback.
 - [ ] LLM planner/executor/synthesizer runtime is not complete yet (current execution is still largely deterministic retrieval/scoring).
-- [ ] LLM-led final ranking is not complete yet (deterministic ranker still active primary path).
+- [ ] End-to-end verifier-gated ranking quality checks are not complete yet (LLM ranking exists, but guardrail depth is still expanding).
 - [ ] Researcher-to-chatbot clarification tooling and pause/resume handshake is not complete yet.
 - [ ] User-visible actor-level trace (researcher <-> chatbot conversation timeline) is not complete yet.
 
@@ -614,9 +615,9 @@ When this section conflicts with older sections, this section wins.
 - [x] Implement planner stage action using selected skills + domain adapters.
 - [ ] Implement branch analyzer stage with citation-bound findings.
 - [ ] Implement synthesizer stage to produce normalized candidate set.
-- [ ] Implement LLM ranking stage (domain/skill aware) for final prioritization.
+- [x] Implement LLM ranking stage (domain/skill aware) for final prioritization.
 - [ ] Implement quality assessor stage with explicit continue/clarify/finalize decision output.
-- [ ] Keep deterministic ranker as fallback until verifier gates are stable.
+- [x] Keep deterministic ranker as fallback until verifier gates are stable.
 
 #### E) Guardrails and verification
 

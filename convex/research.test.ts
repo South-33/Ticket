@@ -1164,12 +1164,16 @@ describe("research pipeline", () => {
       researchJobId,
     });
 
-    const latest = await t.query(api.research.getLatestJobForThread, {
-      threadId,
+    const findings = await t.query(api.research.listFindingsByJob, {
+      researchJobId,
+      paginationOpts: {
+        numItems: 30,
+        cursor: null,
+      },
     });
 
     expect(
-      latest?.findings.some((finding: { title: string }) => finding.title === "Planner hints injected"),
+      findings.page.some((finding) => finding.title === "Planner hints injected"),
     ).toBe(true);
   });
 
@@ -1299,6 +1303,87 @@ describe("research pipeline", () => {
       expect(
         dialogue.page.some((event) => event.kind === "plan" && event.message.toLowerCase().includes("fallback")),
       ).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      if (priorGoogleKey === undefined) {
+        delete process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+      } else {
+        process.env.GOOGLE_GENERATIVE_AI_API_KEY = priorGoogleKey;
+      }
+      if (priorTavilyKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorTavilyKey;
+      }
+    }
+  });
+
+  test("uses ranking fallback when model key is unavailable", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const threadId = "thread-ranking-fallback";
+    const priorGoogleKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+    const priorTavilyKey = process.env.TAVILY_API_KEY;
+    delete process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+    process.env.TAVILY_API_KEY = "test-tavily-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("api.tavily.com/search")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  title: "Ranking fallback source",
+                  url: "https://example.com/ranking-fallback",
+                  content: "Fare from $510 with 1 stop and 13h 30m total travel time.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        if (url.includes("api.tavily.com/extract")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  url: "https://example.com/ranking-fallback",
+                  raw_content: "Offer from $510, 1 stop, 13h 30m, baggage included.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          json: async () => ({}),
+        } as Response;
+      }),
+    );
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const findings = await t.query(api.research.listFindingsByJob, {
+        researchJobId,
+        paginationOpts: {
+          numItems: 30,
+          cursor: null,
+        },
+      });
+
+      expect(findings.page.some((item) => item.title === "Ranking fallback used")).toBe(true);
     } finally {
       vi.unstubAllGlobals();
       if (priorGoogleKey === undefined) {
