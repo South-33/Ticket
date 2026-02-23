@@ -5,6 +5,7 @@ import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import { FormEvent, useMemo, useState } from "react";
 import { api } from "@convex/_generated/api";
 import type { Id } from "@convex/_generated/dataModel";
+import { hasConfiguredClerk } from "@/lib/clerk-env";
 
 type KnowledgeDocId = Id<"knowledgeDocs">;
 type KnowledgeItemId = Id<"knowledgeItems">;
@@ -26,7 +27,7 @@ function parseSourceUrls(input: string) {
 
 export function KnowledgeAdmin() {
   const { isAuthenticated, isLoading } = useConvexAuth();
-  const hasClerk = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+  const hasClerk = hasConfiguredClerk();
 
   const [docKindFilter, setDocKindFilter] = useState<(typeof DOC_KIND_OPTIONS)[number]>("all");
   const [docStatusFilter, setDocStatusFilter] = useState<(typeof DOC_STATUS_OPTIONS)[number]>("all");

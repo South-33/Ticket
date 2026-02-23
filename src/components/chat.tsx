@@ -16,6 +16,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { api } from "@convex/_generated/api";
 import { ChatCanvas } from "@/components/chat-canvas";
+import { hasConfiguredClerk } from "@/lib/clerk-env";
 
 function MemoryNavIcon() {
   return (
@@ -755,7 +756,7 @@ const THREAD_SWITCH_FADE_MS = 500;
 const THREAD_SWITCH_REVEAL_DELAY_MS = 120;
 const THREAD_SWITCH_FAILSAFE_MS = 5000;
 
-const hasClerk = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+const hasClerk = hasConfiguredClerk();
 const SIDEBAR_HISTORY_CACHE_KEY_PREFIX = "aura:sidebarHistory:v1";
 const SIDEBAR_LAST_USER_ID_KEY = "aura:lastUserId";
 const MAX_CACHED_SIDEBAR_THREADS = 8;

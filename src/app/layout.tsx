@@ -2,13 +2,15 @@ import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
 import { ConvexClientProvider } from "@/components/convex-client-provider";
 import { SmoothScroll } from "@/components/smooth-scroll";
+import { getClerkPublishableKey } from "@/lib/clerk-env";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "ASCII / AURA",
   description: "Aura Prime generative interface",
 };
-const hasClerk = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+const clerkPublishableKey = getClerkPublishableKey();
+const hasClerk = !!clerkPublishableKey;
 
 export default function RootLayout({
   children,
@@ -20,7 +22,7 @@ export default function RootLayout({
       <body suppressHydrationWarning>
         {hasClerk && (
           <ClerkProvider
-            publishableKey={process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+            publishableKey={clerkPublishableKey}
             appearance={{
               variables: {
                 colorPrimary: "#111111",

@@ -4,6 +4,7 @@ import { useAuth } from "@clerk/nextjs";
 import { ConvexProviderWithAuth, ConvexReactClient } from "convex/react";
 import { ConvexProviderWithClerk } from "convex/react-clerk";
 import { ReactNode, useMemo } from "react";
+import { hasConfiguredClerk } from "@/lib/clerk-env";
 
 function useNoAuth() {
   return {
@@ -24,7 +25,7 @@ export function ConvexClientProvider({ children }: { children: ReactNode }) {
     return new ConvexReactClient(convexUrl);
   }, []);
 
-  const hasClerk = !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
+  const hasClerk = hasConfiguredClerk();
   if (!hasClerk) {
     return (
       <ConvexProviderWithAuth client={client} useAuth={useNoAuth}>

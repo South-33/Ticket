@@ -34,6 +34,9 @@ const MAX_PAGE_SIZE = 50;
 const MAX_JOB_ATTEMPTS = 3;
 const RETRY_BACKOFF_MS = [30_000, 120_000, 300_000] as const;
 const JOB_LEASE_DURATION_MS = 9 * 60 * 1000;
+const MAX_RESEARCH_SCAN_ROUNDS = 2;
+const MAX_PROMOTED_CONTEXT_SOURCES = 4;
+const QUALITY_CONTINUE_THRESHOLD = 0.66;
 
 type ResearchJobStatus =
   | "draft"
@@ -345,6 +348,21 @@ type SourceEvidence = {
   extractedSummary?: string;
 };
 
+type PromotedSourceEvidence = SourceEvidence & {
+  signalScore: number;
+  signalReasons: string[];
+};
+
+type QualityGapKey = "citation_coverage" | "numeric_evidence" | "source_diversity" | "confidence";
+
+type QualityAssessment = {
+  decision: "finalize" | "continue";
+  score: number;
+  round: number;
+  gaps: QualityGapKey[];
+  reason: string;
+};
+
 type CandidateEvidenceMetrics = {
   cheapestUsd: number;
   valueUsd: number;
@@ -562,6 +580,142 @@ function deriveCandidateEvidenceMetrics(
     freshnessScore,
     confidenceLift,
   };
+}
+
+function sourceTextForSignals(source: SourceEvidence) {
+  return `${source.title} ${source.snippet ?? ""} ${source.extractedSummary ?? ""}`.replace(/\s+/g, " ").trim();
+}
+
+function scoreSourceSignal(source: SourceEvidence): PromotedSourceEvidence {
+  const text = sourceTextForSignals(source);
+  const hasExtractedSummary = !!source.extractedSummary;
+  const hasSnippet = !!source.snippet;
+  const priceSignals = collectUsdPrices(text);
+  const durationSignals = collectDurationMinutes(text);
+  const transferSignals = collectTransferCounts(text);
+  const signalReasons: string[] = [];
+
+  let signalScore = 0.16;
+
+  if (hasExtractedSummary) {
+    signalScore += 0.28;
+    signalReasons.push("extracted_content");
+  }
+  if (hasSnippet) {
+    signalScore += 0.12;
+    signalReasons.push("snippet");
+  }
+  if (priceSignals.length > 0) {
+    signalScore += 0.26;
+    signalReasons.push("price_signal");
+  }
+  if (durationSignals.length > 0) {
+    signalScore += 0.12;
+    signalReasons.push("duration_signal");
+  }
+  if (transferSignals.length > 0) {
+    signalScore += 0.08;
+    signalReasons.push("transfer_signal");
+  }
+
+  if (/official|airline|railway|ticketmaster|carrier|booking/i.test(text)) {
+    signalScore += 0.08;
+    signalReasons.push("official_context");
+  }
+
+  return {
+    ...source,
+    signalScore: clamp(signalScore, 0, 1),
+    signalReasons,
+  };
+}
+
+function promoteSourceEvidence(sources: SourceEvidence[]): PromotedSourceEvidence[] {
+  const scored = sources.map(scoreSourceSignal);
+  scored.sort((a, b) => {
+    if (b.signalScore !== a.signalScore) {
+      return b.signalScore - a.signalScore;
+    }
+    return a.url.localeCompare(b.url);
+  });
+  return scored.slice(0, MAX_PROMOTED_CONTEXT_SOURCES);
+}
+
+function assessResearchQuality(args: {
+  promotedSources: PromotedSourceEvidence[];
+  totalSourceCount: number;
+  round: number;
+}): QualityAssessment {
+  const promoted = args.promotedSources;
+  const promotedText = promoted.map((source) => sourceTextForSignals(source)).join("\n");
+  const numericSignals =
+    collectUsdPrices(promotedText).length
+    + collectDurationMinutes(promotedText).length
+    + collectTransferCounts(promotedText).length;
+  const citationCoverage = args.totalSourceCount > 0 ? promoted.length / args.totalSourceCount : 0;
+  const sourceDiversity = promoted.length / MAX_PROMOTED_CONTEXT_SOURCES;
+  const confidence =
+    promoted.length > 0
+      ? promoted.reduce((sum, source) => sum + source.signalScore, 0) / promoted.length
+      : 0;
+
+  const gaps: QualityGapKey[] = [];
+  if (citationCoverage < 0.45) {
+    gaps.push("citation_coverage");
+  }
+  if (numericSignals < 2) {
+    gaps.push("numeric_evidence");
+  }
+  if (sourceDiversity < 0.5) {
+    gaps.push("source_diversity");
+  }
+  if (confidence < 0.58) {
+    gaps.push("confidence");
+  }
+
+  const score = clamp(
+    citationCoverage * 0.32
+      + Math.min(1, numericSignals / 6) * 0.26
+      + sourceDiversity * 0.18
+      + confidence * 0.24,
+    0,
+    1,
+  );
+
+  const continueAllowed = args.round < MAX_RESEARCH_SCAN_ROUNDS;
+  const decision = score < QUALITY_CONTINUE_THRESHOLD && continueAllowed ? "continue" : "finalize";
+
+  const reason =
+    decision === "continue"
+      ? `Quality score ${(score * 100).toFixed(0)} is below threshold ${(QUALITY_CONTINUE_THRESHOLD * 100).toFixed(0)}; continuing targeted scan for: ${gaps.join(", ") || "coverage"}.`
+      : `Quality score ${(score * 100).toFixed(0)} meets threshold or continuation budget exhausted.`;
+
+  return {
+    decision,
+    score,
+    round: args.round,
+    gaps,
+    reason,
+  };
+}
+
+function buildFollowupSearchQuery(baseQuery: string, quality: QualityAssessment) {
+  const gapHints: string[] = [];
+  if (quality.gaps.includes("numeric_evidence")) {
+    gapHints.push("price duration layover");
+  }
+  if (quality.gaps.includes("citation_coverage") || quality.gaps.includes("source_diversity")) {
+    gapHints.push("official booking fare rules");
+  }
+  if (quality.gaps.includes("confidence")) {
+    gapHints.push("latest verified update");
+  }
+
+  if (gapHints.length === 0) {
+    return `${baseQuery} fare rules official booking`;
+  }
+
+  return `${baseQuery} ${gapHints.join(" ")}`;
 }
 
 function buildCandidateDrafts(
@@ -2231,26 +2385,119 @@ export const runJobInternal = internalAction({
         let searchProvider: "tavily" | "fallback" = "fallback";
         let extractedByUrl = new Map<string, string>();
 
-        try {
-          const searchResponse = await searchWebWithTavily(searchQuery, 6);
-          webResults = searchResponse.results;
-          searchProvider = searchResponse.provider;
-
-          const extractTargets = webResults.slice(0, 3).map((result) => result.url);
-          if (extractTargets.length > 0) {
-            const extracted = await extractWithTavily(extractTargets, searchQuery);
-            extractedByUrl = new Map(
-              extracted.results
-                .filter((item) => !!item.rawContent)
-                .map((item) => [item.url, item.rawContent ?? ""]),
-            );
-          }
-        } catch (error) {
-          const message = errorMessage(error);
-          if (/TAVILY_API_KEY is not configured/i.test(message)) {
-            webResults = [];
-          } else {
+        const runSearchRound = async (query: string, args: { maxResults: number; maxExtract: number }) => {
+          try {
+            const searchResponse = await searchWebWithTavily(query, args.maxResults);
+            const roundResults = searchResponse.results;
+            const extractTargets = roundResults.slice(0, args.maxExtract).map((result) => result.url);
+            let roundExtracted = new Map<string, string>();
+            if (extractTargets.length > 0) {
+              const extracted = await extractWithTavily(extractTargets, query);
+              roundExtracted = new Map(
+                extracted.results
+                  .filter((item) => !!item.rawContent)
+                  .map((item) => [item.url, item.rawContent ?? ""]),
+              );
+            }
+            return {
+              results: roundResults,
+              provider: searchResponse.provider,
+              extractedByUrl: roundExtracted,
+            };
+          } catch (error) {
+            const message = errorMessage(error);
+            if (/TAVILY_API_KEY is not configured/i.test(message)) {
+              return {
+                results: [] as SearchLead[],
+                provider: "fallback" as const,
+                extractedByUrl: new Map<string, string>(),
+              };
+            }
             throw error;
+          }
+        };
+
+        const firstRound = await runSearchRound(searchQuery, { maxResults: 6, maxExtract: 3 });
+        webResults = firstRound.results;
+        searchProvider = firstRound.provider;
+        extractedByUrl = firstRound.extractedByUrl;
+
+        const firstRoundEvidence = webResults.map((result) => ({
+          title: result.title,
+          url: result.url,
+          snippet: result.snippet,
+          extractedSummary: summarizeExtractedContent(extractedByUrl.get(result.url)),
+        }));
+        const promotedFirstRound = promoteSourceEvidence(firstRoundEvidence);
+        const roundOneQuality = assessResearchQuality({
+          promotedSources: promotedFirstRound,
+          totalSourceCount: webResults.length,
+          round: 1,
+        });
+
+        if (webResults.length > 0) {
+          await ctx.runMutation(internal.research.addFindingInternal, {
+            researchJobId: args.researchJobId,
+            taskKey: "scan",
+            title: "Quality assessment (round 1)",
+            summary: `${roundOneQuality.reason} Promoted ${promotedFirstRound.length}/${webResults.length} source(s) into compact context.`,
+            confidence: clamp(roundOneQuality.score, 0.2, 0.95),
+            sourceType: "api",
+          });
+        }
+
+        if (roundOneQuality.decision === "continue") {
+          const followupQuery = buildFollowupSearchQuery(searchQuery, roundOneQuality);
+          await ctx.runMutation(internal.research.addFindingInternal, {
+            researchJobId: args.researchJobId,
+            taskKey: "scan",
+            title: "Quality gate triggered continuation round",
+            summary: `Running targeted follow-up search for unresolved gaps: ${roundOneQuality.gaps.join(", ") || "coverage"}.`,
+            confidence: 0.6,
+            sourceType: "api",
+          });
+
+          const secondRound = await runSearchRound(followupQuery, { maxResults: 4, maxExtract: 2 });
+          if (secondRound.provider === "tavily") {
+            searchProvider = "tavily";
+          }
+
+          const seenUrls = new Set(webResults.map((result) => result.url));
+          for (const result of secondRound.results) {
+            if (!seenUrls.has(result.url)) {
+              seenUrls.add(result.url);
+              webResults.push(result);
+            }
+          }
+
+          for (const [url, rawContent] of secondRound.extractedByUrl.entries()) {
+            if (!extractedByUrl.has(url)) {
+              extractedByUrl.set(url, rawContent);
+            }
+          }
+
+          const secondRoundEvidence = webResults.map((result) => ({
+            title: result.title,
+            url: result.url,
+            snippet: result.snippet,
+            extractedSummary: summarizeExtractedContent(extractedByUrl.get(result.url)),
+          }));
+          const promotedSecondRound = promoteSourceEvidence(secondRoundEvidence);
+          const roundTwoQuality = assessResearchQuality({
+            promotedSources: promotedSecondRound,
+            totalSourceCount: webResults.length,
+            round: 2,
+          });
+
+          if (webResults.length > 0) {
+            await ctx.runMutation(internal.research.addFindingInternal, {
+              researchJobId: args.researchJobId,
+              taskKey: "scan",
+              title: "Quality assessment (round 2)",
+              summary: `${roundTwoQuality.reason} Promoted ${promotedSecondRound.length}/${webResults.length} source(s) into compact context.`,
+              confidence: clamp(roundTwoQuality.score, 0.2, 0.95),
+              sourceType: "api",
+            });
           }
         }
 
@@ -2309,7 +2556,7 @@ export const runJobInternal = internalAction({
           status: "completed",
           output:
             webResults.length > 0
-              ? `Collected ${webResults.length} real web source leads and extracted ${extractedByUrl.size} page summaries.`
+              ? `Collected ${webResults.length} source leads and extracted ${extractedByUrl.size} page summaries after quality-gated scan rounds.`
               : "No parsed web leads; fallback evidence was recorded.",
           error: null,
           errorCode: null,
