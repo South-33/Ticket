@@ -493,6 +493,35 @@ body.resizing-sidebar * {
   gap: 0.4rem;
 }
 
+.user-memory-audit-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.user-memory-audit-item {
+  border: 1px dashed var(--border-color);
+  padding: 0.45rem 0.55rem;
+  display: grid;
+  gap: 0.22rem;
+}
+
+.user-memory-audit-item strong {
+  font-size: 0.63rem;
+  letter-spacing: 0.06em;
+}
+
+.user-memory-audit-item p {
+  font-size: 0.72rem;
+  color: var(--text-primary);
+}
+
+.user-memory-audit-item small {
+  font-size: 0.62rem;
+  color: var(--text-secondary);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
 .user-memory-fact-row {
   border: 1px dashed var(--border-color);
   padding: 0.45rem 0.55rem;

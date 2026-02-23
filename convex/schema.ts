@@ -276,6 +276,36 @@ export default defineSchema({
     .index("by_user_key", ["userId", "key"])
     .index("by_user_updatedAt", ["userId", "updatedAt"]),
 
+  memoryOpAuditEvents: defineTable({
+    userId: v.string(),
+    threadId: v.optional(v.string()),
+    promptMessageId: v.optional(v.string()),
+    action: v.union(v.literal("add"), v.literal("update"), v.literal("delete"), v.literal("noop")),
+    store: v.union(v.literal("fact"), v.literal("preference"), v.literal("profile")),
+    key: v.string(),
+    value: v.optional(v.string()),
+    confidence: v.number(),
+    outcome: v.union(v.literal("applied"), v.literal("skipped")),
+    reason: v.string(),
+    createdAt: v.number(),
+  })
+    .index("by_user_createdAt", ["userId", "createdAt"])
+    .index("by_thread_createdAt", ["threadId", "createdAt"]),
+
+  assistantEnvelopeValidationEvents: defineTable({
+    userId: v.string(),
+    threadId: v.string(),
+    promptMessageId: v.string(),
+    attempt: v.number(),
+    valid: v.boolean(),
+    errorCount: v.number(),
+    errors: v.array(v.string()),
+    contractVersionSeen: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_thread_createdAt", ["threadId", "createdAt"])
+    .index("by_user_createdAt", ["userId", "createdAt"]),
+
   knowledgeDocs: defineTable({
     slug: v.string(),
     title: v.string(),

@@ -262,6 +262,48 @@ export const getUserMemory = query({
   },
 });
 
+export const listMemoryOpAudit = query({
+  args: {
+    limit: v.optional(v.number()),
+  },
+  returns: v.array(
+    v.object({
+      action: v.union(v.literal("add"), v.literal("update"), v.literal("delete"), v.literal("noop")),
+      store: v.union(v.literal("fact"), v.literal("preference"), v.literal("profile")),
+      key: v.string(),
+      value: v.optional(v.string()),
+      confidence: v.number(),
+      outcome: v.union(v.literal("applied"), v.literal("skipped")),
+      reason: v.string(),
+      threadId: v.optional(v.string()),
+      promptMessageId: v.optional(v.string()),
+      createdAt: v.number(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    const limit = Math.max(1, Math.min(args.limit ?? 20, 50));
+    const events = await ctx.db
+      .query("memoryOpAuditEvents")
+      .withIndex("by_user_createdAt", (q) => q.eq("userId", userId))
+      .order("desc")
+      .take(limit);
+
+    return events.map((event) => ({
+      action: event.action,
+      store: event.store,
+      key: event.key,
+      value: event.value,
+      confidence: event.confidence,
+      outcome: event.outcome,
+      reason: event.reason,
+      threadId: event.threadId,
+      promptMessageId: event.promptMessageId,
+      createdAt: event.createdAt,
+    }));
+  },
+});
+
 export const upsertUserProfile = mutation({
   args: {
     displayName: v.optional(v.string()),
@@ -613,6 +655,12 @@ export const applyMemoryOpsInternal = internalMutation({
   args: {
     userId: v.string(),
     operations: v.array(memoryOperationValidator),
+    source: v.optional(
+      v.object({
+        threadId: v.string(),
+        promptMessageId: v.string(),
+      }),
+    ),
   },
   returns: v.object({
     applied: v.number(),
@@ -634,25 +682,69 @@ export const applyMemoryOpsInternal = internalMutation({
       .withIndex("by_userId", (q) => q.eq("userId", args.userId))
       .unique();
 
+    const writeAudit = async (entry: {
+      action: "add" | "update" | "delete" | "noop";
+      store: "fact" | "preference" | "profile";
+      key: string;
+      value?: string;
+      confidence: number;
+      outcome: "applied" | "skipped";
+      reason: string;
+    }) => {
+      await ctx.db.insert("memoryOpAuditEvents", {
+        userId: args.userId,
+        threadId: args.source?.threadId,
+        promptMessageId: args.source?.promptMessageId,
+        action: entry.action,
+        store: entry.store,
+        key: entry.key,
+        value: entry.value,
+        confidence: entry.confidence,
+        outcome: entry.outcome,
+        reason: entry.reason.slice(0, 220),
+        createdAt: now,
+      });
+    };
+
     for (const operation of args.operations.slice(0, maxOps)) {
       const action = operation.action;
+      const value = operation.value?.trim();
+      const confidence = Math.max(0, Math.min(1, operation.confidence ?? 0.66));
+      const rawKey = normalizeKey(operation.key);
+      const key = rawKey || "invalid_key";
+
       if (action === "noop") {
         skipped += 1;
+        await writeAudit({
+          action,
+          store: operation.store,
+          key,
+          value,
+          confidence,
+          outcome: "skipped",
+          reason: operation.reason?.trim() || "noop action",
+        });
         continue;
       }
 
-      const key = normalizeKey(operation.key);
-      if (!key) {
+      if (!rawKey) {
         skipped += 1;
+        await writeAudit({
+          action,
+          store: operation.store,
+          key,
+          value,
+          confidence,
+          outcome: "skipped",
+          reason: "invalid normalized key",
+        });
         continue;
       }
-
-      const confidence = Math.max(0, Math.min(1, operation.confidence ?? 0.66));
 
       if (operation.store === "fact") {
         const existing = await ctx.db
           .query("userMemoryFacts")
-          .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", key))
+          .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", rawKey))
           .order("desc")
           .take(1);
         const existingFact = existing[0];
@@ -660,11 +752,20 @@ export const applyMemoryOpsInternal = internalMutation({
         if (action === "delete") {
           if (confidence < 0.9 || !existingFact) {
             skipped += 1;
+            await writeAudit({
+              action,
+              store: operation.store,
+              key: rawKey,
+              value,
+              confidence,
+              outcome: "skipped",
+              reason: !existingFact ? "fact not found for delete" : "delete confidence below 0.9",
+            });
             continue;
           }
           const facts = await ctx.db
             .query("userMemoryFacts")
-            .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", key))
+            .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", rawKey))
             .take(50);
           await Promise.all(
             facts.map((fact) =>
@@ -675,12 +776,29 @@ export const applyMemoryOpsInternal = internalMutation({
             ),
           );
           deleted += 1;
+          await writeAudit({
+            action,
+            store: operation.store,
+            key: rawKey,
+            value,
+            confidence,
+            outcome: "applied",
+            reason: operation.reason?.trim() || "deleted fact",
+          });
           continue;
         }
 
-        const value = operation.value?.trim();
         if (!value) {
           skipped += 1;
+          await writeAudit({
+            action,
+            store: operation.store,
+            key: rawKey,
+            value,
+            confidence,
+            outcome: "skipped",
+            reason: "missing fact value",
+          });
           continue;
         }
 
@@ -698,13 +816,22 @@ export const applyMemoryOpsInternal = internalMutation({
           && (existingFact.isSensitive || isSensitive);
         if (protectedConfirmedFact) {
           skipped += 1;
+          await writeAudit({
+            action,
+            store: operation.store,
+            key: rawKey,
+            value,
+            confidence,
+            outcome: "skipped",
+            reason: "protected confirmed user fact",
+          });
           continue;
         }
 
         if (!existingFact) {
           await ctx.db.insert("userMemoryFacts", {
             userId: args.userId,
-            key,
+            key: rawKey,
             value,
             sourceType: "inferred",
             confidence: safeConfidence,
@@ -714,6 +841,15 @@ export const applyMemoryOpsInternal = internalMutation({
             updatedAt: now,
           });
           added += 1;
+          await writeAudit({
+            action,
+            store: operation.store,
+            key: rawKey,
+            value,
+            confidence: safeConfidence,
+            outcome: "applied",
+            reason: operation.reason?.trim() || "added inferred fact",
+          });
         } else {
           await ctx.db.patch(existingFact._id, {
             value,
@@ -724,6 +860,15 @@ export const applyMemoryOpsInternal = internalMutation({
             updatedAt: now,
           });
           updated += 1;
+          await writeAudit({
+            action,
+            store: operation.store,
+            key: rawKey,
+            value,
+            confidence: safeConfidence,
+            outcome: "applied",
+            reason: operation.reason?.trim() || "updated inferred fact",
+          });
         }
         continue;
       }
@@ -731,47 +876,100 @@ export const applyMemoryOpsInternal = internalMutation({
       if (operation.store === "preference") {
         const existing = await ctx.db
           .query("userPreferenceNotes")
-          .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", key))
+          .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", rawKey))
           .unique();
 
         if (action === "delete") {
           if (!existing || confidence < 0.6) {
             skipped += 1;
+            await writeAudit({
+              action,
+              store: operation.store,
+              key: rawKey,
+              value,
+              confidence,
+              outcome: "skipped",
+              reason: !existing ? "preference not found for delete" : "delete confidence below 0.6",
+            });
             continue;
           }
           await ctx.db.delete(existing._id);
           deleted += 1;
+          await writeAudit({
+            action,
+            store: operation.store,
+            key: rawKey,
+            value,
+            confidence,
+            outcome: "applied",
+            reason: operation.reason?.trim() || "deleted preference",
+          });
           continue;
         }
 
-        const value = operation.value?.trim();
         if (!value) {
           skipped += 1;
+          await writeAudit({
+            action,
+            store: operation.store,
+            key: rawKey,
+            value,
+            confidence,
+            outcome: "skipped",
+            reason: "missing preference value",
+          });
           continue;
         }
 
         if (!existing) {
           await ctx.db.insert("userPreferenceNotes", {
             userId: args.userId,
-            key,
+            key: rawKey,
             value,
             createdAt: now,
             updatedAt: now,
           });
           added += 1;
+          await writeAudit({
+            action,
+            store: operation.store,
+            key: rawKey,
+            value,
+            confidence,
+            outcome: "applied",
+            reason: operation.reason?.trim() || "added preference",
+          });
         } else {
           await ctx.db.patch(existing._id, {
             value,
             updatedAt: now,
           });
           updated += 1;
+          await writeAudit({
+            action,
+            store: operation.store,
+            key: rawKey,
+            value,
+            confidence,
+            outcome: "applied",
+            reason: operation.reason?.trim() || "updated preference",
+          });
         }
         continue;
       }
 
-      const profileField = normalizeProfileField(key);
+      const profileField = normalizeProfileField(rawKey);
       if (!profileField) {
         skipped += 1;
+        await writeAudit({
+          action,
+          store: operation.store,
+          key: rawKey,
+          value,
+          confidence,
+          outcome: "skipped",
+          reason: "unknown profile key",
+        });
         continue;
       }
 
@@ -785,12 +983,30 @@ export const applyMemoryOpsInternal = internalMutation({
       }
       if (!profile) {
         skipped += 1;
+        await writeAudit({
+          action,
+          store: operation.store,
+          key: rawKey,
+          value,
+          confidence,
+          outcome: "skipped",
+          reason: "profile unavailable",
+        });
         continue;
       }
 
       if (action === "delete") {
         if (confidence < 0.9) {
           skipped += 1;
+          await writeAudit({
+            action,
+            store: operation.store,
+            key: rawKey,
+            value,
+            confidence,
+            outcome: "skipped",
+            reason: "delete confidence below 0.9",
+          });
           continue;
         }
 
@@ -800,12 +1016,29 @@ export const applyMemoryOpsInternal = internalMutation({
         });
         deleted += 1;
         profile = await ctx.db.get(profile._id);
+        await writeAudit({
+          action,
+          store: operation.store,
+          key: rawKey,
+          value,
+          confidence,
+          outcome: "applied",
+          reason: operation.reason?.trim() || "cleared profile field",
+        });
         continue;
       }
 
-      const value = operation.value?.trim();
       if (!value) {
         skipped += 1;
+        await writeAudit({
+          action,
+          store: operation.store,
+          key: rawKey,
+          value,
+          confidence,
+          outcome: "skipped",
+          reason: "missing profile value",
+        });
         continue;
       }
 
@@ -822,6 +1055,15 @@ export const applyMemoryOpsInternal = internalMutation({
       });
       updated += 1;
       profile = await ctx.db.get(profile._id);
+      await writeAudit({
+        action,
+        store: operation.store,
+        key: rawKey,
+        value,
+        confidence,
+        outcome: "applied",
+        reason: operation.reason?.trim() || "updated profile field",
+      });
     }
 
     return {

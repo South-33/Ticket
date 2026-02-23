@@ -285,6 +285,8 @@ Implementation notes (current):
 - Chat reply generation now uses a single-pass envelope (`<Response>`, `<MemoryOps>`, `<TitleOps>`, `<MemoryNote>`) so one model call can return user reply plus structured memory/title updates.
 - Thread title updates now come directly from the same single-pass model output with backend validation/repair rules (no cooldown/quality heuristic gate).
 - Malformed envelope outputs now trigger an automatic repair loop (up to 2 retries) with explicit validation feedback before falling back to safe no-op memory/title ops.
+- Envelope protocol now requires explicit `ContractVersion` (`2026-02-23.v1`) and logs validation attempts/errors to `assistantEnvelopeValidationEvents` for telemetry.
+- Memory operation application now records per-op audits (`applied`/`skipped` + reason + confidence) in `memoryOpAuditEvents` and surfaces recent activity in account settings.
 
 Evaluate with fixed benchmark scenarios per domain:
 

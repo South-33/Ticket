@@ -193,4 +193,42 @@ describe("memory guards", () => {
     expect(result.deleted).toBe(1);
     expect(memory.facts.some((fact: { key: string }) => fact.key === "destination")).toBe(false);
   });
+
+  test("records memory op audit events with outcomes and source context", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+
+    await t.mutation(internal.memory.applyMemoryOpsInternal, {
+      userId: DEMO_USER_ID,
+      source: {
+        threadId: "thread-audit-1",
+        promptMessageId: "prompt-audit-1",
+      },
+      operations: [
+        {
+          action: "add",
+          store: "preference",
+          key: "hotel_area",
+          value: "near transit",
+          confidence: 0.8,
+        },
+        {
+          action: "delete",
+          store: "fact",
+          key: "destination",
+          confidence: 0.2,
+          reason: "too uncertain",
+        },
+      ],
+    });
+
+    const audit = await t.query(api.memory.listMemoryOpAudit, {
+      limit: 10,
+    });
+
+    expect(audit.length).toBeGreaterThanOrEqual(2);
+    expect(audit.some((event) => event.outcome === "applied" && event.key === "hotel_area")).toBe(true);
+    expect(audit.some((event) => event.outcome === "skipped" && event.key === "destination")).toBe(true);
+    expect(audit[0]?.threadId).toBe("thread-audit-1");
+    expect(audit[0]?.promptMessageId).toBe("prompt-audit-1");
+  });
 });

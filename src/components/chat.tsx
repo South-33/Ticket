@@ -78,6 +78,7 @@ function normalizeFactKey(input: string) {
 
 function TravelPreferencesMemory({ open }: { open: boolean }) {
   const memory = useQuery(api.memory.getUserMemory, open ? {} : "skip");
+  const memoryAudit = useQuery(api.memory.listMemoryOpAudit, open ? { limit: 8 } : "skip");
   const upsertUserProfile = useMutation(api.memory.upsertUserProfile);
   const upsertUserMemoryFact = useMutation(api.memory.upsertUserMemoryFact);
   const removeUserMemoryFact = useMutation(api.memory.removeUserMemoryFact);
@@ -333,6 +334,7 @@ function TravelPreferencesMemory({ open }: { open: boolean }) {
 
   const factRows = memory?.facts ?? [];
   const preferenceRows = memory?.preferences ?? [];
+  const auditRows = memoryAudit ?? [];
 
   return (
     <div className="user-memory-panel">
@@ -582,6 +584,29 @@ function TravelPreferencesMemory({ open }: { open: boolean }) {
           <p className="user-memory-snapshot-meta">
             Snapshot v{memory.latestSnapshot.version} / {formatUtcTimestamp(memory.latestSnapshot.createdAt)}
           </p>
+        )}
+      </section>
+
+      <section className="user-memory-section">
+        <h4>Recent Memory Activity</h4>
+        {auditRows.length === 0 ? (
+          <p className="user-memory-empty">No memory activity recorded yet.</p>
+        ) : (
+          <div className="user-memory-audit-list">
+            {auditRows.map((event, index) => (
+              <div key={`${event.createdAt}-${event.key}-${index}`} className="user-memory-audit-item">
+                <div>
+                  <strong>{event.action.toUpperCase()}</strong> {event.store} / {event.key}
+                </div>
+                <p>{event.reason}</p>
+                <small>
+                  {event.outcome === "applied" ? "Applied" : "Skipped"} / conf {Math.round(event.confidence * 100)}% /
+                  {" "}
+                  {formatUtcTimestamp(event.createdAt)}
+                </small>
+              </div>
+            ))}
+          </div>
         )}
       </section>
 
@@ -1065,6 +1090,7 @@ function extractTaggedPayload(raw: string, tag: string) {
 
 function stripAssistantEnvelope(raw: string) {
   return raw
+    .replace(/<ContractVersion>[\s\S]*?<\/ContractVersion>/gi, "")
     .replace(/<Response>[\s\S]*?<\/Response>/gi, "")
     .replace(/<MemoryOps>[\s\S]*?<\/MemoryOps>/gi, "")
     .replace(/<TitleOps>[\s\S]*?<\/TitleOps>/gi, "")
