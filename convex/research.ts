@@ -2587,18 +2587,48 @@ export const runJobInternal = internalAction({
           limit: 6,
         });
 
+        const sourceEvidence = sourceDocs.map((source: { title: string; url: string; snippet?: string }) => ({
+          title: source.title,
+          url: source.url,
+          snippet: source.snippet,
+          extractedSummary: summarizeExtractedContent(extractedByUrl.get(source.url)),
+        }));
+        const promotedEvidence = promoteSourceEvidence(sourceEvidence);
+        const synthesisEvidence: SourceEvidence[] =
+          promotedEvidence.length > 0
+            ? promotedEvidence.map((source) => ({
+                title: source.title,
+                url: source.url,
+                snippet: source.snippet,
+                extractedSummary: source.extractedSummary,
+              }))
+            : sourceEvidence.slice(0, MAX_PROMOTED_CONTEXT_SOURCES);
+
+        if (promotedEvidence.length > 0) {
+          const reasons = promotedEvidence
+            .map((source) => `${source.title}: ${source.signalReasons.slice(0, 3).join(",") || "general_signal"}`)
+            .join(" | ");
+          await ctx.runMutation(internal.research.addFindingInternal, {
+            researchJobId: args.researchJobId,
+            taskKey: "synthesize",
+            title: "Promoted evidence context",
+            summary: `Promoted ${promotedEvidence.length}/${sourceEvidence.length} sources into synthesis context. ${reasons}`,
+            confidence: clamp(
+              promotedEvidence.reduce((sum, source) => sum + source.signalScore, 0) / promotedEvidence.length,
+              0.3,
+              0.95,
+            ),
+            sourceType: "api",
+          });
+        }
+
         const candidateDrafts = buildCandidateDrafts(
           {
             prompt: goal.prompt,
             domain: goal.domain,
             constraintSummary: goal.constraintSummary,
           },
-          sourceDocs.map((source: { title: string; url: string; snippet?: string }) => ({
-            title: source.title,
-            url: source.url,
-            snippet: source.snippet,
-            extractedSummary: summarizeExtractedContent(extractedByUrl.get(source.url)),
-          })),
+          synthesisEvidence,
         );
 
         await ctx.runMutation(internal.research.replaceCandidatesInternal, {
@@ -2617,17 +2647,17 @@ export const runJobInternal = internalAction({
           taskKey: "synthesize",
           title: "Early shortlist shell",
           summary: createSynthesisSummary(
-            sourceDocs.map((source: { title: string; url: string }) => ({ title: source.title, url: source.url })),
+            synthesisEvidence.map((source) => ({ title: source.title, url: source.url })),
           ),
-          confidence: sourceDocs.length > 0 ? 0.66 : 0.42,
-          sourceType: sourceDocs.length > 0 ? "web" : "simulated",
+          confidence: synthesisEvidence.length > 0 ? 0.66 : 0.42,
+          sourceType: synthesisEvidence.length > 0 ? "web" : "simulated",
         });
 
         await ctx.runMutation(internal.research.patchTaskInternal, {
           researchJobId: args.researchJobId,
           key: "synthesize",
           status: "completed",
-          output: "Built a shortlist summary from captured source leads.",
+          output: `Built shortlist from ${synthesisEvidence.length} promoted context source(s).`,
           error: null,
           errorCode: null,
           nextRunAt: null,
