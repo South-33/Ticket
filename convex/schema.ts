@@ -244,11 +244,16 @@ export default defineSchema({
     kind: v.union(v.literal("skills"), v.literal("flights"), v.literal("train"), v.literal("concert")),
     status: v.union(v.literal("draft"), v.literal("active"), v.literal("archived")),
     summary: v.optional(v.string()),
+    createdByUserId: v.optional(v.string()),
+    updatedByUserId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_slug", ["slug"])
-    .index("by_kind_status", ["kind", "status"]),
+    .index("by_kind_status", ["kind", "status"])
+    .index("by_kind_status_updatedAt", ["kind", "status", "updatedAt"])
+    .index("by_status_updatedAt", ["status", "updatedAt"])
+    .index("by_updatedAt", ["updatedAt"]),
 
   knowledgeItems: defineTable({
     docId: v.id("knowledgeDocs"),
@@ -259,16 +264,20 @@ export default defineSchema({
     status: v.union(v.literal("draft"), v.literal("active"), v.literal("stale")),
     sourceUrls: v.array(v.string()),
     expiresAt: v.optional(v.number()),
+    createdByUserId: v.optional(v.string()),
+    updatedByUserId: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_doc_status_priority", ["docId", "status", "priority"])
-    .index("by_doc_updatedAt", ["docId", "updatedAt"]),
+    .index("by_doc_updatedAt", ["docId", "updatedAt"])
+    .index("by_doc_key", ["docId", "key"]),
 
   knowledgeLinks: defineTable({
     fromDocId: v.id("knowledgeDocs"),
     toDocId: v.id("knowledgeDocs"),
     label: v.string(),
+    createdByUserId: v.optional(v.string()),
     createdAt: v.number(),
   })
     .index("by_fromDoc", ["fromDocId"])

@@ -235,6 +235,8 @@ Implementation notes (current):
 - Candidate/Ranked records persist freshness metadata (`verifiedAt`, `recheckAfter`)
 - UI can trigger manual live recheck, which re-queues job + tasks and reruns pipeline
 - Candidate metric defaults are now adjusted by extracted source evidence (price, duration, transfer cues, policy/baggage/booking signals)
+- Knowledge curation now has authenticated admin surfaces for docs/items/links, maintenance to stale expired tactics, and markdown regeneration query output
+- Optional editor allowlist via `KNOWLEDGE_EDITOR_IDS` controls knowledge write access when configured
 
 ## 12) Knowledge Curation Workflow
 
