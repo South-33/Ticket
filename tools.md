@@ -1,32 +1,42 @@
 # Tool Contract Map
 
-This project uses a single-pass response contract where the model always returns user text and can optionally append only the tool tags it wants to execute.
+This project uses a response-first contract with optional tool-only turns.
+
+- Preferred path: model returns user text plus optional tool tags.
+- Allowed path: model returns only tool tags when it needs to load/refresh context first; runtime then auto-continues in the same turn and requests a direct user-facing reply.
 
 ## How many tools?
 
-- Executable tool channels: **3**
+- Executable tool channels: **4**
   - `MemoryOps`
   - `ResearchOps`
+  - `SkillOps`
   - `TitleOps`
 - Non-executable fields: **3**
-  - `Response` (required user-facing output)
+  - `Response` (preferred user-facing output)
   - `MemoryNote` (optional UI transparency note)
   - `ContractVersion` (optional compatibility tag)
 
 ## Envelope format
 
-The model must output:
+The model outputs:
 
 ```text
-<required plain response text>
+<plain response text, preferred>
 <optional tool tags only when used>
 ```
+
+Tool-only output is valid when at least one tool tag is present.
 
 Optional tagged output examples:
 
 ```xml
 I found strong options for this route. I can start deep research now.
 <ResearchOps>{"action":"start","domain":"flight","selectedSkills":["general","flights"],"criteria":[{"key":"origin","value":"MNL"},{"key":"destination","value":"FRA"},{"key":"departureDate","value":"2026-08-11"},{"key":"budget","value":"900"},{"key":"nationality","value":"Filipino"}]}</ResearchOps>
+```
+
+```xml
+<SkillOps>{"action":"load","skills":["flights"],"ttlUserTurns":5}</SkillOps>
 ```
 
 ```xml
@@ -85,7 +95,30 @@ Validation status:
   - deduplicates and normalizes selected skill slugs
   - snapshots skill hints/digest onto `researchJobs` for run-pinned planning
 
-### 3) TitleOps
+### 3) SkillOps
+
+- Tag: `<SkillOps>`
+- JSON schema:
+  - `{"action":"load","skills":["flights"],"ttlUserTurns":5}`
+  - `{"action":"noop"}`
+- Backend apply path:
+  - `convex/chat.ts` -> semantic validation against active skill catalog
+  - `convex/chat.ts` -> `applySkillOpsInternal` (thread-scoped pack load/refresh)
+  - `convex/chat.ts` -> `getActiveThreadSkillPacksInternal` + counter injection in system prompt
+
+Validation status:
+
+- Envelope JSON schema validation: **Yes**
+- Repair loop on malformed output: **Yes** (up to 2 repair attempts)
+- Semantic validation before apply: **Yes**
+  - selected skill slugs must exist in active knowledge docs
+  - `general` is always-on and not loaded as a thread pack
+- Runtime behavior:
+  - thread-scoped active packs
+  - default TTL `5` user turns (refreshable)
+  - counters exposed in prompt (e.g., `flights: 2/5 turns remaining`)
+
+### 4) TitleOps
 
 - Tag: `<TitleOps>`
 - JSON schema:
@@ -107,7 +140,7 @@ Validation status:
 ### ContractVersion
 
 - Tag: `<ContractVersion>`
-- Optional exact value when present: `2026-02-23.v1`
+- Optional exact value when present: `2026-02-23.v2`
 - Purpose: compatibility signaling when prompt/schema changes.
 
 Validation status:
@@ -120,7 +153,8 @@ Validation status:
 
 - Tag: `<Response>`
 - Purpose: user-visible assistant reply.
-- UI only renders this field (envelope tags are stripped).
+- Preferred in the first pass.
+- Tool-only first pass is allowed; runtime then auto-continues and requests direct text in the same turn.
 
 ### MemoryNote
 
@@ -135,6 +169,7 @@ Validation status:
 - Memory operation application + safeguards: `convex/memory.ts`
 - Memory op audit query + storage: `convex/memory.ts`
 - Research op validation and start orchestration: `convex/chat.ts`
+- Skill pack load/refresh + turn TTL state: `convex/chat.ts` (`threadSkillPacks`)
 - Skill catalog + selected-skill resolution: `convex/knowledge.ts`
 - Research start/resume + skill hint snapshot persistence: `convex/research.ts`
 - Title apply validation and normalization: `convex/chat.ts`

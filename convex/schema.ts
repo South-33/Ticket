@@ -13,6 +13,21 @@ export default defineSchema({
     .index("by_threadId", ["threadId"])
     .index("by_user_lastMessageAt", ["userId", "lastMessageAt"]),
 
+  threadSkillPacks: defineTable({
+    threadId: v.string(),
+    userId: v.string(),
+    skillSlug: v.string(),
+    status: v.union(v.literal("active"), v.literal("expired")),
+    totalUserTurns: v.number(),
+    remainingUserTurns: v.number(),
+    loadedAt: v.number(),
+    refreshedAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  })
+    .index("by_thread_status_updatedAt", ["threadId", "status", "updatedAt"])
+    .index("by_thread_skill", ["threadId", "skillSlug"])
+    .index("by_user_thread_status_updatedAt", ["userId", "threadId", "status", "updatedAt"]),
+
   projectGoals: defineTable({
     userId: v.string(),
     threadId: v.string(),

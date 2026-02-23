@@ -538,17 +538,19 @@ When this section conflicts with older sections, this section wins.
 - [x] User sees runtime trace in an expandable panel/pop-up style UI (with key milestones in chat).
 - [x] Clarification batching is allowed and should stay concise (max 3 fields per ask).
 - [x] Target quality model is LLM-led end-to-end (planning, analysis, synthesis, ranking), with code as guardrails.
-- [x] Chat output contract is response-first with optional tool tags; model should emit only tools it intends to run.
+- [x] Chat output contract is response-first with optional tool tags; model can emit tool-only output when it needs to load/refresh context first.
 - [x] Research should iterate in checkpointed rounds with quality-gated continuation, not full restarts by default.
 - [x] Working LLM context should be selective and compact; raw retrieval is stored but only promoted evidence is carried forward.
 
 ### 25.2 Current status snapshot
 
-- [x] Single-pass chat envelope supports `Response`, `MemoryOps`, `ResearchOps`, `TitleOps`, `MemoryNote`.
+- [x] Single-pass chat envelope supports `Response`, `MemoryOps`, `ResearchOps`, `SkillOps`, `TitleOps`, `MemoryNote`.
 - [x] Chat validation supports optional tool tags (missing tool tags default to no-op behavior).
+- [x] Tool-only first-pass outputs are allowed when at least one tool tag is emitted; runtime auto-continues in the same turn to produce direct user-facing text.
 - [x] `sendPrompt` no longer performs heuristic research start/resume.
 - [x] `ResearchOps.start` semantic validation exists (required criteria + at least one valid skill).
 - [x] Skill catalog + selected-skill resolution exists; run-pinned snapshots persist on jobs (`selectedSkillSlugs`, `skillHintsSnapshot`, `skillPackDigest`).
+- [x] Thread-scoped non-general skill packs now support TTL counters (`5` user turns by default) and model-driven refresh via `SkillOps.load`.
 - [x] Job reliability controls exist (lease lock, retries, stage events, retry scheduling).
 - [x] Memory safeguards and audit trails exist.
 - [x] Scan stage now has deterministic quality assessment with selective source promotion and one targeted continuation round (`continue` vs `finalize`).
@@ -589,6 +591,7 @@ When this section conflicts with older sections, this section wins.
 - Build compact branch summaries first, then promote only resolved key points + unresolved gaps to global synthesis context.
 - Prefer selective context promotion over token-heavy transcript stuffing.
 - On continuation rounds, search only for missing/weakly-supported claims instead of repeating broad queries.
+- Keep context trimming metric-gated; do not add aggressive trimming heuristics until telemetry shows quality/latency degradation.
 
 ### 25.4 Implementation checklist (build order)
 

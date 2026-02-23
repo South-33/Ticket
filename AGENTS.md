@@ -17,7 +17,8 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - Chat intake (`sendPrompt`) no longer starts/resumes research heuristically; research jobs now start only when `generateReplyInternal` emits valid `ResearchOps.start` with required criteria and at least one selected skill.
 - Product direction: researcher and chatbot are distinct actors; researcher can request user clarifications mid-run, chatbot mediates user interaction, and the user-facing UI should expose this runtime trace clearly (expandable panel/pop-up style is preferred).
 - Product direction: research quality should be LLM-led end-to-end (planning, analysis, synthesis, and ranking), while code-level logic primarily enforces safety guardrails, validation loops, and recovery behavior.
-- Chat model output contract: user-facing response text is always required; tool tags are optional and should be emitted only when the model intends to run that tool.
+- Chat model output contract: response text is preferred, but tool-only output is allowed when the model needs to load/refresh context first; runtime auto-continues in the same turn to collect direct user-facing text.
+- Context trimming policy: keep metric-gated; do not add aggressive trimming heuristics by default. Only tighten context budgets after observed quality/latency degradation in telemetry.
 - Research loop direction: use iterative, checkpointed rounds with quality-gated continuation (no full restart by default) and selective context promotion from raw sources.
 - CI/preview quirk: avoid placeholder Clerk publishable keys (for example `pk_test_ci_placeholder`) because Next.js prerender can fail in auth-wrapped layouts; treat invalid/placeholder keys as unconfigured.
 - Clarification plumbing is in place (`requestUserClarificationInternal`, `submitClarificationAnswerInternal`, pending-request query), and chat now handles pending clarification answers then re-queues research automatically.
