@@ -9,6 +9,8 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - Reference implementation is available locally at `C:\Users\Venom\Documents\CODE\.vscode\Project\gpt-researcher`; consult it for planner/executor/synthesis patterns before reinventing pipeline internals.
 - Keep `architecture-plan.md` as the implementation source of truth and update it when architecture decisions or constraints change.
 - Keep `tools.md` up to date whenever tool contracts/channels/schema change (add/remove/rename tools, validation loops, or apply behavior), so new agents can immediately see the current tool map.
+- Canonical playbook markdown scaffolds live under `playbooks/` (`skills.md`, `flights.md`, `train.md`, `concert.md`); curate there first, then publish active items into Convex knowledge docs for runtime injection.
+- Chat intake (`sendPrompt`) no longer starts/resumes research heuristically; research jobs now start only when `generateReplyInternal` emits valid `ResearchOps.start` with required criteria and at least one selected skill.
 
 ## Reference Docs
 - Convex best practices: https://docs.convex.dev/understanding/best-practices
@@ -22,4 +24,5 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 ## Supplemental Reading (Non-Authoritative)
 - Advanced tool calling deep dive: https://sparkco.ai/blog/advanced-tool-calling-in-llm-agents-a-deep-dive
 - Tool-calling optimization eval write-up: https://www.useparagon.com/learn/rag-best-practices-optimizing-tool-calling/
+- SkillsBench paper (skills design benchmark): https://arxiv.org/abs/2602.12670
 - Use these for strategy ideas and evaluation heuristics, not API/SDK truth.

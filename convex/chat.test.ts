@@ -17,7 +17,7 @@ describe("chat intake flow", () => {
     vi.useRealTimers();
   });
 
-  test("sendPrompt stores awaiting_input job and schedules memory snapshot", async () => {
+  test("sendPrompt defers research start and still schedules memory snapshot", async () => {
     vi.useFakeTimers();
     const testConvex = convexTest(schema, modules);
     registerAgentComponent(testConvex);
@@ -39,14 +39,13 @@ describe("chat intake flow", () => {
     });
     const memory = await t.query(api.memory.getUserMemory, {});
 
-    expect(sent.researchJobId).toBe(latest?.researchJobId);
-    expect(latest?.status).toBe("awaiting_input");
-    expect(latest?.followUpQuestion).toBeTruthy();
+    expect(sent.researchJobId).toBeNull();
+    expect(latest).toBeNull();
     expect(memory.latestSnapshot).not.toBeNull();
     expect(memory.latestSnapshot?.markdown).toContain("# user.md");
   });
 
-  test("sendPrompt resumes an awaiting_input job on follow-up details", async () => {
+  test("sendPrompt does not create research job until ResearchOps.start", async () => {
     vi.useFakeTimers();
     const testConvex = convexTest(schema, modules);
     registerAgentComponent(testConvex);
@@ -58,6 +57,9 @@ describe("chat intake flow", () => {
       threadId: created.threadId,
       prompt: "I want a flight to Frankfurt",
     });
+    const latestAfterFirst = await t.query(api.research.getLatestJobForThread, {
+      threadId: created.threadId,
+    });
 
     const second = await t.mutation(api.chat.sendPrompt, {
       threadId: created.threadId,
@@ -68,9 +70,10 @@ describe("chat intake flow", () => {
       threadId: created.threadId,
     });
 
-    expect(second.researchJobId).toBe(first.researchJobId);
-    expect(latest?.status).toBe("planned");
-    expect(latest?.missingFields).toHaveLength(0);
+    expect(first.researchJobId).toBeNull();
+    expect(second.researchJobId).toBeNull();
+    expect(latestAfterFirst).toBeNull();
+    expect(latest).toBeNull();
   });
 
   test("sendPrompt does not create research job for non-research small talk", async () => {

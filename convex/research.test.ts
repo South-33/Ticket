@@ -641,6 +641,72 @@ describe("research pipeline", () => {
     expect(latest?.missingFields).toHaveLength(0);
   });
 
+  test("startResearchFromOpsInternal requires at least one selected skill", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+
+    await expect(
+      t.mutation(internal.research.startResearchFromOpsInternal, {
+        userId: DEMO_USER_ID,
+        threadId: "thread-start-ops-invalid",
+        promptMessageId: "pm-start-ops-invalid",
+        prompt: "Find me the best flight options",
+        domain: "flight",
+        selectedSkillSlugs: [],
+        criteria: [
+          { key: "origin", value: "Manila" },
+          { key: "destination", value: "Frankfurt" },
+          { key: "departureDate", value: "2026-08-11" },
+          { key: "budget", value: "900" },
+          { key: "nationality", value: "Filipino" },
+        ],
+        skillHintsSnapshot: [],
+      }),
+    ).rejects.toThrowError("At least one skill is required to start research");
+  });
+
+  test("startResearchFromOpsInternal pins selected skills and hints on new job", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+
+    const started = await t.mutation(internal.research.startResearchFromOpsInternal, {
+      userId: DEMO_USER_ID,
+      threadId: "thread-start-ops",
+      promptMessageId: "pm-start-ops",
+      prompt: "Find me flight options to Frankfurt",
+      domain: "flight",
+      selectedSkillSlugs: ["skills", "flights", "skills"],
+      criteria: [
+        { key: "origin", value: "Manila" },
+        { key: "destination", value: "Frankfurt" },
+        { key: "departureDate", value: "2026-08-11" },
+        { key: "nationality", value: "Filipino" },
+      ],
+      skillHintsSnapshot: ["[skills] Verify constraints before ranking", "[flights] Compare baggage rules"],
+      skillPackDigest: "skills:v1|flights:v2",
+    });
+
+    const latest = await t.query(api.research.getLatestJobForThread, {
+      threadId: "thread-start-ops",
+    });
+
+    const persisted = await t.run(async (ctx) => {
+      const job = await ctx.db.get(started.researchJobId);
+      const goal = await ctx.db.get(started.projectGoalId);
+      return { job, goal };
+    });
+
+    expect(started.jobStatus).toBe("awaiting_input");
+    expect(started.missingFields).toContain("budget");
+    expect(latest?.status).toBe("awaiting_input");
+    expect(latest?.selectedSkillSlugs).toEqual(["skills", "flights"]);
+    expect(persisted.job?.selectedSkillSlugs).toEqual(["skills", "flights"]);
+    expect(persisted.job?.skillHintsSnapshot).toEqual([
+      "[skills] Verify constraints before ranking",
+      "[flights] Compare baggage rules",
+    ]);
+    expect(persisted.job?.skillPackDigest).toBe("skills:v1|flights:v2");
+    expect(persisted.goal?.prompt).toContain("Research criteria:");
+  });
+
   test("allows manual recheck scheduling for terminal jobs", async () => {
     vi.useFakeTimers();
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);

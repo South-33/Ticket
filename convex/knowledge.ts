@@ -1,9 +1,11 @@
 import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { internalMutation, internalQuery, mutation, query, type MutationCtx } from "./_generated/server";
+import type { Id } from "./_generated/dataModel";
 import { getAuthUserIdOrThrow } from "./auth";
 
 type DocKind = "skills" | "flights" | "train" | "concert";
+type KnowledgeDocId = Id<"knowledgeDocs">;
 
 const MAX_PAGE_SIZE = 50;
 
@@ -50,6 +52,10 @@ function toDocKindsForDomain(domain: string): DocKind[] {
     return ["skills", "flights", "train", "concert"];
   }
   return ["skills"];
+}
+
+function normalizeSkillSlug(value: string) {
+  return value.trim().toLowerCase();
 }
 
 async function requireKnowledgeWriteAccess(ctx: MutationCtx) {
@@ -629,5 +635,237 @@ export const getPlannerHintsInternal = internalQuery({
       .sort((a, b) => b.priority - a.priority)
       .slice(0, 8)
       .map((item) => `[${item.docSlug}] ${item.content}`);
+  },
+});
+
+export const getSkillPackForChatInternal = internalQuery({
+  args: {
+    domain: v.string(),
+    asOfMs: v.number(),
+    maxDocs: v.optional(v.number()),
+    maxItems: v.optional(v.number()),
+  },
+  returns: v.object({
+    domain: v.string(),
+    docs: v.array(
+      v.object({
+        slug: v.string(),
+        title: v.string(),
+        kind: v.union(v.literal("skills"), v.literal("flights"), v.literal("train"), v.literal("concert")),
+        summary: v.optional(v.string()),
+      }),
+    ),
+    items: v.array(
+      v.object({
+        docSlug: v.string(),
+        key: v.string(),
+        content: v.string(),
+        confidence: v.number(),
+        priority: v.number(),
+        sourceCount: v.number(),
+      }),
+    ),
+  }),
+  handler: async (ctx, args) => {
+    const maxDocs = Math.max(1, Math.min(args.maxDocs ?? 6, 12));
+    const maxItems = Math.max(1, Math.min(args.maxItems ?? 24, 48));
+    const kinds = toDocKindsForDomain(args.domain);
+
+    const docsById = new Map<string, {
+      _id: KnowledgeDocId;
+      slug: string;
+      title: string;
+      kind: DocKind;
+      summary?: string;
+    }>();
+
+    for (const kind of kinds) {
+      const docs = await ctx.db
+        .query("knowledgeDocs")
+        .withIndex("by_kind_status_updatedAt", (q) => q.eq("kind", kind).eq("status", "active"))
+        .order("desc")
+        .take(maxDocs);
+
+      for (const doc of docs) {
+        docsById.set(doc._id, {
+          _id: doc._id,
+          slug: doc.slug,
+          title: doc.title,
+          kind: doc.kind,
+          summary: doc.summary,
+        });
+      }
+    }
+
+    const docsDetailed = Array.from(docsById.values()).slice(0, maxDocs);
+    const docs = docsDetailed.map((doc) => ({
+      slug: doc.slug,
+      title: doc.title,
+      kind: doc.kind,
+      summary: doc.summary,
+    }));
+
+    const items: Array<{
+      docSlug: string;
+      key: string;
+      content: string;
+      confidence: number;
+      priority: number;
+      sourceCount: number;
+    }> = [];
+
+    for (const doc of docsDetailed) {
+      const docItems = await ctx.db
+        .query("knowledgeItems")
+        .withIndex("by_doc_status_priority", (q) => q.eq("docId", doc._id).eq("status", "active"))
+        .order("desc")
+        .take(20);
+
+      for (const item of docItems) {
+        if (item.expiresAt && item.expiresAt < args.asOfMs) {
+          continue;
+        }
+        items.push({
+          docSlug: doc.slug,
+          key: item.key,
+          content: item.content,
+          confidence: item.confidence,
+          priority: item.priority,
+          sourceCount: item.sourceUrls.length,
+        });
+      }
+    }
+
+    return {
+      domain: args.domain,
+      docs,
+      items: items
+        .sort((a, b) => b.priority - a.priority || b.confidence - a.confidence)
+        .slice(0, maxItems),
+    };
+  },
+});
+
+export const getSkillCatalogForChatInternal = internalQuery({
+  args: {
+    asOfMs: v.number(),
+    maxGeneralHints: v.optional(v.number()),
+  },
+  returns: v.object({
+    availableSkills: v.array(
+      v.object({
+        slug: v.string(),
+        kind: v.union(v.literal("skills"), v.literal("flights"), v.literal("train"), v.literal("concert")),
+        title: v.string(),
+        summary: v.optional(v.string()),
+      }),
+    ),
+    generalHints: v.array(v.string()),
+  }),
+  handler: async (ctx, args) => {
+    const docs = await ctx.db
+      .query("knowledgeDocs")
+      .withIndex("by_status_updatedAt", (q) => q.eq("status", "active"))
+      .order("desc")
+      .take(40);
+
+    const availableSkills = docs
+      .filter((doc) => doc.kind === "skills" || doc.kind === "flights" || doc.kind === "train" || doc.kind === "concert")
+      .map((doc) => ({
+        slug: normalizeSkillSlug(doc.slug),
+        kind: doc.kind,
+        title: doc.title,
+        summary: doc.summary,
+      }));
+
+    const maxGeneralHints = Math.max(1, Math.min(args.maxGeneralHints ?? 8, 20));
+    const skillsDocs = availableSkills.filter((doc) => doc.kind === "skills");
+    const generalHints: Array<{ text: string; priority: number }> = [];
+
+    for (const doc of skillsDocs) {
+      const fullDoc = docs.find((candidate) => normalizeSkillSlug(candidate.slug) === doc.slug);
+      if (!fullDoc) {
+        continue;
+      }
+      const items = await ctx.db
+        .query("knowledgeItems")
+        .withIndex("by_doc_status_priority", (q) => q.eq("docId", fullDoc._id).eq("status", "active"))
+        .order("desc")
+        .take(20);
+      for (const item of items) {
+        if (item.expiresAt && item.expiresAt < args.asOfMs) {
+          continue;
+        }
+        generalHints.push({
+          text: `[${doc.slug}] ${item.content}`,
+          priority: item.priority,
+        });
+      }
+    }
+
+    return {
+      availableSkills,
+      generalHints: generalHints
+        .sort((a, b) => b.priority - a.priority)
+        .slice(0, maxGeneralHints)
+        .map((hint) => hint.text),
+    };
+  },
+});
+
+export const getSkillPackBySlugsInternal = internalQuery({
+  args: {
+    skillSlugs: v.array(v.string()),
+    asOfMs: v.number(),
+    maxItemsPerSkill: v.optional(v.number()),
+  },
+  returns: v.object({
+    selectedSkills: v.array(v.string()),
+    hints: v.array(v.string()),
+    digest: v.string(),
+  }),
+  handler: async (ctx, args) => {
+    const maxItemsPerSkill = Math.max(1, Math.min(args.maxItemsPerSkill ?? 10, 20));
+    const slugs = Array.from(new Set(args.skillSlugs.map(normalizeSkillSlug).filter((slug) => slug.length > 0))).slice(0, 8);
+    const hints: Array<{ text: string; priority: number }> = [];
+    const selectedSkills: string[] = [];
+    const digestParts: string[] = [];
+
+    for (const slug of slugs) {
+      const doc = await ctx.db
+        .query("knowledgeDocs")
+        .withIndex("by_slug", (q) => q.eq("slug", slug))
+        .unique();
+      if (!doc || doc.status !== "active") {
+        continue;
+      }
+      selectedSkills.push(slug);
+
+      const items = await ctx.db
+        .query("knowledgeItems")
+        .withIndex("by_doc_status_priority", (q) => q.eq("docId", doc._id).eq("status", "active"))
+        .order("desc")
+        .take(maxItemsPerSkill);
+
+      for (const item of items) {
+        if (item.expiresAt && item.expiresAt < args.asOfMs) {
+          continue;
+        }
+        const text = `[${slug}] ${item.content}`;
+        hints.push({ text, priority: item.priority });
+        digestParts.push(`${slug}:${item.key}:${item.updatedAt}`);
+      }
+    }
+
+    const sortedHints = hints
+      .sort((a, b) => b.priority - a.priority)
+      .slice(0, 48)
+      .map((hint) => hint.text);
+
+    return {
+      selectedSkills,
+      hints: sortedHints,
+      digest: digestParts.slice(0, 80).join("|").slice(0, 2000),
+    };
   },
 });

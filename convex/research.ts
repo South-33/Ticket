@@ -24,6 +24,7 @@ import {
   missingSlots,
   requiredSlotsForDomain,
   summarizeConstraints,
+  type ResearchDomain,
 } from "./researchIntake";
 import { buildRankedResultsFromCandidates } from "./researchRanking";
 import { getAuthUserIdOrThrow } from "./auth";
@@ -65,6 +66,14 @@ type CandidateDraft = {
   recheckAfter: number;
   primarySourceUrl?: string;
   sourceUrls: string[];
+};
+
+type ResearchStartResult = {
+  researchJobId: Id<"researchJobs">;
+  projectGoalId: Id<"projectGoals">;
+  jobStatus: "awaiting_input" | "planned";
+  missingFields: string[];
+  followUpQuestion?: string;
 };
 
 type ResearchErrorCode =
@@ -747,6 +756,20 @@ async function upsertFactFromSlot(
   });
 }
 
+function buildPromptWithCriteria(prompt: string, criteria: Record<string, string>) {
+  const entries = Object.entries(criteria)
+    .map(([key, value]) => [key.trim(), value.trim()] as const)
+    .filter(([key, value]) => key.length > 0 && value.length > 0)
+    .slice(0, 24);
+
+  if (entries.length === 0) {
+    return prompt;
+  }
+
+  const criteriaLines = entries.map(([key, value]) => `${key}: ${value}`).join("\n");
+  return `${prompt}\n\nResearch criteria:\n${criteriaLines}`;
+}
+
 export async function createResearchJobForPrompt(
   ctx: MutationCtx,
   args: {
@@ -754,10 +777,15 @@ export async function createResearchJobForPrompt(
     threadId: string;
     promptMessageId: string;
     prompt: string;
+    domainOverride?: ResearchDomain;
+    criteriaOverrides?: Record<string, string>;
+    selectedSkillSlugs?: string[];
+    skillHintsSnapshot?: string[];
+    skillPackDigest?: string;
   },
-) {
+): Promise<ResearchStartResult> {
   const now = Date.now();
-  const domain = detectDomain(args.prompt);
+  const domain = args.domainOverride ?? detectDomain(args.prompt);
   const mode = detectMode(args.prompt);
 
   const confirmedFacts = await ctx.db
@@ -773,7 +801,7 @@ export async function createResearchJobForPrompt(
     return acc;
   }, {});
 
-  const promptSlots = extractSlotsFromPrompt(args.prompt, domain);
+  const promptSlots = mergeSlots(extractSlotsFromPrompt(args.prompt, domain), args.criteriaOverrides ?? {});
   const mergedSlots = mergeSlots(promptSlots, memorySlots);
   const missingFieldList = missingSlots(domain, mergedSlots);
   const followUpQuestion = buildFollowUpQuestion(domain, missingFieldList);
@@ -834,6 +862,9 @@ export async function createResearchJobForPrompt(
     attempt: 0,
     missingFields: missingFieldList,
     followUpQuestion,
+    selectedSkillSlugs: args.selectedSkillSlugs,
+    skillHintsSnapshot: args.skillHintsSnapshot,
+    skillPackDigest: args.skillPackDigest,
     createdAt: now,
     updatedAt: now,
   });
@@ -893,8 +924,12 @@ export async function continueAwaitingJobForPrompt(
     threadId: string;
     promptMessageId: string;
     prompt: string;
+    criteriaOverrides?: Record<string, string>;
+    selectedSkillSlugs?: string[];
+    skillHintsSnapshot?: string[];
+    skillPackDigest?: string;
   },
-) {
+): Promise<ResearchStartResult | null> {
   const jobs = await ctx.db
     .query("researchJobs")
     .withIndex("by_thread_updatedAt", (q) => q.eq("threadId", args.threadId))
@@ -911,7 +946,7 @@ export async function continueAwaitingJobForPrompt(
   }
 
   const now = Date.now();
-  const promptSlots = extractSlotsFromPrompt(args.prompt, goal.domain);
+  const promptSlots = mergeSlots(extractSlotsFromPrompt(args.prompt, goal.domain), args.criteriaOverrides ?? {});
 
   const [allGoalSlots, confirmedFacts] = await Promise.all([
     ctx.db
@@ -1023,6 +1058,9 @@ export async function continueAwaitingJobForPrompt(
     progress: jobStatus === "planned" ? 0 : awaitingJob.progress,
     missingFields: missingFieldList,
     followUpQuestion,
+    selectedSkillSlugs: args.selectedSkillSlugs ?? awaitingJob.selectedSkillSlugs,
+    skillHintsSnapshot: args.skillHintsSnapshot ?? awaitingJob.skillHintsSnapshot,
+    skillPackDigest: args.skillPackDigest ?? awaitingJob.skillPackDigest,
     error: undefined,
     lastErrorCode: undefined,
     nextRunAt: undefined,
@@ -1046,6 +1084,76 @@ export async function continueAwaitingJobForPrompt(
   };
 }
 
+export const startResearchFromOpsInternal = internalMutation({
+  args: {
+    userId: v.string(),
+    threadId: v.string(),
+    promptMessageId: v.string(),
+    prompt: v.string(),
+    domain: v.union(v.literal("flight"), v.literal("train"), v.literal("concert"), v.literal("mixed"), v.literal("general")),
+    selectedSkillSlugs: v.array(v.string()),
+    criteria: v.array(
+      v.object({
+        key: v.string(),
+        value: v.string(),
+      }),
+    ),
+    skillHintsSnapshot: v.array(v.string()),
+    skillPackDigest: v.optional(v.string()),
+  },
+  returns: v.object({
+    researchJobId: v.id("researchJobs"),
+    projectGoalId: v.id("projectGoals"),
+    jobStatus: v.union(v.literal("awaiting_input"), v.literal("planned")),
+    missingFields: v.array(v.string()),
+    followUpQuestion: v.optional(v.string()),
+  }),
+  handler: async (ctx, args) => {
+    const selectedSkillSlugs = Array.from(
+      new Set(args.selectedSkillSlugs.map((slug) => slug.trim().toLowerCase()).filter((slug) => slug.length > 0)),
+    ).slice(0, 8);
+
+    if (selectedSkillSlugs.length === 0) {
+      throw new ConvexError("At least one skill is required to start research");
+    }
+
+    const criteriaOverrides = Object.fromEntries(
+      args.criteria
+        .map((entry) => [entry.key.trim(), entry.value.trim()] as const)
+        .filter(([key, value]) => key.length > 0 && value.length > 0),
+    );
+
+    const prompt = buildPromptWithCriteria(args.prompt, criteriaOverrides);
+
+    const resumed = await continueAwaitingJobForPrompt(ctx, {
+      userId: args.userId,
+      threadId: args.threadId,
+      promptMessageId: args.promptMessageId,
+      prompt,
+      criteriaOverrides,
+      selectedSkillSlugs,
+      skillHintsSnapshot: args.skillHintsSnapshot,
+      skillPackDigest: args.skillPackDigest,
+    });
+
+    if (resumed) {
+      return resumed;
+    }
+
+    return await createResearchJobForPrompt(ctx, {
+      userId: args.userId,
+      threadId: args.threadId,
+      promptMessageId: args.promptMessageId,
+      prompt,
+      domainOverride: args.domain,
+      criteriaOverrides,
+      selectedSkillSlugs,
+      skillHintsSnapshot: args.skillHintsSnapshot,
+      skillPackDigest: args.skillPackDigest,
+    });
+  },
+});
+
 export const getLatestJobForThread = query({
   args: {
     threadId: v.string(),
@@ -1062,6 +1170,7 @@ export const getLatestJobForThread = query({
       nextRunAt: v.optional(v.number()),
       missingFields: v.optional(v.array(v.string())),
       followUpQuestion: v.optional(v.string()),
+      selectedSkillSlugs: v.optional(v.array(v.string())),
       startedAt: v.optional(v.number()),
       completedAt: v.optional(v.number()),
       updatedAt: v.number(),
@@ -1183,6 +1292,7 @@ export const getLatestJobForThread = query({
       nextRunAt: selectedJob.nextRunAt,
       missingFields: selectedJob.missingFields,
       followUpQuestion: selectedJob.followUpQuestion,
+      selectedSkillSlugs: selectedJob.selectedSkillSlugs,
       startedAt: selectedJob.startedAt,
       completedAt: selectedJob.completedAt,
       updatedAt: selectedJob.updatedAt,
@@ -2044,10 +2154,13 @@ export const runJobInternal = internalAction({
       let activeTaskKey: "plan" | "scan" | "synthesize" | undefined;
 
       try {
-        const plannerHints = await ctx.runQuery(internal.knowledge.getPlannerHintsInternal, {
-          domain: goal.domain,
-          asOfMs: Date.now(),
-        });
+        const plannerHints =
+          job.skillHintsSnapshot && job.skillHintsSnapshot.length > 0
+            ? job.skillHintsSnapshot
+            : await ctx.runQuery(internal.knowledge.getPlannerHintsInternal, {
+                domain: goal.domain,
+                asOfMs: Date.now(),
+              });
 
         await ctx.runMutation(internal.research.patchJobInternal, {
           researchJobId: args.researchJobId,
