@@ -1,7 +1,7 @@
 import { convexTest } from "convex-test";
 import { register as registerAgentComponent } from "@convex-dev/agent/test";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
 
@@ -120,5 +120,29 @@ describe("chat intake flow", () => {
     expect(nationality?.value).toBe("Filipino");
     expect(nationality?.sourceType).toBe("user_confirmed");
     expect(nationality?.status).toBe("confirmed");
+  });
+
+  test("setThreadTitleFromToolInternal accepts immediate consecutive renames", async () => {
+    const testConvex = convexTest(schema, modules);
+    registerAgentComponent(testConvex);
+    const t = testConvex.withIdentity(AUTH_IDENTITY);
+
+    const created = await t.mutation(api.chat.createThread, {});
+
+    const firstRename = await t.mutation(internal.chat.setThreadTitleFromToolInternal, {
+      threadId: created.threadId,
+      title: "Trip to paris on friday",
+    });
+    const secondRename = await t.mutation(internal.chat.setThreadTitleFromToolInternal, {
+      threadId: created.threadId,
+      title: "Cheapest Manila to Tokyo Flight",
+    });
+    const threads = await t.query(api.chat.listThreads, {});
+    const thread = threads.find((item) => item.threadId === created.threadId);
+
+    expect(firstRename.changed).toBe(true);
+    expect(firstRename.title).toBe("Paris Trip for Friday");
+    expect(secondRename.changed).toBe(true);
+    expect(thread?.title).toBe("Cheapest Manila to Tokyo Flight");
   });
 });

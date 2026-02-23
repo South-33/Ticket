@@ -266,6 +266,16 @@ export default defineSchema({
     createdAt: v.number(),
   }).index("by_user_createdAt", ["userId", "createdAt"]),
 
+  userPreferenceNotes: defineTable({
+    userId: v.string(),
+    key: v.string(),
+    value: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_user_key", ["userId", "key"])
+    .index("by_user_updatedAt", ["userId", "updatedAt"]),
+
   knowledgeDocs: defineTable({
     slug: v.string(),
     title: v.string(),

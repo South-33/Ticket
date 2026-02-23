@@ -281,6 +281,10 @@ Implementation notes (current):
 - `runJobInternal` now uses a per-job lease (`runLeaseToken`, `runLeaseExpiresAt`) to avoid duplicate concurrent runners.
 - Retry scheduling now runs through `scheduleRetryInternal` (single mutation) so status/task updates and scheduling are atomic.
 - Inferred intake writes no longer overwrite high-confidence confirmed sensitive memory facts.
+- User-editable preference hints are stored separately from confirmed memory and passed to chat system prompts as untrusted, soft context only.
+- Chat reply generation now uses a single-pass envelope (`<Response>`, `<MemoryOps>`, `<TitleOps>`, `<MemoryNote>`) so one model call can return user reply plus structured memory/title updates.
+- Thread title updates now come directly from the same single-pass model output with backend validation/repair rules (no cooldown/quality heuristic gate).
+- Malformed envelope outputs now trigger an automatic repair loop (up to 2 retries) with explicit validation feedback before falling back to safe no-op memory/title ops.
 
 Evaluate with fixed benchmark scenarios per domain:
 

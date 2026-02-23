@@ -17,6 +17,580 @@ import remarkGfm from "remark-gfm";
 import { api } from "@convex/_generated/api";
 import { ChatCanvas } from "@/components/chat-canvas";
 
+function MemoryNavIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+      <rect x="2" y="2" width="12" height="12" stroke="currentColor" strokeWidth="1.25" />
+      <path d="M5 6.25H11M5 8.5H11M5 10.75H9" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
+function SessionNavIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" aria-hidden="true">
+      <path d="M6 3H3V13H6" stroke="currentColor" strokeWidth="1.25" />
+      <path d="M7.5 8H13" stroke="currentColor" strokeWidth="1.25" />
+      <path d="M10.75 5.5L13.25 8L10.75 10.5" stroke="currentColor" strokeWidth="1.25" />
+    </svg>
+  );
+}
+
+type MemoryProfileForm = {
+  displayName: string;
+  homeCity: string;
+  homeAirport: string;
+  nationality: string;
+  ageBand: string;
+  budgetBand: string;
+  preferredCabin: string;
+  flexibilityLevel: string;
+  loyaltyPrograms: string;
+};
+
+const EMPTY_MEMORY_PROFILE_FORM: MemoryProfileForm = {
+  displayName: "",
+  homeCity: "",
+  homeAirport: "",
+  nationality: "",
+  ageBand: "",
+  budgetBand: "",
+  preferredCabin: "",
+  flexibilityLevel: "",
+  loyaltyPrograms: "",
+};
+
+function parseLoyaltyPrograms(input: string) {
+  return input
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0)
+    .slice(0, 12);
+}
+
+function normalizeFactKey(input: string) {
+  return input
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_]/g, "");
+}
+
+function TravelPreferencesMemory({ open }: { open: boolean }) {
+  const memory = useQuery(api.memory.getUserMemory, open ? {} : "skip");
+  const upsertUserProfile = useMutation(api.memory.upsertUserProfile);
+  const upsertUserMemoryFact = useMutation(api.memory.upsertUserMemoryFact);
+  const removeUserMemoryFact = useMutation(api.memory.removeUserMemoryFact);
+  const upsertUserPreferenceNote = useMutation(api.memory.upsertUserPreferenceNote);
+  const removeUserPreferenceNote = useMutation(api.memory.removeUserPreferenceNote);
+  const generateUserMemorySnapshot = useMutation(api.memory.generateUserMemorySnapshot);
+  const [profileForm, setProfileForm] = useState<MemoryProfileForm>(EMPTY_MEMORY_PROFILE_FORM);
+  const [newFactKey, setNewFactKey] = useState("");
+  const [newFactValue, setNewFactValue] = useState("");
+  const [newFactSensitive, setNewFactSensitive] = useState(false);
+  const [newPreferenceKey, setNewPreferenceKey] = useState("");
+  const [newPreferenceValue, setNewPreferenceValue] = useState("");
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [isSavingFact, setIsSavingFact] = useState(false);
+  const [isSavingPreference, setIsSavingPreference] = useState(false);
+  const [isGeneratingSnapshot, setIsGeneratingSnapshot] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [deletingFactKey, setDeletingFactKey] = useState<string | null>(null);
+  const [editingPreferenceKey, setEditingPreferenceKey] = useState<string | null>(null);
+  const [editingPreferenceValue, setEditingPreferenceValue] = useState("");
+  const [isSavingPreferenceEdit, setIsSavingPreferenceEdit] = useState(false);
+  const [deletingPreferenceKey, setDeletingPreferenceKey] = useState<string | null>(null);
+
+  const profileDisplayName = memory?.profile?.displayName ?? "";
+  const profileHomeCity = memory?.profile?.homeCity ?? "";
+  const profileHomeAirport = memory?.profile?.homeAirport ?? "";
+  const profileNationality = memory?.profile?.nationality ?? "";
+  const profileAgeBand = memory?.profile?.ageBand ?? "";
+  const profileBudgetBand = memory?.profile?.budgetBand ?? "";
+  const profilePreferredCabin = memory?.profile?.preferredCabin ?? "";
+  const profileFlexibilityLevel = memory?.profile?.flexibilityLevel ?? "";
+  const profileLoyaltyCsv = (memory?.profile?.loyaltyPrograms ?? []).join(", ");
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    const nextForm: MemoryProfileForm = {
+      displayName: profileDisplayName,
+      homeCity: profileHomeCity,
+      homeAirport: profileHomeAirport,
+      nationality: profileNationality,
+      ageBand: profileAgeBand,
+      budgetBand: profileBudgetBand,
+      preferredCabin: profilePreferredCabin,
+      flexibilityLevel: profileFlexibilityLevel,
+      loyaltyPrograms: profileLoyaltyCsv,
+    };
+
+    setProfileForm((previous) => {
+      const unchanged =
+        previous.displayName === nextForm.displayName &&
+        previous.homeCity === nextForm.homeCity &&
+        previous.homeAirport === nextForm.homeAirport &&
+        previous.nationality === nextForm.nationality &&
+        previous.ageBand === nextForm.ageBand &&
+        previous.budgetBand === nextForm.budgetBand &&
+        previous.preferredCabin === nextForm.preferredCabin &&
+        previous.flexibilityLevel === nextForm.flexibilityLevel &&
+        previous.loyaltyPrograms === nextForm.loyaltyPrograms;
+      return unchanged ? previous : nextForm;
+    });
+  }, [
+    open,
+    profileAgeBand,
+    profileBudgetBand,
+    profileDisplayName,
+    profileFlexibilityLevel,
+    profileHomeAirport,
+    profileHomeCity,
+    profileLoyaltyCsv,
+    profileNationality,
+    profilePreferredCabin,
+  ]);
+
+  const onSaveProfile = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setErrorMessage(null);
+    setStatusMessage(null);
+    setIsSavingProfile(true);
+
+    try {
+      await upsertUserProfile({
+        displayName: profileForm.displayName.trim() || undefined,
+        homeCity: profileForm.homeCity.trim() || undefined,
+        homeAirport: profileForm.homeAirport.trim().toUpperCase() || undefined,
+        nationality: profileForm.nationality.trim() || undefined,
+        ageBand: profileForm.ageBand.trim() || undefined,
+        budgetBand: profileForm.budgetBand.trim() || undefined,
+        preferredCabin: profileForm.preferredCabin.trim() || undefined,
+        flexibilityLevel: profileForm.flexibilityLevel.trim() || undefined,
+        loyaltyPrograms: parseLoyaltyPrograms(profileForm.loyaltyPrograms),
+      });
+      await generateUserMemorySnapshot({});
+      setStatusMessage("Saved travel profile preferences.");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to save travel profile.");
+    } finally {
+      setIsSavingProfile(false);
+    }
+  };
+
+  const onSaveFact = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setErrorMessage(null);
+    setStatusMessage(null);
+
+    const key = normalizeFactKey(newFactKey);
+    const value = newFactValue.trim();
+
+    if (!key || !value) {
+      setErrorMessage("Fact key and value are required.");
+      return;
+    }
+
+    setIsSavingFact(true);
+    try {
+      await upsertUserMemoryFact({
+        key,
+        value,
+        sourceType: "user_confirmed",
+        confidence: 1,
+        status: "confirmed",
+        isSensitive: newFactSensitive,
+      });
+      await generateUserMemorySnapshot({});
+      setNewFactKey("");
+      setNewFactValue("");
+      setNewFactSensitive(false);
+      setStatusMessage(`Saved fact \"${key}\".`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to save fact.");
+    } finally {
+      setIsSavingFact(false);
+    }
+  };
+
+  const onRefreshSnapshot = async () => {
+    setErrorMessage(null);
+    setStatusMessage(null);
+    setIsGeneratingSnapshot(true);
+
+    try {
+      await generateUserMemorySnapshot({});
+      setStatusMessage("Memory snapshot refreshed.");
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to refresh snapshot.");
+    } finally {
+      setIsGeneratingSnapshot(false);
+    }
+  };
+
+  const deleteFact = async (key: string) => {
+    setDeletingFactKey(key);
+    setErrorMessage(null);
+    setStatusMessage(null);
+    try {
+      await removeUserMemoryFact({ key });
+      await generateUserMemorySnapshot({});
+      setStatusMessage(`Deleted fact \"${key}\".`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to delete fact.");
+    } finally {
+      setDeletingFactKey(null);
+    }
+  };
+
+  const onSavePreference = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setErrorMessage(null);
+    setStatusMessage(null);
+
+    const key = normalizeFactKey(newPreferenceKey);
+    const value = newPreferenceValue.trim();
+    if (!key || !value) {
+      setErrorMessage("Preference key and value are required.");
+      return;
+    }
+
+    setIsSavingPreference(true);
+    try {
+      await upsertUserPreferenceNote({ key, value });
+      await generateUserMemorySnapshot({});
+      setNewPreferenceKey("");
+      setNewPreferenceValue("");
+      setStatusMessage(`Saved preference \"${key}\".`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to save preference.");
+    } finally {
+      setIsSavingPreference(false);
+    }
+  };
+
+  const startEditingPreference = (preference: { key: string; value: string }) => {
+    setEditingPreferenceKey(preference.key);
+    setEditingPreferenceValue(preference.value);
+    setErrorMessage(null);
+    setStatusMessage(null);
+  };
+
+  const cancelEditingPreference = () => {
+    setEditingPreferenceKey(null);
+    setEditingPreferenceValue("");
+  };
+
+  const saveEditingPreference = async () => {
+    if (!editingPreferenceKey) {
+      return;
+    }
+    const value = editingPreferenceValue.trim();
+    if (!value) {
+      setErrorMessage("Preference value cannot be empty.");
+      return;
+    }
+
+    setIsSavingPreferenceEdit(true);
+    setErrorMessage(null);
+    setStatusMessage(null);
+    try {
+      await upsertUserPreferenceNote({
+        key: editingPreferenceKey,
+        value,
+      });
+      await generateUserMemorySnapshot({});
+      setStatusMessage(`Updated preference \"${editingPreferenceKey}\".`);
+      cancelEditingPreference();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to update preference.");
+    } finally {
+      setIsSavingPreferenceEdit(false);
+    }
+  };
+
+  const deletePreference = async (key: string) => {
+    setDeletingPreferenceKey(key);
+    setErrorMessage(null);
+    setStatusMessage(null);
+    try {
+      await removeUserPreferenceNote({ key });
+      await generateUserMemorySnapshot({});
+      if (editingPreferenceKey === key) {
+        cancelEditingPreference();
+      }
+      setStatusMessage(`Deleted preference \"${key}\".`);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Failed to delete preference.");
+    } finally {
+      setDeletingPreferenceKey(null);
+    }
+  };
+
+  const factRows = memory?.facts ?? [];
+  const preferenceRows = memory?.preferences ?? [];
+
+  return (
+    <div className="user-memory-panel">
+      <p className="user-memory-intro">
+        Save travel preferences once so future searches start with your defaults.
+      </p>
+
+      <form className="user-memory-section" onSubmit={onSaveProfile}>
+        <h4>Travel Profile</h4>
+        <div className="user-memory-grid">
+          <label>
+            <span>Display name</span>
+            <input
+              value={profileForm.displayName}
+              onChange={(event) => setProfileForm((prev) => ({ ...prev, displayName: event.target.value }))}
+              placeholder="How Aura should address you"
+            />
+          </label>
+          <label>
+            <span>Home city</span>
+            <input
+              value={profileForm.homeCity}
+              onChange={(event) => setProfileForm((prev) => ({ ...prev, homeCity: event.target.value }))}
+              placeholder="Example: Manila"
+            />
+          </label>
+          <label>
+            <span>Home airport</span>
+            <input
+              value={profileForm.homeAirport}
+              onChange={(event) => setProfileForm((prev) => ({ ...prev, homeAirport: event.target.value }))}
+              placeholder="Example: MNL"
+              maxLength={5}
+            />
+          </label>
+          <label>
+            <span>Preferred cabin</span>
+            <input
+              value={profileForm.preferredCabin}
+              onChange={(event) => setProfileForm((prev) => ({ ...prev, preferredCabin: event.target.value }))}
+              placeholder="economy / premium_economy / business"
+            />
+          </label>
+          <label>
+            <span>Budget band</span>
+            <input
+              value={profileForm.budgetBand}
+              onChange={(event) => setProfileForm((prev) => ({ ...prev, budgetBand: event.target.value }))}
+              placeholder="low / medium / high"
+            />
+          </label>
+          <label>
+            <span>Flexibility</span>
+            <input
+              value={profileForm.flexibilityLevel}
+              onChange={(event) => setProfileForm((prev) => ({ ...prev, flexibilityLevel: event.target.value }))}
+              placeholder="strict / moderate / flexible"
+            />
+          </label>
+          <label>
+            <span>Nationality</span>
+            <input
+              value={profileForm.nationality}
+              onChange={(event) => setProfileForm((prev) => ({ ...prev, nationality: event.target.value }))}
+              placeholder="Optional"
+            />
+          </label>
+          <label>
+            <span>Age band</span>
+            <input
+              value={profileForm.ageBand}
+              onChange={(event) => setProfileForm((prev) => ({ ...prev, ageBand: event.target.value }))}
+              placeholder="Optional"
+            />
+          </label>
+          <label className="user-memory-full-width">
+            <span>Loyalty programs</span>
+            <input
+              value={profileForm.loyaltyPrograms}
+              onChange={(event) => setProfileForm((prev) => ({ ...prev, loyaltyPrograms: event.target.value }))}
+              placeholder="Comma separated, e.g. KrisFlyer, Asia Miles"
+            />
+          </label>
+        </div>
+        <div className="user-memory-actions">
+          <button type="submit" disabled={isSavingProfile}>
+            {isSavingProfile ? "Saving..." : "Save profile"}
+          </button>
+        </div>
+      </form>
+
+      <form className="user-memory-section" onSubmit={onSaveFact}>
+        <h4>Quick Memory Fact</h4>
+        <div className="user-memory-grid">
+          <label>
+            <span>Fact key</span>
+            <input
+              value={newFactKey}
+              onChange={(event) => setNewFactKey(event.target.value)}
+              placeholder="seat_preference"
+            />
+          </label>
+          <label className="user-memory-full-width">
+            <span>Fact value</span>
+            <input
+              value={newFactValue}
+              onChange={(event) => setNewFactValue(event.target.value)}
+              placeholder="Aisle seat preferred on long-haul flights"
+            />
+          </label>
+        </div>
+        <label className="user-memory-sensitive-toggle">
+          <input
+            type="checkbox"
+            checked={newFactSensitive}
+            onChange={(event) => setNewFactSensitive(event.target.checked)}
+          />
+          Sensitive fact
+        </label>
+        <div className="user-memory-actions">
+          <button type="submit" disabled={isSavingFact}>
+            {isSavingFact ? "Saving..." : "Save fact"}
+          </button>
+          <button type="button" onClick={onRefreshSnapshot} disabled={isGeneratingSnapshot}>
+            {isGeneratingSnapshot ? "Refreshing..." : "Refresh snapshot"}
+          </button>
+        </div>
+      </form>
+
+      <form className="user-memory-section" onSubmit={onSavePreference}>
+        <h4>Preference Hints (Editable)</h4>
+        <p className="user-memory-empty">
+          These are soft hints for the assistant. They can be wrong or stale and are never treated as strict truth.
+        </p>
+        <div className="user-memory-grid">
+          <label>
+            <span>Preference key</span>
+            <input
+              value={newPreferenceKey}
+              onChange={(event) => setNewPreferenceKey(event.target.value)}
+              placeholder="hotel_area"
+            />
+          </label>
+          <label className="user-memory-full-width">
+            <span>Preference value</span>
+            <input
+              value={newPreferenceValue}
+              onChange={(event) => setNewPreferenceValue(event.target.value)}
+              placeholder="Prefer quiet neighborhoods with rail access"
+            />
+          </label>
+        </div>
+        <div className="user-memory-actions">
+          <button type="submit" disabled={isSavingPreference}>
+            {isSavingPreference ? "Saving..." : "Save preference"}
+          </button>
+        </div>
+
+        {preferenceRows.length > 0 && (
+          <div className="user-memory-facts">
+            {preferenceRows.slice(0, 12).map((preference) => (
+              <div key={`${preference.key}-${preference.updatedAt}`} className="user-memory-fact-row">
+                <div className="user-memory-fact-head">
+                  <strong>{preference.key}</strong>
+                  <div className="user-memory-fact-controls">
+                    <button className="user-memory-inline-btn" type="button" onClick={() => startEditingPreference(preference)}>
+                      Edit
+                    </button>
+                    <button
+                      className="user-memory-inline-btn user-memory-inline-btn-danger"
+                      type="button"
+                      onClick={() => void deletePreference(preference.key)}
+                      disabled={deletingPreferenceKey === preference.key}
+                    >
+                      {deletingPreferenceKey === preference.key ? "Deleting..." : "Delete"}
+                    </button>
+                  </div>
+                </div>
+                {editingPreferenceKey === preference.key ? (
+                  <div className="user-memory-fact-editor">
+                    <input
+                      value={editingPreferenceValue}
+                      onChange={(event) => setEditingPreferenceValue(event.target.value)}
+                      placeholder="Updated preference"
+                    />
+                    <div className="user-memory-fact-controls">
+                      <button
+                        className="user-memory-inline-btn"
+                        type="button"
+                        onClick={() => void saveEditingPreference()}
+                        disabled={isSavingPreferenceEdit}
+                      >
+                        {isSavingPreferenceEdit ? "Saving..." : "Save"}
+                      </button>
+                      <button
+                        className="user-memory-inline-btn"
+                        type="button"
+                        onClick={cancelEditingPreference}
+                        disabled={isSavingPreferenceEdit}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p>{preference.value}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </form>
+
+      <section className="user-memory-section">
+        <h4>Confirmed Memory</h4>
+        <p className="user-memory-empty">
+          Confirmed memory is delete-only for safety. To change it, delete the entry and add a corrected one.
+        </p>
+        {factRows.length === 0 ? (
+          <p className="user-memory-empty">No confirmed memory facts yet.</p>
+        ) : (
+          <div className="user-memory-facts">
+            {factRows.slice(0, 12).map((fact) => (
+              <div key={`${fact.key}-${fact.updatedAt}`} className="user-memory-fact-row">
+                <div className="user-memory-fact-head">
+                  <strong>{fact.key}</strong>
+                  <div className="user-memory-fact-controls">
+                    <button
+                      className="user-memory-inline-btn user-memory-inline-btn-danger"
+                      type="button"
+                      onClick={() => void deleteFact(fact.key)}
+                      disabled={deletingFactKey === fact.key}
+                    >
+                      {deletingFactKey === fact.key ? "Deleting..." : "Delete"}
+                    </button>
+                  </div>
+                </div>
+                <p>{fact.value}</p>
+                <small>
+                  {fact.isSensitive ? "Sensitive" : "Standard"} / conf {Math.round(fact.confidence * 100)}%
+                </small>
+              </div>
+            ))}
+          </div>
+        )}
+        {memory?.latestSnapshot && (
+          <p className="user-memory-snapshot-meta">
+            Snapshot v{memory.latestSnapshot.version} / {formatUtcTimestamp(memory.latestSnapshot.createdAt)}
+          </p>
+        )}
+      </section>
+
+      {statusMessage && <p className="user-memory-status">{statusMessage}</p>}
+      {errorMessage && <p className="user-memory-error">{errorMessage}</p>}
+    </div>
+  );
+}
+
 function SidebarUser() {
   const { signOut } = useClerk();
   const { user } = useUser();
@@ -66,6 +640,13 @@ function SidebarUser() {
     }, 250);
   };
 
+  const handleSignOut = () => {
+    window.localStorage.removeItem("aura:lastAvatarUrl");
+    window.localStorage.removeItem("aura:lastAvatarInitial");
+    window.localStorage.removeItem(SIDEBAR_LAST_USER_ID_KEY);
+    void signOut();
+  };
+
   useEffect(() => {
     if (open) {
       document.body.style.overflow = "hidden";
@@ -102,25 +683,31 @@ function SidebarUser() {
       {open && createPortal(
         <div
           className="user-modal-backdrop"
+          data-lenis-prevent
           data-closing={isClosing ? "true" : undefined}
           onClick={closeModal}
         >
-          <div className="user-modal-content" onClick={(e) => e.stopPropagation()}>
-            <UserProfile routing="hash" />
-            <div className="user-modal-footer">
-              <button
-                className="user-modal-signout"
-                type="button"
-                onClick={() => {
-                  window.localStorage.removeItem("aura:lastAvatarUrl");
-                  window.localStorage.removeItem("aura:lastAvatarInitial");
-                  window.localStorage.removeItem(SIDEBAR_LAST_USER_ID_KEY);
-                  signOut();
-                }}
+          <div className="user-modal-content" data-lenis-prevent onClick={(e) => e.stopPropagation()}>
+            <UserProfile routing="hash">
+              <UserProfile.Page
+                label="Travel Preferences"
+                url="travel-preferences"
+                labelIcon={<MemoryNavIcon />}
               >
-                Sign Out _&gt;
-              </button>
-            </div>
+                <TravelPreferencesMemory open={open} />
+              </UserProfile.Page>
+              <UserProfile.Page label="Session" url="session" labelIcon={<SessionNavIcon />}>
+                <div className="user-session-panel">
+                  <p>
+                    Sign out from this device. Local cached avatar and session hints used by the sidebar will also
+                    be cleared.
+                  </p>
+                  <button className="user-modal-signout" type="button" onClick={handleSignOut}>
+                    Sign Out _&gt;
+                  </button>
+                </div>
+              </UserProfile.Page>
+            </UserProfile>
           </div>
         </div>,
         document.body
@@ -469,6 +1056,31 @@ function getReasoningText(message: UIMessage) {
     .trim();
 }
 
+function extractTaggedPayload(raw: string, tag: string) {
+  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const regex = new RegExp(`<${escapedTag}>([\\s\\S]*?)<\/${escapedTag}>`, "i");
+  const match = raw.match(regex);
+  return match?.[1]?.trim();
+}
+
+function stripAssistantEnvelope(raw: string) {
+  return raw
+    .replace(/<Response>[\s\S]*?<\/Response>/gi, "")
+    .replace(/<MemoryOps>[\s\S]*?<\/MemoryOps>/gi, "")
+    .replace(/<TitleOps>[\s\S]*?<\/TitleOps>/gi, "")
+    .replace(/<MemoryNote>[\s\S]*?<\/MemoryNote>/gi, "")
+    .trim();
+}
+
+function parseAssistantOutput(raw: string) {
+  const response = extractTaggedPayload(raw, "Response") ?? stripAssistantEnvelope(raw) ?? raw;
+  const memoryNote = extractTaggedPayload(raw, "MemoryNote");
+  return {
+    response: response.trim(),
+    memoryNote,
+  };
+}
+
 function getReasoningKeyPoints(reasoning: string) {
   const cleaned = reasoning.replace(/\r\n/g, "\n").trim();
   if (!cleaned) {
@@ -512,8 +1124,9 @@ function getReasoningKeyPoints(reasoning: string) {
 }
 
 function Message({ message }: { message: UIMessage }) {
+  const assistantPayload = useMemo(() => parseAssistantOutput(message.text ?? ""), [message.text]);
   const reasoning = getReasoningText(message);
-  const [visibleText, smoothTextState] = useSmoothText(message.text ?? "", {
+  const [visibleText, smoothTextState] = useSmoothText(assistantPayload.response, {
     startStreaming: message.status === "streaming",
   });
   const [visibleReasoning, smoothReasoningState] = useSmoothText(reasoning, {
@@ -605,6 +1218,9 @@ function Message({ message }: { message: UIMessage }) {
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayText.trim()}</ReactMarkdown>
             )}
           </div>
+        )}
+        {!!assistantPayload.memoryNote && !isTypewriterActive && (
+          <p className="assistant-memory-note">Memory updated: {assistantPayload.memoryNote}</p>
         )}
       </div>
     </div>

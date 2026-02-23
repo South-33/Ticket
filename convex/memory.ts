@@ -8,6 +8,56 @@ import {
 } from "./_generated/server";
 import { getAuthUserIdOrThrow } from "./auth";
 
+type ProfileFieldKey =
+  | "displayName"
+  | "homeCity"
+  | "homeAirport"
+  | "nationality"
+  | "ageBand"
+  | "budgetBand"
+  | "preferredCabin"
+  | "flexibilityLevel"
+  | "loyaltyPrograms";
+
+function normalizeKey(input: string) {
+  return input.trim().toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "");
+}
+
+function normalizeProfileField(input: string): ProfileFieldKey | null {
+  const key = normalizeKey(input);
+  const aliases: Record<string, ProfileFieldKey> = {
+    name: "displayName",
+    display_name: "displayName",
+    displayname: "displayName",
+    home_city: "homeCity",
+    city: "homeCity",
+    home_airport: "homeAirport",
+    airport: "homeAirport",
+    nationality: "nationality",
+    age: "ageBand",
+    age_band: "ageBand",
+    budget: "budgetBand",
+    budget_band: "budgetBand",
+    preferred_cabin: "preferredCabin",
+    cabin: "preferredCabin",
+    flexibility: "flexibilityLevel",
+    flexibility_level: "flexibilityLevel",
+    loyalty_programs: "loyaltyPrograms",
+    loyalty: "loyaltyPrograms",
+  };
+  return aliases[key] ?? null;
+}
+
+const memoryOperationValidator = v.object({
+  action: v.union(v.literal("add"), v.literal("update"), v.literal("delete"), v.literal("noop")),
+  store: v.union(v.literal("fact"), v.literal("preference"), v.literal("profile")),
+  key: v.string(),
+  value: v.optional(v.string()),
+  confidence: v.optional(v.number()),
+  reason: v.optional(v.string()),
+  sensitive: v.optional(v.boolean()),
+});
+
 function toMarkdown(args: {
   profile: {
     displayName?: string;
@@ -21,6 +71,7 @@ function toMarkdown(args: {
     loyaltyPrograms: string[];
   } | null;
   facts: Array<{ key: string; value: string; status: string; confidence: number }>;
+  preferences: Array<{ key: string; value: string }>;
 }) {
   const lines: string[] = ["# user.md", "", "## Profile"];
   if (!args.profile) {
@@ -45,17 +96,31 @@ function toMarkdown(args: {
       lines.push(`- ${fact.key}: ${fact.value} (${fact.status}, conf=${fact.confidence.toFixed(2)})`);
     }
   }
+
+  lines.push("", "## Preferences (Untrusted Hints)");
+  if (args.preferences.length === 0) {
+    lines.push("- None");
+  } else {
+    for (const preference of args.preferences) {
+      lines.push(`- ${preference.key}: ${preference.value}`);
+    }
+  }
   return lines.join("\n");
 }
 
 async function persistSnapshotForUser(ctx: MutationCtx, userId: string) {
-  const [profile, facts, snapshots] = await Promise.all([
+  const [profile, facts, preferences, snapshots] = await Promise.all([
     ctx.db.query("userProfiles").withIndex("by_userId", (q) => q.eq("userId", userId)).unique(),
     ctx.db
       .query("userMemoryFacts")
       .withIndex("by_user_status_updatedAt", (q) => q.eq("userId", userId).eq("status", "confirmed"))
       .order("desc")
       .take(80),
+    ctx.db
+      .query("userPreferenceNotes")
+      .withIndex("by_user_updatedAt", (q) => q.eq("userId", userId))
+      .order("desc")
+      .take(60),
     ctx.db
       .query("userMemorySnapshots")
       .withIndex("by_user_createdAt", (q) => q.eq("userId", userId))
@@ -70,6 +135,10 @@ async function persistSnapshotForUser(ctx: MutationCtx, userId: string) {
       value: fact.value,
       status: fact.status,
       confidence: fact.confidence,
+    })),
+    preferences: preferences.map((preference) => ({
+      key: preference.key,
+      value: preference.value,
     })),
   });
 
@@ -116,6 +185,13 @@ export const getUserMemory = query({
         updatedAt: v.number(),
       }),
     ),
+    preferences: v.array(
+      v.object({
+        key: v.string(),
+        value: v.string(),
+        updatedAt: v.number(),
+      }),
+    ),
     latestSnapshot: v.union(
       v.null(),
       v.object({
@@ -127,11 +203,16 @@ export const getUserMemory = query({
   }),
   handler: async (ctx) => {
     const userId = await getAuthUserIdOrThrow(ctx);
-    const [profile, facts, snapshots] = await Promise.all([
+    const [profile, facts, preferences, snapshots] = await Promise.all([
       ctx.db.query("userProfiles").withIndex("by_userId", (q) => q.eq("userId", userId)).unique(),
       ctx.db
         .query("userMemoryFacts")
         .withIndex("by_user_status_updatedAt", (q) => q.eq("userId", userId).eq("status", "confirmed"))
+        .order("desc")
+        .take(40),
+      ctx.db
+        .query("userPreferenceNotes")
+        .withIndex("by_user_updatedAt", (q) => q.eq("userId", userId))
         .order("desc")
         .take(40),
       ctx.db
@@ -164,6 +245,11 @@ export const getUserMemory = query({
         status: fact.status,
         isSensitive: fact.isSensitive,
         updatedAt: fact.updatedAt,
+      })),
+      preferences: preferences.map((preference) => ({
+        key: preference.key,
+        value: preference.value,
+        updatedAt: preference.updatedAt,
       })),
       latestSnapshot: snapshots[0]
         ? {
@@ -312,6 +398,98 @@ export const confirmSensitiveFact = mutation({
   },
 });
 
+export const removeUserMemoryFact = mutation({
+  args: {
+    key: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    const now = Date.now();
+    const facts = await ctx.db
+      .query("userMemoryFacts")
+      .withIndex("by_user_key", (q) => q.eq("userId", userId).eq("key", args.key))
+      .take(50);
+
+    await Promise.all(
+      facts.map((fact) =>
+        ctx.db.patch(fact._id, {
+          status: "stale",
+          updatedAt: now,
+        }),
+      ),
+    );
+
+    return null;
+  },
+});
+
+export const upsertUserPreferenceNote = mutation({
+  args: {
+    key: v.string(),
+    value: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    const key = args.key.trim().toLowerCase();
+    const value = args.value.trim();
+    if (!key || !value) {
+      throw new ConvexError("Preference key and value are required");
+    }
+
+    const existing = await ctx.db
+      .query("userPreferenceNotes")
+      .withIndex("by_user_key", (q) => q.eq("userId", userId).eq("key", key))
+      .unique();
+    const now = Date.now();
+
+    if (!existing) {
+      await ctx.db.insert("userPreferenceNotes", {
+        userId,
+        key,
+        value,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return null;
+    }
+
+    await ctx.db.patch(existing._id, {
+      value,
+      updatedAt: now,
+    });
+
+    return null;
+  },
+});
+
+export const removeUserPreferenceNote = mutation({
+  args: {
+    key: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    const key = args.key.trim().toLowerCase();
+    if (!key) {
+      return null;
+    }
+
+    const existing = await ctx.db
+      .query("userPreferenceNotes")
+      .withIndex("by_user_key", (q) => q.eq("userId", userId).eq("key", key))
+      .unique();
+
+    if (!existing) {
+      return null;
+    }
+
+    await ctx.db.delete(existing._id);
+    return null;
+  },
+});
+
 export const generateUserMemorySnapshot = mutation({
   args: {},
   returns: v.object({
@@ -362,5 +540,296 @@ export const getConfirmedFactsInternal = internalQuery({
       isSensitive: fact.isSensitive,
       confidence: fact.confidence,
     }));
+  },
+});
+
+export const getUserProfileInternal = internalQuery({
+  args: {
+    userId: v.string(),
+  },
+  returns: v.union(
+    v.null(),
+    v.object({
+      displayName: v.optional(v.string()),
+      homeCity: v.optional(v.string()),
+      homeAirport: v.optional(v.string()),
+      nationality: v.optional(v.string()),
+      ageBand: v.optional(v.string()),
+      budgetBand: v.optional(v.string()),
+      preferredCabin: v.optional(v.string()),
+      flexibilityLevel: v.optional(v.string()),
+      loyaltyPrograms: v.array(v.string()),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const profile = await ctx.db
+      .query("userProfiles")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .unique();
+
+    if (!profile) {
+      return null;
+    }
+
+    return {
+      displayName: profile.displayName,
+      homeCity: profile.homeCity,
+      homeAirport: profile.homeAirport,
+      nationality: profile.nationality,
+      ageBand: profile.ageBand,
+      budgetBand: profile.budgetBand,
+      preferredCabin: profile.preferredCabin,
+      flexibilityLevel: profile.flexibilityLevel,
+      loyaltyPrograms: profile.loyaltyPrograms,
+    };
+  },
+});
+
+export const getUserPreferenceHintsInternal = internalQuery({
+  args: {
+    userId: v.string(),
+  },
+  returns: v.array(
+    v.object({
+      key: v.string(),
+      value: v.string(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const preferences = await ctx.db
+      .query("userPreferenceNotes")
+      .withIndex("by_user_updatedAt", (q) => q.eq("userId", args.userId))
+      .order("desc")
+      .take(40);
+
+    return preferences.map((preference) => ({
+      key: preference.key,
+      value: preference.value,
+    }));
+  },
+});
+
+export const applyMemoryOpsInternal = internalMutation({
+  args: {
+    userId: v.string(),
+    operations: v.array(memoryOperationValidator),
+  },
+  returns: v.object({
+    applied: v.number(),
+    added: v.number(),
+    updated: v.number(),
+    deleted: v.number(),
+    skipped: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    let added = 0;
+    let updated = 0;
+    let deleted = 0;
+    let skipped = 0;
+    const now = Date.now();
+    const maxOps = 8;
+
+    let profile = await ctx.db
+      .query("userProfiles")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .unique();
+
+    for (const operation of args.operations.slice(0, maxOps)) {
+      const action = operation.action;
+      if (action === "noop") {
+        skipped += 1;
+        continue;
+      }
+
+      const key = normalizeKey(operation.key);
+      if (!key) {
+        skipped += 1;
+        continue;
+      }
+
+      const confidence = Math.max(0, Math.min(1, operation.confidence ?? 0.66));
+
+      if (operation.store === "fact") {
+        const existing = await ctx.db
+          .query("userMemoryFacts")
+          .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", key))
+          .order("desc")
+          .take(1);
+        const existingFact = existing[0];
+
+        if (action === "delete") {
+          if (confidence < 0.9 || !existingFact) {
+            skipped += 1;
+            continue;
+          }
+          const facts = await ctx.db
+            .query("userMemoryFacts")
+            .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", key))
+            .take(50);
+          await Promise.all(
+            facts.map((fact) =>
+              ctx.db.patch(fact._id, {
+                status: "stale",
+                updatedAt: now,
+              }),
+            ),
+          );
+          deleted += 1;
+          continue;
+        }
+
+        const value = operation.value?.trim();
+        if (!value) {
+          skipped += 1;
+          continue;
+        }
+
+        const isSensitive =
+          operation.sensitive
+          || /(^|_)(nationality|passport|visa|age|age_band|dob|birth_date)(_|$)/.test(key);
+        const status = isSensitive ? "proposed" : "confirmed";
+        const safeConfidence = isSensitive ? Math.min(confidence, 0.6) : Math.max(0.45, confidence);
+
+        const protectedConfirmedFact =
+          !!existingFact
+          && existingFact.status === "confirmed"
+          && existingFact.sourceType === "user_confirmed"
+          && existingFact.confidence >= 0.85
+          && (existingFact.isSensitive || isSensitive);
+        if (protectedConfirmedFact) {
+          skipped += 1;
+          continue;
+        }
+
+        if (!existingFact) {
+          await ctx.db.insert("userMemoryFacts", {
+            userId: args.userId,
+            key,
+            value,
+            sourceType: "inferred",
+            confidence: safeConfidence,
+            status,
+            isSensitive,
+            createdAt: now,
+            updatedAt: now,
+          });
+          added += 1;
+        } else {
+          await ctx.db.patch(existingFact._id, {
+            value,
+            sourceType: "inferred",
+            confidence: safeConfidence,
+            status,
+            isSensitive,
+            updatedAt: now,
+          });
+          updated += 1;
+        }
+        continue;
+      }
+
+      if (operation.store === "preference") {
+        const existing = await ctx.db
+          .query("userPreferenceNotes")
+          .withIndex("by_user_key", (q) => q.eq("userId", args.userId).eq("key", key))
+          .unique();
+
+        if (action === "delete") {
+          if (!existing || confidence < 0.6) {
+            skipped += 1;
+            continue;
+          }
+          await ctx.db.delete(existing._id);
+          deleted += 1;
+          continue;
+        }
+
+        const value = operation.value?.trim();
+        if (!value) {
+          skipped += 1;
+          continue;
+        }
+
+        if (!existing) {
+          await ctx.db.insert("userPreferenceNotes", {
+            userId: args.userId,
+            key,
+            value,
+            createdAt: now,
+            updatedAt: now,
+          });
+          added += 1;
+        } else {
+          await ctx.db.patch(existing._id, {
+            value,
+            updatedAt: now,
+          });
+          updated += 1;
+        }
+        continue;
+      }
+
+      const profileField = normalizeProfileField(key);
+      if (!profileField) {
+        skipped += 1;
+        continue;
+      }
+
+      if (!profile) {
+        profile = await ctx.db.insert("userProfiles", {
+          userId: args.userId,
+          loyaltyPrograms: [],
+          createdAt: now,
+          updatedAt: now,
+        }).then((id) => ctx.db.get(id));
+      }
+      if (!profile) {
+        skipped += 1;
+        continue;
+      }
+
+      if (action === "delete") {
+        if (confidence < 0.9) {
+          skipped += 1;
+          continue;
+        }
+
+        await ctx.db.patch(profile._id, {
+          [profileField]: profileField === "loyaltyPrograms" ? [] : undefined,
+          updatedAt: now,
+        });
+        deleted += 1;
+        profile = await ctx.db.get(profile._id);
+        continue;
+      }
+
+      const value = operation.value?.trim();
+      if (!value) {
+        skipped += 1;
+        continue;
+      }
+
+      await ctx.db.patch(profile._id, {
+        [profileField]:
+          profileField === "loyaltyPrograms"
+            ? value
+                .split(",")
+                .map((item) => item.trim())
+                .filter((item) => item.length > 0)
+                .slice(0, 12)
+            : value,
+        updatedAt: now,
+      });
+      updated += 1;
+      profile = await ctx.db.get(profile._id);
+    }
+
+    return {
+      applied: added + updated + deleted,
+      added,
+      updated,
+      deleted,
+      skipped,
+    };
   },
 });
