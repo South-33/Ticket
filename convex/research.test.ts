@@ -676,7 +676,7 @@ describe("research pipeline", () => {
         promptMessageId: "pm-quality-clarification",
         prompt: "Find me options to Frankfurt",
         domain: "flight",
-        selectedSkillSlugs: ["skills"],
+        selectedSkillSlugs: ["general"],
         criteria: [
           { key: "origin", value: "Manila" },
           { key: "destination", value: "Frankfurt" },
@@ -684,7 +684,7 @@ describe("research pipeline", () => {
           { key: "budget", value: "900" },
           { key: "nationality", value: "Filipino" },
         ],
-        skillHintsSnapshot: ["[skills] Keep constraints explicit"],
+        skillHintsSnapshot: ["[general] Keep constraints explicit"],
       });
 
       expect(started.jobStatus).toBe("planned");
@@ -903,15 +903,15 @@ describe("research pipeline", () => {
       promptMessageId: "pm-start-ops",
       prompt: "Find me flight options to Frankfurt",
       domain: "flight",
-      selectedSkillSlugs: ["skills", "flights", "skills"],
+      selectedSkillSlugs: ["general", "flights", "general"],
       criteria: [
         { key: "origin", value: "Manila" },
         { key: "destination", value: "Frankfurt" },
         { key: "departureDate", value: "2026-08-11" },
         { key: "nationality", value: "Filipino" },
       ],
-      skillHintsSnapshot: ["[skills] Verify constraints before ranking", "[flights] Compare baggage rules"],
-      skillPackDigest: "skills:v1|flights:v2",
+      skillHintsSnapshot: ["[general] Verify constraints before ranking", "[flights] Compare baggage rules"],
+      skillPackDigest: "general:v1|flights:v2",
     });
 
     const latest = await t.query(api.research.getLatestJobForThread, {
@@ -927,13 +927,13 @@ describe("research pipeline", () => {
     expect(started.jobStatus).toBe("awaiting_input");
     expect(started.missingFields).toContain("budget");
     expect(latest?.status).toBe("awaiting_input");
-    expect(latest?.selectedSkillSlugs).toEqual(["skills", "flights"]);
-    expect(persisted.job?.selectedSkillSlugs).toEqual(["skills", "flights"]);
+    expect(latest?.selectedSkillSlugs).toEqual(["general", "flights"]);
+    expect(persisted.job?.selectedSkillSlugs).toEqual(["general", "flights"]);
     expect(persisted.job?.skillHintsSnapshot).toEqual([
-      "[skills] Verify constraints before ranking",
+      "[general] Verify constraints before ranking",
       "[flights] Compare baggage rules",
     ]);
-    expect(persisted.job?.skillPackDigest).toBe("skills:v1|flights:v2");
+    expect(persisted.job?.skillPackDigest).toBe("general:v1|flights:v2");
     expect(persisted.goal?.prompt).toContain("Research criteria:");
   });
 

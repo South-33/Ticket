@@ -1,4 +1,4 @@
-# skills.md
+# general.md
 
 Global cross-domain guidance for travel/ticket research.
 
@@ -22,4 +22,5 @@ Global cross-domain guidance for travel/ticket research.
 
 ## Notes
 - Domain-specific content belongs in `flights.md`, `train.md`, or `concert.md`.
+- Runtime canonical skill slug is `general` (legacy `skills` is accepted as an alias for compatibility).
 - Publish curated items into Convex knowledge docs/items through the admin flow.

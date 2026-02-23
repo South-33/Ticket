@@ -26,7 +26,7 @@ Optional tagged output examples:
 
 ```xml
 I found strong options for this route. I can start deep research now.
-<ResearchOps>{"action":"start","domain":"flight","selectedSkills":["skills","flights"],"criteria":[{"key":"origin","value":"MNL"},{"key":"destination","value":"FRA"},{"key":"departureDate","value":"2026-08-11"},{"key":"budget","value":"900"},{"key":"nationality","value":"Filipino"}]}</ResearchOps>
+<ResearchOps>{"action":"start","domain":"flight","selectedSkills":["general","flights"],"criteria":[{"key":"origin","value":"MNL"},{"key":"destination","value":"FRA"},{"key":"departureDate","value":"2026-08-11"},{"key":"budget","value":"900"},{"key":"nationality","value":"Filipino"}]}</ResearchOps>
 ```
 
 ```xml
@@ -65,7 +65,7 @@ Validation status:
 
 - Tag: `<ResearchOps>`
 - JSON schema:
-  - `{"action":"start","domain":"flight|train|concert|mixed|general","selectedSkills":["skills","flights"],"criteria":[{"key":"origin","value":"MNL"}]}`
+  - `{"action":"start","domain":"flight|train|concert|mixed|general","selectedSkills":["general","flights"],"criteria":[{"key":"origin","value":"MNL"}]}`
   - `{"action":"noop"}`
 - Backend apply path:
   - `convex/chat.ts` -> validate + resolve selected skill slugs

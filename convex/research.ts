@@ -42,6 +42,8 @@ const MAX_PROMOTED_CONTEXT_SOURCES = 4;
 const QUALITY_CONTINUE_THRESHOLD = 0.66;
 const MAX_PLANNER_REPAIR_ATTEMPTS = 2;
 const MAX_RANKING_REPAIR_ATTEMPTS = 2;
+const GENERAL_SKILL_SLUG = "general";
+const LEGACY_GENERAL_SKILL_SLUG = "skills";
 
 const plannerEvidenceFocusValues = [
   "price_total",
@@ -77,6 +79,14 @@ const rankingOutputSchema = z.object({
 
 function isLlmResearchPipelineEnabled() {
   return process.env.LLM_RESEARCH_PIPELINE_V1 !== "0";
+}
+
+function normalizeSelectedSkillSlug(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === LEGACY_GENERAL_SKILL_SLUG) {
+    return GENERAL_SKILL_SLUG;
+  }
+  return normalized;
 }
 
 type ResearchJobStatus =
@@ -1682,7 +1692,11 @@ export const startResearchFromOpsInternal = internalMutation({
   }),
   handler: async (ctx, args) => {
     const selectedSkillSlugs = Array.from(
-      new Set(args.selectedSkillSlugs.map((slug) => slug.trim().toLowerCase()).filter((slug) => slug.length > 0)),
+      new Set(
+        args.selectedSkillSlugs
+          .map((slug) => normalizeSelectedSkillSlug(slug))
+          .filter((slug) => slug.length > 0),
+      ),
     ).slice(0, 8);
 
     if (selectedSkillSlugs.length === 0) {

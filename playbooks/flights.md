@@ -1,256 +1,223 @@
 # flights.md
 
-Flight-only procedural playbook for finding high-value itineraries in 2026.
-
-Design goals (aligned with SkillsBench guidance):
-- Keep this skill focused, procedural, and reusable across many flight requests.
-- Prefer short SOP modules over long theory dumps.
-- Include concrete examples and explicit output format.
+Flight optimization skill for finding high-value itineraries.
 
 ## When To Use
-- User asks for flights, airfare optimization, award availability, or route/cost tradeoffs.
-- Do not use for train, hotel, or concert planning.
+- User asks for flights, airfare, award availability, or route/cost tradeoffs.
+- Do not use for trains, hotels, or non-flight travel planning.
 
-## Inputs (Minimum)
-- Origin (city/airport)
-- Destination (city/airport)
-- Date or date range
-- Cabin/class preference
+## Required Inputs
+- Origin and destination (city or airport)
+- Travel date or range
+- Cabin class
 
-Optional high-impact inputs:
-- Flexibility window (+/- days)
+## Optional Inputs (ask only if they change the recommendation)
+- Date flexibility (+/- days)
 - Nearby airport tolerance
-- Baggage needs
-- Loyalty programs / points balances
-- Risk tolerance (`safe_only`, `allow_grey`, `allow_high_risk`)
+- Baggage requirements
+- Loyalty program / points balances
+- Number of passengers
+- Risk tolerance: `safe_only` (default) | `allow_grey` (default consent scope: current thread)
 
-## Module 1 - Baseline Search + Expansion
-1. Run baseline search for exact route/date/cabin.
-2. Expand dates by a small window (default +/- 3 days).
-3. Expand route graph:
-   - nearby origin airports
-   - nearby destination airports
-   - open-jaw variants if user is city-flexible
-4. Build a candidate set with all-in price intent (not just base fare).
+If optional inputs are unknown, proceed with safe defaults and state your assumptions.
 
-Stop rule:
-- If expanded search yields no materially better option, keep baseline and move to Module 3.
+---
 
-## Module 2 - Advanced Optimization Passes
-Run only when upside is likely (long-haul, high fare, flexible traveler, or award user).
+## Execution Workflow
 
-### Safe / Compliant
-- Fare-family comparison (bags, seat, change/refund penalties).
-- Repositioning analysis (cheap feeder to stronger hub).
-- Award + cash parallel search (same OD/date envelope).
-- Transfer bonus check for major loyalty programs.
+### Step 1 — Baseline Search
+Search the exact route, date, cabin, and passenger count. Establish an all-in price (base fare + taxes + standard baggage).
 
-### Grey-Area (opt-in)
-- Country-of-sale and currency comparison.
-- Fifth-freedom route sweep.
-- Self-transfer constructions with conservative buffers.
+**Do not rely solely on Google Flights or Skyscanner.** Several major carriers impose GDS surcharges or withhold inventory from aggregators — always cross-check the carrier's direct site for routes on AA, Lufthansa, Emirates, SQ, or Air France-KLM. See NDC Surcharge Table below.
 
-Policy:
-- Default to safe/compliant tactics.
-- Only surface grey tactics when user explicitly opts in.
-- High-risk tactics are documented in the appendix and are never default suggestions.
-- Experimental tactics are documented in a dedicated section and must be labeled clearly as unproven.
+Also run a **dark inventory check** for any route where LCCs are plausible. Southwest, Ryanair, AirAsia and others don't appear on standard aggregators. See Dark Inventory Checklist below.
 
-## Module 3 - Verification + Risk Gate
-Before final recommendation, verify top candidates:
-1. Recheck fare freshness (price still live).
-2. Verify total cost components:
-   - baggage
-   - seat selection
-   - change/refund terms
-   - self-transfer friction and missed-connection exposure
-3. Mark risk class for each itinerary:
-   - `safe_compliant`
-   - `grey_common`
-   - `high_risk_contract`
-4. Add plain-language caveats and recheck timestamp.
+### Step 2 — Expand the Search Space
+Apply 2-3 tactics from the Tactic Bank. Pick the ones most likely to yield savings for this specific route type.
 
-## Tactic Bank (Tips and Tricks)
-Use these as modular tactics. Prefer combining 2-3 tactics per run, not all at once.
+Recommended combos by use case:
+- **Budget economy**: `date_window_scan` + `nearby_destination_radius` + `fare_family_gap_check`
+- **Group travel (2+ pax)**: always run `group_bucket_split` first
+- **Premium / business class**: `cash_award_parallel` + `ghost_award_validation` + `tax_surcharge_compare`
+- **Award travel**: `release_window_timing` + `partner_space_crosscheck` + `ghost_award_validation`
+- **Complex itinerary**: `open_jaw_probe` + `fifth_freedom_probe` + `multi_city_fare_probe`
+- **Grey tactics** (only if user opts in): load `flights_grey_tactics.md`
 
-Evidence labeling guidance:
-- `verified`: corroborated by strong sources and repeatable checks.
-- `mixed`: useful in some markets/periods, but inconsistent.
-- `experimental`: hypothesis-level; useful for discovery, not for confident claims.
+### Step 3 — Verify Before Recommending
+1. Confirm the fare is still live at checkout — not just in search results.
+2. Build true all-in cost: base fare + taxes + baggage + seat fees.
+3. Flag connections under 60 min domestic or 90 min international.
+4. For award options: cross-validate space on 2 independent tools before recommending any points transfer. See Ghost Availability note below.
+5. Assign risk class: `safe_compliant` | `grey_common`
 
-### Search Space Expansion
-- `nearby_origin_radius`: Try secondary origin airports within realistic transfer distance.
-- `nearby_destination_radius`: Include alternate destination airports in same metro region.
-- `date_window_scan`: Scan +/- 1 to 3 days for fare bucket shifts.
-- `time_of_day_split`: Compare early/late departures for same route/day.
-- `open_jaw_probe`: Compare into one city and out of another for region trips.
-- `split_direction_search`: Search outbound and return legs separately before combining.
-- `one_way_vs_roundtrip`: Compare OW sum versus RT fare construction.
+---
 
-### Fare Construction and Routing
-- `reposition_to_hub`: Add cheap feeder to major hub then long-haul from hub.
-- `nested_trip_check`: For frequent repeat destinations, test destination-originating fare patterns.
-- `multi_city_fare_probe`: Use multi-city pricing instead of simple RT when legs differ.
-- `alliance_mix_test`: Compare same route across alliance and non-alliance carriers.
-- `ota_vs_direct_delta`: Compare OTA baseline with direct carrier checkout total.
-- `fare_family_gap_check`: Price difference versus included benefits (bags/change/seat).
-- `long_layover_tradeoff`: Test longer layovers when savings are material and acceptable.
+## Tactic Bank
 
-### Geo and Currency Strategies (Grey)
-- `country_of_sale_compare`: Check point-of-sale differences by market.
-- `currency_checkout_compare`: Compare local-currency checkout vs card-converted total.
-- `fx_spread_guardrail`: Include payment FX spread and card fees before claiming savings.
-- `market_specific_promos`: Look for market-targeted fare/promotional rules.
+Pick 2-3 per run. Do not apply all at once.
 
-### Loyalty and Awards
-- `cash_award_parallel`: Run cash and points searches in parallel and normalize value.
-- `transfer_bonus_window`: Incorporate active transfer bonus windows before final ranking.
-- `partner_space_crosscheck`: Confirm award space across partner search tools/carrier views.
-- `status_locked_award_check`: Treat elite-cardholder-only inventory as conditional.
-- `tax_surcharge_compare`: Compare net out-of-pocket after taxes/surcharges, not points alone.
-- `fifth_freedom_award_probe`: Check fifth-freedom segments for better premium value.
+### Search Expansion
+- `date_window_scan`: Check +/- 1 to 3 days. Fare buckets shift meaningfully across dates.
+- `nearby_origin_radius`: Try secondary origin airports within realistic travel distance.
+- `nearby_destination_radius`: Include alternate airports in the same destination metro.
+- `open_jaw_probe`: Fly into one city, out of another — often cheaper for regional trips.
+- `one_way_vs_roundtrip`: Price outbound and return separately before combining.
+- `dark_inventory_check`: Always check carriers that skip aggregators. See Dark Inventory Checklist below.
 
-### Browser-Needed Verification Tactics
-- `member_only_fare_check`: Logged-in fare check for carrier/member-only rates.
-- `phantom_inventory_guard`: Verify inventory at checkout stage, not search layer only.
-- `ancillary_total_price_pass`: Add bags/seats before final recommendation.
-- `session_price_drift_check`: Recheck final price after short delay to catch drift.
-- `coupon_promo_field_probe`: Validate promo code field behavior where available.
+### Fare Construction
+- `ndc_direct_check`: For AA, Lufthansa, Emirates, SQ, Air France-KLM — always check the carrier's direct site. GDS surcharges on these carriers are €13–25 per booking. AA withholds ~40% of inventory from GDS entirely. See NDC Surcharge Table below.
+- `group_bucket_split`: For 2+ passengers, search for 1 passenger AND 2+ passengers separately. Airlines require all passengers in one booking to share the same fare bucket. If Price(2 pax) > 2 × Price(1 pax), book two separate single-passenger tickets. **100% repeatable across all GDS carriers.**
+- `fare_family_gap_check`: Compare base vs. mid vs. flex — check if the price gap is worth the change/refund benefit.
+- `reposition_to_hub`: Add a cheap feeder to a major hub, then take the main long-haul leg.
+- `fifth_freedom_probe`: Check if the route has a fifth-freedom option — often widebody aircraft on short hops, systematically underpriced. See Fifth-Freedom Route Table below.
+- `ota_vs_direct_delta`: Compare OTA total vs. booking direct — especially critical for NDC carriers.
 
-### Self-Transfer and Split-Ticket Safety
-- `self_transfer_buffer_rule`: Enforce conservative buffer (default 4h, more for intl/terminal change).
-- `misconnect_recovery_cost`: Estimate fallback cost if feeder leg misses onward flight.
-- `baggage_recheck_penalty`: Include recheck friction and fees for split tickets.
-- `visa_airside_guard`: Confirm transit visa/airside constraints for self-transfer plans.
-- `airport_transfer_time_realism`: Include landside transfer time where airport change required.
+### Loyalty & Awards
+- `cash_award_parallel`: Run cash and award searches in parallel. Normalize to out-of-pocket cost.
+- `ghost_award_validation`: Before recommending a points transfer, verify award inventory on the operating carrier's own tool AND at least one independent partner tool. Ghost availability — where a partner shows seats the operating carrier already sold — results in non-refundable point transfers going to waste.
+- `release_window_timing`: Award seats release at specific T-minus windows. ANA at T-355, BA/Cathay at T-360, United at T-330. An Aeroplan holder has a 25-day advantage over a United MileagePlus user for the same ANA seat. See Award Release Windows below.
+- `last_minute_biz_check`: For business class, check T-14 and T-3 windows. See T-Minus Patterns below.
+- `sweet_spot_check`: Before pricing an award at market rates, check Active Award Sweet Spots below.
+- `transfer_bonus_window`: Check if an active transfer bonus changes the points math.
+- `tax_surcharge_compare`: Net out-of-pocket after carrier surcharges, not points value alone. Critical for Emirates and BA awards.
 
-### Mistake Fare Handling
-- `mistake_fare_detection`: Flag if fare is extreme outlier vs recent baseline.
-- `cooling_off_rule`: Warn user to delay irreversible add-ons for 7-14 days.
-- `ticketing_status_monitor`: Track whether ticket remains honored before chaining plans.
+### Self-Transfer Safety
+- `self_transfer_buffer_rule`: Minimum 4 hours for international self-transfers; more if terminal change required.
+- `misconnect_recovery_cost`: Estimate fallback cost before recommending a tight split-ticket.
+- `baggage_recheck_penalty`: Include recheck friction and fees for any split-ticket construction.
 
-## Experimental (Unproven) Tactics
-Use this section for high-upside ideas that are not consistently reproducible.
-These can be explored, but should not be framed as reliable unless revalidated on the current route/date.
+---
 
-Execution rules:
-- Always label these as `experimental` in results.
-- Never use fixed global savings percentages for these tactics.
-- Require route, date-window, and source checks before ranking them above verified options.
-- If an experimental tactic conflicts with a verified tactic, prefer the verified tactic.
-
-Experimental tactics:
-- `ndc_vs_gds_delta_probe` (experimental): Compare direct/NDC surfaced offers versus legacy aggregator output for the same itinerary shape.
-- `direct_only_carrier_probe` (experimental): Probe carriers with partial/no index coverage for route-specific misses.
-- `regional_blind_spot_scan` (experimental): Test whether a region has persistent metasearch gaps on low-cost or regional operators.
-- `price_change_velocity_watch` (experimental): Track short-interval repricing velocity as a proxy for buy-now versus wait.
-- `bucket_depletion_proxy_signal` (experimental): Use observable fare-class availability shifts as a rough scarcity signal.
-- `new_route_launch_flash_watch` (experimental): Watch newly launched routes for short-lived promotional underpricing.
-- `secondary_airport_suppression_probe` (experimental): Test nearby secondary airports for hub-premium suppression effects.
-- `pos_currency_lag_probe` (experimental): Compare point-of-sale and checkout currency pathways for temporary conversion lag.
-
-Anti-pitfall note:
-- Treat experimental tactics as search expansion, not proof.
-- Promote to `mixed` or `verified` only after repeated route-level confirmation.
-
-### Myth Debunk Tactics
-- `debunk_incognito_only`: Do not claim incognito mode alone reliably reduces fares.
-- `debunk_fixed_booking_day`: Do not claim universal cheapest weekday/hour rule.
-- `debunk_single_source_hacks`: Do not elevate viral hacks without corroboration.
-
-## Quick Selection Recipes
-- `budget_economy_fast`: `date_window_scan` + `nearby_destination_radius` + `fare_family_gap_check`
-- `premium_cabin_value`: `cash_award_parallel` + `partner_space_crosscheck` + `tax_surcharge_compare`
-- `complex_itinerary`: `open_jaw_probe` + `multi_city_fare_probe` + `ancillary_total_price_pass`
-- `grey_opt_in`: `country_of_sale_compare` + `currency_checkout_compare` + `fx_spread_guardrail`
-
-## Myths To Debunk (Do Not Recommend)
-- "Incognito mode alone always lowers fares."
-- "Tuesday midnight is always the cheapest booking time."
-
-## Clarifying Questions Policy
-Ask only when it changes decision quality materially:
-- nearby-airport flexibility
-- baggage expectations
-- risk tolerance for grey/high-risk tactics
-- points vs cash preference
-
-If these are unknown, proceed with safe defaults and state assumptions.
-
-## Output Contract (Flight Skill)
-Return ranked options in this structure:
+## Output Format
 
 ```json
 {
-  "assumptions": ["..."],
+  "assumptions": ["list any defaults applied"],
   "options": [
     {
-      "category": "cheapest|best_value|most_convenient",
-      "itinerary": "...",
-      "total_price": "...",
-      "value_rationale": "...",
-      "evidence_tier": "verified|mixed|experimental",
-      "risk_class": "safe_compliant|grey_common|high_risk_contract",
-      "caveats": ["..."],
-      "last_checked_utc": "ISO-8601"
+      "category": "cheapest | best_value | most_convenient",
+      "itinerary": "plain text route and timing",
+      "total_price": "all-in cost including fees",
+      "value_rationale": "why this option ranks here",
+      "evidence_tier": "verified | mixed",
+      "risk_class": "safe_compliant | grey_common",
+      "caveats": ["list any catches"],
+      "source": "where this was found (e.g. 'AA direct site, checked this session')"
     }
   ]
 }
 ```
 
-## Worked Example A (Safe-first)
-Input:
-- O: MNL
-- D: NRT
-- Date: 2026-11-03
-- Cabin: economy
-- Flex: +/- 2 days
-- Risk: safe_only
+- `evidence_tier: verified` = corroborated, repeatable. `mixed` = works in some markets/periods, inconsistent.
+- Never fabricate prices. If you can't confirm a live fare, say so and direct the user to verify.
 
-Execution:
-1. Baseline exact-date search.
-2. Expand to nearby dates and airports (`MNL/CRK` and `NRT/HND`).
-3. Compare fare families and all-in cost.
-4. Revalidate top 3 and output cheapest/best-value/most-convenient.
+---
 
-## Worked Example B (Advanced, opt-in)
-Input:
-- O: NYC
-- D: Europe (city-flexible)
-- Date range: late May
-- Cabin: business
-- Risk: allow_grey
+## What NOT To Do
+- Do not use grey tactics unless user explicitly sets `allow_grey`.
+- Do not claim "book on Tuesday" or "incognito saves money" — both are debunked. See Dead Hacks below.
+- Do not surface hidden city ticketing or fuel dumping — out of scope for this skill.
+- Do not recommend a points transfer until ghost availability is validated on 2 independent sources.
 
-Execution:
-1. Baseline award + cash scans.
-2. Add repositioning from alternate US gateways.
-3. Run country-of-sale/currency comparison for shortlist routes.
-4. Exclude high-risk tactics (not opted in).
-5. Revalidate and return ranked options with caveats.
+---
 
-## Curation Notes For Knowledge Admin
-- Store each tactic as one knowledge item (atomic, testable).
-- High-priority active entries require >=2 corroborating sources.
-- Add expiry to volatile tactics (promos, loopholes, devaluations).
+## Reference Data
 
-### Continuous Update Loop (PR-Managed)
-- Treat new route-level discoveries from research runs as proposal items first (PR-style), not immediate permanent tactics.
-- Keep temporary discoveries in a dedicated `temporary_flight_signals` block in runtime knowledge.
-- Required metadata for temporary entries: `evidence_tier`, `first_seen_utc`, `last_validated_utc`, `expires_utc`, and `status`.
-- Allowed temporary statuses: `proposed`, `testing`, `active_temp`, `invalidated`, `expired`, `promoted`.
-- Promotion rule: promote from temporary to core tactic only after repeated confirmations across independent runs.
-- Demotion rule: repeated failures or expiry should invalidate quickly to avoid stale savings claims.
-- When a temporary signal is surfaced to users, include plain-language caveat that it may no longer work.
+### NDC Surcharge Table
+Carriers that impose surcharges on GDS/aggregator bookings. Always cross-check the direct site for these.
 
-## Appendix - High-Risk Tactics (Explicit Opt-In Only)
-Never suggest by default. Only discuss if the user explicitly asks for high-risk methods.
+| Carrier | GDS Surcharge (approx.) | Key Note | Data Date |
+|---|---|---|---|
+| Lufthansa Group (LH, LX, OS, SN) | €18.50–24.00 | NDC opt-in removes fee entirely | 2026 |
+| American Airlines | $18.00–25.00 | Withholds ~40% of inventory from GDS | Mar 2024 |
+| Emirates | $14.00–25.00 | NDC incentives on select India-UAE routes | Apr 2024 |
+| Singapore Airlines | $12.00–15.00 | NDC access via select aggregators | Jun 2024 |
+| Air France-KLM | €13.00–17.00 | Up to 25% fare benefits on NDC buckets | 2025 |
+| LATAM Airlines | $12.00/segment | Via Amadeus/Sabre/Travelport | May 2025 |
 
-- `hidden_city_ticketing`: Contract-of-carriage risk, possible account action, disruption risk.
-- `repeat_hidden_city_pattern`: Elevated detection risk for frequent-flyer profiles.
-- `aggressive_mistake_fare_chaining`: High cancellation risk before honor window stabilizes.
-- `policy_edge_exploits`: Any tactic likely to trigger fraud/abuse controls.
+---
 
-When surfaced, always include:
-- why it is high-risk,
-- potential account/boarding/loyalty consequences,
-- safer alternatives.
+### Dark Inventory Checklist
+Carriers that skip aggregators. A search that misses these will miss entire fare options.
+
+| Region | Carriers Missed | Recommended Tool |
+|---|---|---|
+| North America | Southwest, Allegiant, Flair, Porter | Direct site; Southwest Low Fare Calendar |
+| Europe | Ryanair, EasyJet, Vueling | Dohop / Direct site |
+| Southeast Asia | AirAsia, Scoot, JetStar, Tiger (some routes) | 12Go / Wego |
+| East Asia | Peach, Jeju Air, Spring Airlines | HIS / No.1 Travel (Japan) |
+| Africa | Afrijet, Air Peace, ASKY, Air Senegal | Alternative Airlines |
+| Australia/NZ | Jetstar, Rex (Regional Express) | Webjet |
+
+Southwest note: Deliberately not on Google Flights. For 2-passenger searches, check Southwest Companion Pass logic — if one traveler has it, the second flies for fees only (~$6–22 domestic).
+
+Africa note: Carriers like Afrijet and Air Peace operate tag fifth-freedom legs (Malabo-Douala, Abidjan-Dakar) that rarely appear in Western tools. These can save 12+ hours vs. hubbing through Addis or Paris for intra-African routing.
+
+---
+
+### Fifth-Freedom Route Table
+These routes use long-haul aircraft on shorter hops, are often underpriced, and are missed by aggregators prioritizing non-stop home-carrier results. Always verify the route is still operating before recommending.
+
+| Route | Carrier | Aircraft | Tip | Status |
+|---|---|---|---|---|
+| JFK – FRA | Singapore Airlines | A380 / 777-300ER | 60k Aeroplan pts for Business | Active 2026 |
+| JFK – MXP | Emirates | A380 | Popular trans-Atlantic hacker route | Active 2026 |
+| EWR – ATH | Emirates | 777-300ER | Only non-US carrier on this route | Active 2026 |
+| LAX – PPT (Tahiti) | Air France | 777 / 787 | 77k Flying Blue miles for Business | Active 2026 |
+| GRU – EZE | Ethiopian / Swiss / Turkish / Air Canada | Widebody | Competition drives cash fares to ~$131 OW | Active 2026 |
+| SIN – PNH | Emirates | 777-300ER | Emirates First Class on a short hop | Active 2026 |
+| SYD – CHC | Emirates | A380 | Popular tag; often better service than Air NZ | Active 2026 |
+| LHR – DEL | Air Canada | 787-9 | Seasonal extension; underpriced in GDS | Seasonal |
+
+---
+
+### Award Release Windows
+
+| Carrier (Operating) | Release Window | Notes |
+|---|---|---|
+| British Airways / Cathay Pacific | T-360 days | Among the earliest releases |
+| ANA | T-355 days | Aeroplan sees this; United MileagePlus only at T-330 |
+| American Airlines | T-331 days | |
+| United Airlines | T-330 days | |
+
+The 25-day gap between ANA releasing (T-355) and United seeing it (T-330) means an Aeroplan holder will consistently outcompete a United MileagePlus user for ANA Business Class. Always monitor the operating carrier's release calendar, not the partner's cached data.
+
+---
+
+### T-Minus Patterns (Last-Minute Inventory)
+
+**T-14 Business Class Dump**: Lufthansa and JAL frequently open unsold Business Class into the "I" award bucket exactly 14 days before departure if J/C cabins are more than 50% empty. Best programs to catch this: Aeroplan, Miles & More, JMB. Pattern weakened on some routes in 2025 — treat as `mixed`.
+
+**T-3 Last-Minute Release**: Some carriers release seats into the lowest award buckets 72 hours before departure. Most common on routes with historically low load factors.
+
+---
+
+### Active Award Sweet Spots
+Verify current program rates before recommending — devaluations happen with little notice.
+
+| Program | Route / Use Case | Points | Notes |
+|---|---|---|---|
+| Virgin Atlantic Flying Club | US → Mexico (Aeromexico metal) | 11,500 (Eco) / 40,000 (Biz) | One of the last standing high-value sweet spots |
+| Iberia Plus (off-peak) | NYC / ORD → Madrid (Business) | 34,000–50,000 Avios | Aggregators miss off-peak dates; big saving vs. peak chart |
+| Aeroplan | US → Japan on ANA (Business) | ~55,000–65,000 pts | Best program for ANA; T-355 advantage |
+| Flying Blue | Transatlantic (Business) | ~50,000 pts | Elites get better rates; saver space has decreased |
+| Alaska Mileage Plan | US → South Africa on Qatar (Business) | ~75,000 pts | Limited Qatar space; strong value when available |
+
+**Degraded — do not recommend:**
+- ANA Round-the-World "Global J" under 150k miles: restricted 2025.
+- Turkish Airlines domestic US at 7.5k miles on United metal: devalued 2025.
+
+---
+
+### Dead Hacks
+Do not recommend these.
+
+- **Fuel dumping**: Largely neutralized by GDS audits. High cancellation risk.
+- **Incognito mode lowers fares**: Debunked. Pricing driven by fare bucket availability and POS, not device tracking.
+- **Tuesday midnight booking rule**: Debunked. Pricing is dynamic and automated — day of week is not a reliable predictor.
+- **Hidden city ticketing (Skiplagged)**: Risk significantly increased in 2026. Airlines tracking no-show segments and freezing FF accounts of repeat offenders. Not surfaced by this skill.
+
+---
+
+## Reference File
+- `flights_grey_tactics.md` — Load only when user sets `allow_grey`. Contains country-of-sale, POS simulation, currency arbitrage, and Trip.com East Asia tactics.

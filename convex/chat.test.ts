@@ -161,13 +161,13 @@ describe("chat intake flow", () => {
       promptMessageId: "pm-clarification-immediate",
       prompt: "Find me flight options to Frankfurt",
       domain: "flight",
-      selectedSkillSlugs: ["skills"],
+      selectedSkillSlugs: ["general"],
       criteria: [
         { key: "origin", value: "Manila" },
         { key: "destination", value: "Frankfurt" },
         { key: "departureDate", value: "2026-08-11" },
       ],
-      skillHintsSnapshot: ["[skills] Keep constraints explicit"],
+      skillHintsSnapshot: ["[general] Keep constraints explicit"],
     });
 
     const pendingRequest = await t.mutation(internal.research.requestUserClarificationInternal, {
@@ -211,7 +211,7 @@ describe("chat intake flow", () => {
       promptMessageId: "pm-clarification-start",
       prompt: "Find me flight options to Frankfurt",
       domain: "flight",
-      selectedSkillSlugs: ["skills"],
+      selectedSkillSlugs: ["general"],
       criteria: [
         { key: "origin", value: "Manila" },
         { key: "destination", value: "Frankfurt" },
@@ -219,7 +219,7 @@ describe("chat intake flow", () => {
         { key: "budget", value: "900" },
         { key: "nationality", value: "Filipino" },
       ],
-      skillHintsSnapshot: ["[skills] Keep constraints explicit"],
+      skillHintsSnapshot: ["[general] Keep constraints explicit"],
     });
 
     await t.mutation(internal.research.requestUserClarificationInternal, {

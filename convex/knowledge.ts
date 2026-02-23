@@ -7,6 +7,9 @@ import { getAuthUserIdOrThrow } from "./auth";
 type DocKind = "skills" | "flights" | "train" | "concert";
 type KnowledgeDocId = Id<"knowledgeDocs">;
 
+const GENERAL_SKILL_SLUG = "general";
+const LEGACY_GENERAL_SKILL_SLUG = "skills";
+
 const MAX_PAGE_SIZE = 50;
 
 function assertPageSize(numItems: number) {
@@ -55,7 +58,19 @@ function toDocKindsForDomain(domain: string): DocKind[] {
 }
 
 function normalizeSkillSlug(value: string) {
-  return value.trim().toLowerCase();
+  const normalized = value.trim().toLowerCase();
+  if (normalized === LEGACY_GENERAL_SKILL_SLUG) {
+    return GENERAL_SKILL_SLUG;
+  }
+  return normalized;
+}
+
+function resolveSkillSlugCandidates(value: string) {
+  const normalized = normalizeSkillSlug(value);
+  if (normalized === GENERAL_SKILL_SLUG) {
+    return [GENERAL_SKILL_SLUG, LEGACY_GENERAL_SKILL_SLUG];
+  }
+  return [normalized];
 }
 
 async function requireKnowledgeWriteAccess(ctx: MutationCtx) {
@@ -483,6 +498,189 @@ export const runKnowledgeMaintenance = mutation({
   },
 });
 
+export const migrateLegacySkillsSlugToGeneral = mutation({
+  args: {
+    dryRun: v.optional(v.boolean()),
+  },
+  returns: v.object({
+    dryRun: v.boolean(),
+    mode: v.union(v.literal("noop"), v.literal("renamed"), v.literal("merged")),
+    legacyFound: v.boolean(),
+    generalFound: v.boolean(),
+    legacyDocId: v.union(v.id("knowledgeDocs"), v.null()),
+    generalDocId: v.union(v.id("knowledgeDocs"), v.null()),
+    movedItems: v.number(),
+    mergedItems: v.number(),
+    removedLegacyItems: v.number(),
+    movedLinks: v.number(),
+    archivedLegacy: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const userId = await requireKnowledgeWriteAccess(ctx);
+    const now = Date.now();
+    const dryRun = args.dryRun ?? false;
+
+    const [legacyDoc, generalDoc] = await Promise.all([
+      ctx.db
+        .query("knowledgeDocs")
+        .withIndex("by_slug", (q) => q.eq("slug", LEGACY_GENERAL_SKILL_SLUG))
+        .unique(),
+      ctx.db
+        .query("knowledgeDocs")
+        .withIndex("by_slug", (q) => q.eq("slug", GENERAL_SKILL_SLUG))
+        .unique(),
+    ]);
+
+    if (!legacyDoc) {
+      return {
+        dryRun,
+        mode: "noop" as const,
+        legacyFound: false,
+        generalFound: Boolean(generalDoc),
+        legacyDocId: null,
+        generalDocId: generalDoc?._id ?? null,
+        movedItems: 0,
+        mergedItems: 0,
+        removedLegacyItems: 0,
+        movedLinks: 0,
+        archivedLegacy: false,
+      };
+    }
+
+    if (!generalDoc) {
+      if (!dryRun) {
+        await ctx.db.patch(legacyDoc._id, {
+          slug: GENERAL_SKILL_SLUG,
+          updatedByUserId: userId,
+          updatedAt: now,
+        });
+      }
+
+      return {
+        dryRun,
+        mode: "renamed" as const,
+        legacyFound: true,
+        generalFound: false,
+        legacyDocId: legacyDoc._id,
+        generalDocId: dryRun ? null : legacyDoc._id,
+        movedItems: 0,
+        mergedItems: 0,
+        removedLegacyItems: 0,
+        movedLinks: 0,
+        archivedLegacy: false,
+      };
+    }
+
+    const legacyItems = await ctx.db
+      .query("knowledgeItems")
+      .withIndex("by_doc_updatedAt", (q) => q.eq("docId", legacyDoc._id))
+      .take(500);
+
+    let movedItems = 0;
+    let mergedItems = 0;
+    let removedLegacyItems = 0;
+
+    for (const item of legacyItems) {
+      const existing = await ctx.db
+        .query("knowledgeItems")
+        .withIndex("by_doc_key", (q) => q.eq("docId", generalDoc._id).eq("key", item.key))
+        .unique();
+
+      if (!existing) {
+        movedItems += 1;
+        if (!dryRun) {
+          await ctx.db.patch(item._id, {
+            docId: generalDoc._id,
+            updatedByUserId: userId,
+            updatedAt: now,
+          });
+        }
+        continue;
+      }
+
+      mergedItems += 1;
+      removedLegacyItems += 1;
+
+      const mergedSourceUrls = uniqueSourceUrls([...existing.sourceUrls, ...item.sourceUrls]);
+      const preferLegacyContent = item.updatedAt > existing.updatedAt;
+      const mergedStatus =
+        existing.status === "active" || item.status === "active"
+          ? "active"
+          : existing.status === "draft" || item.status === "draft"
+            ? "draft"
+            : "stale";
+      const mergedExpiresAt =
+        existing.expiresAt === undefined || item.expiresAt === undefined
+          ? undefined
+          : Math.max(existing.expiresAt, item.expiresAt);
+
+      if (!dryRun) {
+        await ctx.db.patch(existing._id, {
+          content: preferLegacyContent ? item.content : existing.content,
+          confidence: Math.max(existing.confidence, item.confidence),
+          priority: Math.max(existing.priority, item.priority),
+          status: mergedStatus,
+          sourceUrls: mergedSourceUrls,
+          expiresAt: mergedExpiresAt,
+          updatedByUserId: userId,
+          updatedAt: now,
+        });
+        await ctx.db.delete(item._id);
+      }
+    }
+
+    const [linksFromLegacy, linksToLegacy] = await Promise.all([
+      ctx.db
+        .query("knowledgeLinks")
+        .withIndex("by_fromDoc", (q) => q.eq("fromDocId", legacyDoc._id))
+        .take(300),
+      ctx.db
+        .query("knowledgeLinks")
+        .withIndex("by_toDoc", (q) => q.eq("toDocId", legacyDoc._id))
+        .take(300),
+    ]);
+
+    const linkIds = Array.from(new Set([...linksFromLegacy, ...linksToLegacy].map((link) => link._id)));
+    let movedLinks = 0;
+
+    if (!dryRun) {
+      for (const linkId of linkIds) {
+        const link = await ctx.db.get(linkId);
+        if (!link) {
+          continue;
+        }
+        await ctx.db.patch(linkId, {
+          fromDocId: link.fromDocId === legacyDoc._id ? generalDoc._id : link.fromDocId,
+          toDocId: link.toDocId === legacyDoc._id ? generalDoc._id : link.toDocId,
+        });
+        movedLinks += 1;
+      }
+
+      await ctx.db.patch(legacyDoc._id, {
+        status: "archived",
+        updatedByUserId: userId,
+        updatedAt: now,
+      });
+    } else {
+      movedLinks = linkIds.length;
+    }
+
+    return {
+      dryRun,
+      mode: "merged" as const,
+      legacyFound: true,
+      generalFound: true,
+      legacyDocId: legacyDoc._id,
+      generalDocId: generalDoc._id,
+      movedItems,
+      mergedItems,
+      removedLegacyItems,
+      movedLinks,
+      archivedLegacy: !dryRun,
+    };
+  },
+});
+
 async function staleExpiredKnowledgeItems(
   ctx: MutationCtx,
   args: { asOfMs: number; maxDocs: number; maxItemsPerDoc: number },
@@ -579,7 +777,7 @@ export const getPlaybookByDomain = query({
             continue;
           }
           output.push({
-            docSlug: doc.slug,
+            docSlug: normalizeSkillSlug(doc.slug),
             key: item.key,
             content: item.content,
             confidence: item.confidence,
@@ -623,7 +821,7 @@ export const getPlannerHintsInternal = internalQuery({
             continue;
           }
           hints.push({
-            docSlug: doc.slug,
+            docSlug: normalizeSkillSlug(doc.slug),
             content: item.content,
             priority: item.priority,
           });
@@ -689,7 +887,7 @@ export const getSkillPackForChatInternal = internalQuery({
       for (const doc of docs) {
         docsById.set(doc._id, {
           _id: doc._id,
-          slug: doc.slug,
+          slug: normalizeSkillSlug(doc.slug),
           title: doc.title,
           kind: doc.kind,
           summary: doc.summary,
@@ -726,7 +924,7 @@ export const getSkillPackForChatInternal = internalQuery({
           continue;
         }
         items.push({
-          docSlug: doc.slug,
+          docSlug: normalizeSkillSlug(doc.slug),
           key: item.key,
           content: item.content,
           confidence: item.confidence,
@@ -769,14 +967,29 @@ export const getSkillCatalogForChatInternal = internalQuery({
       .order("desc")
       .take(40);
 
-    const availableSkills = docs
-      .filter((doc) => doc.kind === "skills" || doc.kind === "flights" || doc.kind === "train" || doc.kind === "concert")
-      .map((doc) => ({
-        slug: normalizeSkillSlug(doc.slug),
-        kind: doc.kind,
-        title: doc.title,
-        summary: doc.summary,
-      }));
+    const availableSkillsBySlug = new Map<string, {
+      slug: string;
+      kind: "skills" | "flights" | "train" | "concert";
+      title: string;
+      summary?: string;
+    }>();
+
+    for (const doc of docs) {
+      if (doc.kind !== "skills" && doc.kind !== "flights" && doc.kind !== "train" && doc.kind !== "concert") {
+        continue;
+      }
+      const slug = normalizeSkillSlug(doc.slug);
+      if (!availableSkillsBySlug.has(slug)) {
+        availableSkillsBySlug.set(slug, {
+          slug,
+          kind: doc.kind,
+          title: doc.title,
+          summary: doc.summary,
+        });
+      }
+    }
+
+    const availableSkills = Array.from(availableSkillsBySlug.values());
 
     const maxGeneralHints = Math.max(1, Math.min(args.maxGeneralHints ?? 8, 20));
     const skillsDocs = availableSkills.filter((doc) => doc.kind === "skills");
@@ -832,14 +1045,34 @@ export const getSkillPackBySlugsInternal = internalQuery({
     const digestParts: string[] = [];
 
     for (const slug of slugs) {
-      const doc = await ctx.db
-        .query("knowledgeDocs")
-        .withIndex("by_slug", (q) => q.eq("slug", slug))
-        .unique();
+      const slugCandidates = resolveSkillSlugCandidates(slug);
+      let doc: {
+        _id: KnowledgeDocId;
+        slug: string;
+        status: "draft" | "active" | "archived";
+      } | null = null;
+
+      for (const candidate of slugCandidates) {
+        const found = await ctx.db
+          .query("knowledgeDocs")
+          .withIndex("by_slug", (q) => q.eq("slug", candidate))
+          .unique();
+        if (found && found.status === "active") {
+          doc = {
+            _id: found._id,
+            slug: found.slug,
+            status: found.status,
+          };
+          break;
+        }
+      }
+
       if (!doc || doc.status !== "active") {
         continue;
       }
-      selectedSkills.push(slug);
+
+      const canonicalSlug = normalizeSkillSlug(doc.slug);
+      selectedSkills.push(canonicalSlug);
 
       const items = await ctx.db
         .query("knowledgeItems")
@@ -851,9 +1084,9 @@ export const getSkillPackBySlugsInternal = internalQuery({
         if (item.expiresAt && item.expiresAt < args.asOfMs) {
           continue;
         }
-        const text = `[${slug}] ${item.content}`;
+        const text = `[${canonicalSlug}] ${item.content}`;
         hints.push({ text, priority: item.priority });
-        digestParts.push(`${slug}:${item.key}:${item.updatedAt}`);
+        digestParts.push(`${canonicalSlug}:${item.key}:${item.updatedAt}`);
       }
     }
 

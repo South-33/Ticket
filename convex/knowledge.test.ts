@@ -163,13 +163,13 @@ describe("knowledge curation", () => {
     expect(stalePage.page).toHaveLength(1);
   });
 
-  test("builds chat skill pack from skills plus domain playbooks", async () => {
+  test("builds chat skill pack from general plus domain playbooks", async () => {
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const now = Date.now();
 
     const skillsDocId = await t.mutation(api.knowledge.upsertKnowledgeDoc, {
-      slug: "skills",
-      title: "Global Skills",
+      slug: "general",
+      title: "General Playbook",
       kind: "skills",
       status: "active",
       summary: "global guidance",
@@ -219,11 +219,141 @@ describe("knowledge curation", () => {
     });
 
     expect(pack.domain).toBe("flight");
-    expect(pack.docs.some((doc) => doc.slug === "skills")).toBe(true);
+    expect(pack.docs.some((doc) => doc.slug === "general")).toBe(true);
     expect(pack.docs.some((doc) => doc.slug === "flights")).toBe(true);
     expect(pack.items.some((item) => item.key === "fare-family-check")).toBe(true);
     expect(pack.items.some((item) => item.key === "global-checklist")).toBe(true);
     expect(pack.items.some((item) => item.key === "expired-item")).toBe(false);
     expect(pack.items[0]?.priority).toBeGreaterThanOrEqual(pack.items[1]?.priority ?? 0);
+  });
+
+  test("migrates legacy skills slug to general when general is missing", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+
+    const legacyDocId = await t.mutation(api.knowledge.upsertKnowledgeDoc, {
+      slug: "skills",
+      title: "Legacy Skills",
+      kind: "skills",
+      status: "active",
+      summary: "legacy",
+    });
+
+    const preview = await t.mutation(api.knowledge.migrateLegacySkillsSlugToGeneral, {
+      dryRun: true,
+    });
+    const result = await t.mutation(api.knowledge.migrateLegacySkillsSlugToGeneral, {});
+
+    const docs = await t.query(api.knowledge.listKnowledgeDocs, {
+      kind: "skills",
+      status: "active",
+      paginationOpts: {
+        numItems: 20,
+        cursor: null,
+      },
+    });
+
+    expect(preview.mode).toBe("renamed");
+    expect(result.mode).toBe("renamed");
+    expect(result.legacyDocId).toBe(legacyDocId);
+    expect(docs.page.some((doc) => doc.slug === "general")).toBe(true);
+    expect(docs.page.some((doc) => doc.slug === "skills")).toBe(false);
+  });
+
+  test("merges legacy skills doc into general and archives legacy", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+
+    const generalDocId = await t.mutation(api.knowledge.upsertKnowledgeDoc, {
+      slug: "general",
+      title: "General",
+      kind: "skills",
+      status: "active",
+      summary: "general",
+    });
+    const legacyDocId = await t.mutation(api.knowledge.upsertKnowledgeDoc, {
+      slug: "skills",
+      title: "Legacy Skills",
+      kind: "skills",
+      status: "active",
+      summary: "legacy",
+    });
+    const flightsDocId = await t.mutation(api.knowledge.upsertKnowledgeDoc, {
+      slug: "flights",
+      title: "Flights",
+      kind: "flights",
+      status: "active",
+      summary: "flights",
+    });
+
+    await t.mutation(api.knowledge.addKnowledgeItem, {
+      docId: generalDocId,
+      key: "shared-rule",
+      content: "General existing content",
+      confidence: 0.7,
+      priority: 60,
+      status: "active",
+      sourceUrls: ["https://example.com/g1", "https://example.com/g2"],
+    });
+
+    await t.mutation(api.knowledge.addKnowledgeItem, {
+      docId: legacyDocId,
+      key: "legacy-only-rule",
+      content: "Legacy-only item content",
+      confidence: 0.8,
+      priority: 66,
+      status: "active",
+      sourceUrls: ["https://example.com/l1", "https://example.com/l2"],
+    });
+    await t.mutation(api.knowledge.addKnowledgeItem, {
+      docId: legacyDocId,
+      key: "shared-rule",
+      content: "Legacy newer shared content",
+      confidence: 0.9,
+      priority: 82,
+      status: "active",
+      sourceUrls: ["https://example.com/l3", "https://example.com/l4"],
+    });
+
+    await t.mutation(api.knowledge.linkKnowledgeDocs, {
+      fromDocId: legacyDocId,
+      toDocId: flightsDocId,
+      label: "legacy-to-flights",
+    });
+
+    const result = await t.mutation(api.knowledge.migrateLegacySkillsSlugToGeneral, {});
+
+    const generalItems = await t.query(api.knowledge.listKnowledgeItemsByDoc, {
+      docId: generalDocId,
+      paginationOpts: {
+        numItems: 20,
+        cursor: null,
+      },
+    });
+    const legacyItems = await t.query(api.knowledge.listKnowledgeItemsByDoc, {
+      docId: legacyDocId,
+      paginationOpts: {
+        numItems: 20,
+        cursor: null,
+      },
+    });
+    const links = await t.query(api.knowledge.listKnowledgeLinksByDoc, {
+      docId: generalDocId,
+    });
+
+    const legacyDoc = await t.run(async (ctx) => {
+      return await ctx.db.get(legacyDocId);
+    });
+    const mergedShared = generalItems.page.find((item) => item.key === "shared-rule");
+
+    expect(result.mode).toBe("merged");
+    expect(result.movedItems).toBe(1);
+    expect(result.mergedItems).toBe(1);
+    expect(result.archivedLegacy).toBe(true);
+    expect(legacyDoc?.status).toBe("archived");
+    expect(legacyItems.page).toHaveLength(0);
+    expect(generalItems.page.some((item) => item.key === "legacy-only-rule")).toBe(true);
+    expect(["General existing content", "Legacy newer shared content"]).toContain(mergedShared?.content);
+    expect(mergedShared?.priority).toBe(82);
+    expect(mergedShared?.sourceUrls.length).toBe(4);
+    expect(links.some((link) => link.label === "legacy-to-flights")).toBe(true);
   });
 });

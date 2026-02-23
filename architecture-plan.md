@@ -18,7 +18,7 @@ This plan is optimized for the current stack: Next.js + Convex + TypeScript + Ge
 
 Use markdown as a human-facing layer, with Convex tables as source of truth.
 
-- `skills.md` (global index)
+- `general.md` (global index, published as `general` knowledge doc; legacy `skills` alias accepted)
   - General strategy playbook
   - References domain playbooks (`flights.md`, `train.md`, `concert.md`)
 - `flights.md`, `train.md`, `concert.md` (global domain playbooks)
@@ -57,7 +57,7 @@ Why this approach:
 
 ### 3.4 Knowledge Layer
 
-- Curated playbook storage (`skills` + domain docs)
+- Curated playbook storage (`general` + domain docs)
 - Retrieval and injection into planning stage
 - Confidence and expiration metadata per knowledge item
 
@@ -126,11 +126,11 @@ Improve for this product:
 ## 6.3 Knowledge tables
 
 - `knowledgeDocs`
-  - `skills`, `flights`, `train`, `concert`
+  - `general` (legacy alias: `skills`), `flights`, `train`, `concert`
 - `knowledgeItems`
   - Individual tactics/heuristics with source and confidence
 - `knowledgeLinks`
-  - Cross-doc links (e.g., `skills` -> `flights`)
+  - Cross-doc links (e.g., `general` -> `flights`)
 
 ## 6.4 Essential indexes
 
@@ -247,7 +247,7 @@ Target direction (locked):
 
 ## 12) Knowledge Curation Workflow
 
-For `skills.md` and domain playbooks:
+For `general.md` and domain playbooks:
 
 1. Ingest candidate tips from trusted and community sources
 2. Extract and normalize heuristic candidates
@@ -329,7 +329,7 @@ Evaluate with fixed benchmark scenarios per domain:
 
 ### Phase 3: Knowledge System
 
-- `skills.md` + `flights.md` curation and retrieval injection
+- `general.md` + `flights.md` curation and retrieval injection
 - Runtime use of curated heuristics in planning and ranking
 
 ### Phase 4: Multi-Domain Expansion
@@ -349,14 +349,14 @@ Evaluate with fixed benchmark scenarios per domain:
 - Memory persists correctly across sessions
 - Deep research job executes asynchronously with realtime progress
 - Top ranked options include evidence and freshness metadata
-- `skills.md` and one domain playbook (`flights.md`) influence output
+- `general.md` and one domain playbook (`flights.md`) influence output
 - Core metrics visible in dashboard/logs
 
 ## 17) Immediate Next Steps
 
 1. Implement schema for memory/jobs/knowledge/candidates
 2. Implement minimal function surface (`submitPrompt`, planner, executor, synthesizer)
-3. Implement `skills` + `flights` knowledge retrieval in planner
+3. Implement `general` + `flights` knowledge retrieval in planner
 4. Ship one end-to-end flight flow before adding train/concert
 
 ## 18) Convex Constraints and Reliability Rules
@@ -702,6 +702,7 @@ Rules:
 - Temporary findings must always be labeled `experimental` unless promoted.
 - Temporary findings can expand search, but cannot outrank verified options without route-level revalidation in the current run.
 - If temporary and verified guidance conflict, verified guidance wins by default.
+- Grey-tactics consent defaults to thread scope; only persist beyond thread when user explicitly asks to remember it.
 
 ### 26.6 Auto-promotion and auto-demotion policy
 

@@ -33,6 +33,8 @@ const TITLE_MIN_CHARS = 6;
 const TITLE_MAX_WORDS = 10;
 const MAX_ENVELOPE_REPAIR_ATTEMPTS = 2;
 const ASSISTANT_CONTRACT_VERSION = "2026-02-23.v1";
+const GENERAL_SKILL_SLUG = "general";
+const LEGACY_GENERAL_SKILL_SLUG = "skills";
 
 const memoryOpSchema = z.object({
   action: z.enum(["add", "update", "delete", "noop"]),
@@ -543,7 +545,7 @@ function buildSystemPrompt(args: {
     "MemoryOps JSON objects use:",
     "{\"action\":\"add|update|delete|noop\",\"store\":\"fact|preference|profile\",\"key\":\"...\",\"value\":\"...\",\"confidence\":0..1,\"reason\":\"...\",\"sensitive\":true|false}",
     "ResearchOps JSON uses:",
-    "- start: {\"action\":\"start\",\"domain\":\"flight|train|concert|mixed|general\",\"selectedSkills\":[\"skills\",\"flights\"],\"criteria\":[{\"key\":\"origin\",\"value\":\"MNL\"}]}.",
+    "- start: {\"action\":\"start\",\"domain\":\"flight|train|concert|mixed|general\",\"selectedSkills\":[\"general\",\"flights\"],\"criteria\":[{\"key\":\"origin\",\"value\":\"MNL\"}]}.",
     "",
     "Rules:",
     "- Be conservative with deletes. Delete only when user explicitly corrects/removes something or a fact is clearly wrong.",
@@ -570,7 +572,11 @@ function normalizeSlotKey(value: string) {
 }
 
 function normalizeSkillSlug(value: string) {
-  return value.trim().toLowerCase();
+  const normalized = value.trim().toLowerCase();
+  if (normalized === LEGACY_GENERAL_SKILL_SLUG) {
+    return GENERAL_SKILL_SLUG;
+  }
+  return normalized;
 }
 
 function normalizeClarificationKey(value: string) {
@@ -1326,7 +1332,15 @@ export const generateReplyInternal = internalAction({
       }
 
       if (envelope.researchOps.action === "start") {
-        const selectedSkills = Array.from(new Set(envelope.researchOps.selectedSkills.map(normalizeSkillSlug)));
+        const availableSkillSlugs = new Set(skillCatalog.availableSkills.map((skill) => normalizeSkillSlug(skill.slug)));
+        const selectedSkillSet = new Set(envelope.researchOps.selectedSkills.map(normalizeSkillSlug));
+        if (availableSkillSlugs.has(GENERAL_SKILL_SLUG)) {
+          selectedSkillSet.add(GENERAL_SKILL_SLUG);
+        }
+        const selectedSkills = [
+          ...(selectedSkillSet.has(GENERAL_SKILL_SLUG) ? [GENERAL_SKILL_SLUG] : []),
+          ...Array.from(selectedSkillSet).filter((skill) => skill !== GENERAL_SKILL_SLUG),
+        ];
         const skillPack = await ctx.runQuery(internal.knowledge.getSkillPackBySlugsInternal, {
           skillSlugs: selectedSkills,
           asOfMs: Date.now(),
