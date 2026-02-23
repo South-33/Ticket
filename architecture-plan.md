@@ -1,5 +1,7 @@
 # Architecture Plan
 
+This is a living source-of-truth document. Keep implementation status updated with checklist items so future conversations can resume without rediscovery.
+
 ## 1) Product Goal
 
 Build a conversational travel and ticket research agent that:
@@ -238,6 +240,11 @@ Implementation notes (current):
 - Knowledge curation now has authenticated admin surfaces for docs/items/links, maintenance to stale expired tactics, and markdown regeneration query output
 - Optional editor allowlist via `KNOWLEDGE_EDITOR_IDS` controls knowledge write access when configured
 
+Target direction (locked):
+
+- Final candidate ranking should become LLM-led (domain + skill steered), with code-level guardrails for validation/recovery/safety.
+- Deterministic weighted ranking remains as a temporary fallback path until LLM ranking verifier gates are complete.
+
 ## 12) Knowledge Curation Workflow
 
 For `skills.md` and domain playbooks:
@@ -285,7 +292,7 @@ Implementation notes (current):
 - Chat reply generation now uses a single-pass envelope (`<Response>`, `<MemoryOps>`, `<ResearchOps>`, `<TitleOps>`, `<MemoryNote>`) so one model call can return user reply plus structured memory/research/title updates.
 - Thread title updates now come directly from the same single-pass model output with backend validation/repair rules (no cooldown/quality heuristic gate).
 - Malformed envelope outputs now trigger an automatic repair loop (up to 2 retries) with explicit validation feedback before falling back to safe no-op memory/title ops.
-- Envelope protocol now requires explicit `ContractVersion` (`2026-02-23.v1`) and logs validation attempts/errors to `assistantEnvelopeValidationEvents` for telemetry.
+- Envelope protocol validates optional `ContractVersion` (`2026-02-23.v1` when present) and logs validation attempts/errors to `assistantEnvelopeValidationEvents` for telemetry.
 - Memory operation application now records per-op audits (`applied`/`skipped` + reason + confidence) in `memoryOpAuditEvents` and surfaces recent activity in account settings.
 - Chat now injects a skill catalog (available skill slugs + general guidance) and the model decides whether to emit `ResearchOps.start`.
 - `ResearchOps.start` is semantically validated before apply (required domain criteria + at least one valid selected skill slug).
@@ -518,3 +525,112 @@ Default page-size policy:
   - This is a forward-compat and safety requirement (lint-enforce it)
 - Paginated pages are reactive and may grow/shrink between fetches
   - Client UI must tolerate item count shifts as live data changes
+
+## 25) LLM-Led Research Pipeline Plan and Status (Authoritative)
+
+When this section conflicts with older sections, this section wins.
+
+### 25.1 Locked product decisions
+
+- [x] Research start is model-driven: jobs start/resume only from valid `ResearchOps.start`.
+- [x] Domain and selected skills steer runs; runs pin selected skill guidance snapshot for stability.
+- [x] Researcher and chatbot are distinct actors (chatbot mediates all user interaction).
+- [x] User sees runtime trace in an expandable panel/pop-up style UI (with key milestones in chat).
+- [x] Clarification batching is allowed and should stay concise (max 3 fields per ask).
+- [x] Target quality model is LLM-led end-to-end (planning, analysis, synthesis, ranking), with code as guardrails.
+- [x] Chat output contract is response-first with optional tool tags; model should emit only tools it intends to run.
+- [x] Research should iterate in checkpointed rounds with quality-gated continuation, not full restarts by default.
+- [x] Working LLM context should be selective and compact; raw retrieval is stored but only promoted evidence is carried forward.
+
+### 25.2 Current status snapshot
+
+- [x] Single-pass chat envelope supports `Response`, `MemoryOps`, `ResearchOps`, `TitleOps`, `MemoryNote`.
+- [x] Chat validation supports optional tool tags (missing tool tags default to no-op behavior).
+- [x] `sendPrompt` no longer performs heuristic research start/resume.
+- [x] `ResearchOps.start` semantic validation exists (required criteria + at least one valid skill).
+- [x] Skill catalog + selected-skill resolution exists; run-pinned snapshots persist on jobs (`selectedSkillSlugs`, `skillHintsSnapshot`, `skillPackDigest`).
+- [x] Job reliability controls exist (lease lock, retries, stage events, retry scheduling).
+- [x] Memory safeguards and audit trails exist.
+- [ ] LLM planner/executor/synthesizer runtime is not complete yet (current execution is still largely deterministic retrieval/scoring).
+- [ ] LLM-led final ranking is not complete yet (deterministic ranker still active primary path).
+- [ ] Researcher-to-chatbot clarification tooling and pause/resume handshake is not complete yet.
+- [ ] User-visible actor-level trace (researcher <-> chatbot conversation timeline) is not complete yet.
+
+### 25.3 Target runtime flow (end state)
+
+1. User sends prompt.
+2. Chat model responds with envelope + optional `ResearchOps.start`.
+3. Backend validates schema/semantics; if valid, create/resume research job.
+4. Research planner LLM generates branch plan (subqueries/objectives/checks) using domain + skills + criteria + memory.
+5. Retrieval/extraction runs in parallel for branches with bounded concurrency.
+6. Branch analyst LLM produces evidence-grounded findings with source-linked citations.
+7. If blocking unknowns are found, researcher calls clarification tool; job pauses `awaiting_input`.
+8. Chatbot asks user concise batched clarification question(s); user replies; answer is normalized/validated.
+9. Research auto-resumes from checkpoint with clarified inputs.
+10. Synthesizer LLM produces normalized options and rationale.
+11. Ranking LLM selects/prioritizes `cheapest`, `best value`, `most convenient` with constraints/caveats.
+12. Verifier guardrails enforce citation integrity, freshness, and safety before final response.
+13. Quality assessor decides one of three outcomes: finalize, request clarification, or continue another targeted round.
+14. Continuation round uses delta-planning on unresolved gaps and promoted evidence only (no full reset unless explicit recovery path is triggered).
+15. Loop exits with explicit termination reason (`quality_met`, `needs_user_input`, `budget_limit`, `diminishing_returns`, `failed`).
+
+### 25.3.1 Iteration and context budget rules
+
+- Store full raw search/extraction artifacts in runtime tables for traceability.
+- Promote only high-signal evidence into branch working context (relevance, freshness, novelty, citation quality).
+- Build compact branch summaries first, then promote only resolved key points + unresolved gaps to global synthesis context.
+- Prefer selective context promotion over token-heavy transcript stuffing.
+- On continuation rounds, search only for missing/weakly-supported claims instead of repeating broad queries.
+
+### 25.4 Implementation checklist (build order)
+
+#### A) Contracts and schemas
+
+- [ ] Add stage schemas for planner output, branch findings, synthesis output, and ranking output.
+- [ ] Add strict semantic validators for each stage output.
+- [ ] Add bounded repair loops per stage (with structured feedback).
+
+#### B) Dual-actor dialogue bus
+
+- [ ] Add `researchDialogueEvents` (or equivalent) with actor/type/payload schema.
+- [ ] Persist actor events for `researcher`, `chatbot`, `system`, `user`.
+- [ ] Expose paginated query API for UI timeline.
+
+#### C) Clarification tool (HITL)
+
+- [ ] Add `requestUserClarificationInternal` mutation with batched fields (`<= 3`).
+- [ ] Add clarification request storage with status lifecycle (`pending`, `answered`, `expired`, `cancelled`).
+- [ ] Add answer ingestion + normalization + validation path from chatbot user replies.
+- [ ] Auto-resume paused jobs after valid clarification answers.
+
+#### D) LLM research runtime
+
+- [ ] Implement planner stage action using selected skills + domain adapters.
+- [ ] Implement branch analyzer stage with citation-bound findings.
+- [ ] Implement synthesizer stage to produce normalized candidate set.
+- [ ] Implement LLM ranking stage (domain/skill aware) for final prioritization.
+- [ ] Implement quality assessor stage with explicit continue/clarify/finalize decision output.
+- [ ] Keep deterministic ranker as fallback until verifier gates are stable.
+
+#### E) Guardrails and verification
+
+- [ ] Enforce claim-to-citation integrity (all claims map to collected source IDs).
+- [ ] Enforce required-criteria completeness before synthesis/finalization.
+- [ ] Add contradiction/uncertainty checks and downgrade or pause when confidence is low.
+- [ ] Add context budgeter and evidence promotion rules for each stage handoff.
+- [ ] Keep retry/lease/idempotency protections for all new stages.
+
+#### F) UX and observability
+
+- [ ] Render expandable research trace panel showing actor timeline and stage transitions.
+- [ ] Surface clarification pauses clearly with required fields and resume status.
+- [ ] Add stage metrics: latency, retries, branch success rate, citation coverage, and cost.
+- [ ] Add downloadable/debuggable trace suitable for regression triage.
+
+#### G) Rollout and quality gates
+
+- [ ] Add benchmark scenarios per domain and skill mix (accuracy/freshness/actionability/cost/latency).
+- [ ] Add regression tests for pause/resume clarification loop and envelope-stage repair behavior.
+- [ ] Add fixed pass/fail thresholds (citation coverage, contradiction rate, clarification completion, latency/cost budgets).
+- [ ] Ship behind feature flag (`llm_research_pipeline_v1`) with safe fallback path.
+- [ ] Promote to default only after quality gates pass on benchmark suite.

@@ -1,6 +1,6 @@
 # Tool Contract Map
 
-This project currently uses a single-pass tagged envelope from the model. In one response, the model returns user text plus structured operations.
+This project uses a single-pass response contract where the model always returns user text and can optionally append only the tool tags it wants to execute.
 
 ## How many tools?
 
@@ -8,22 +8,31 @@ This project currently uses a single-pass tagged envelope from the model. In one
   - `MemoryOps`
   - `ResearchOps`
   - `TitleOps`
-- Non-executable envelope fields: **3**
-  - `ContractVersion` (protocol gate)
-  - `Response` (user-facing output)
-  - `MemoryNote` (UI transparency note)
+- Non-executable fields: **3**
+  - `Response` (required user-facing output)
+  - `MemoryNote` (optional UI transparency note)
+  - `ContractVersion` (optional compatibility tag)
 
 ## Envelope format
 
-The model must output exactly:
+The model must output:
+
+```text
+<required plain response text>
+<optional tool tags only when used>
+```
+
+Optional tagged output examples:
 
 ```xml
-<ContractVersion>2026-02-23.v1</ContractVersion>
-<Response>...</Response>
-<MemoryOps>[...]</MemoryOps>
-<ResearchOps>{"action":"noop"}</ResearchOps>
-<TitleOps>{"action":"rename","title":"..."}</TitleOps>
-<MemoryNote>...</MemoryNote>
+I found strong options for this route. I can start deep research now.
+<ResearchOps>{"action":"start","domain":"flight","selectedSkills":["skills","flights"],"criteria":[{"key":"origin","value":"MNL"},{"key":"destination","value":"FRA"},{"key":"departureDate","value":"2026-08-11"},{"key":"budget","value":"900"},{"key":"nationality","value":"Filipino"}]}</ResearchOps>
+```
+
+```xml
+Got it — I saved your preference for nonstop flights.
+<MemoryOps>[{"action":"add","store":"preference","key":"flightStops","value":"nonstop","confidence":0.93,"reason":"User preference"}]</MemoryOps>
+<MemoryNote>Saved your nonstop preference.</MemoryNote>
 ```
 
 ## Tool details
@@ -98,12 +107,12 @@ Validation status:
 ### ContractVersion
 
 - Tag: `<ContractVersion>`
-- Required exact value: `2026-02-23.v1`
-- Purpose: enforce protocol compatibility when prompt/schema changes.
+- Optional exact value when present: `2026-02-23.v1`
+- Purpose: compatibility signaling when prompt/schema changes.
 
 Validation status:
 
-- Version mismatch detection: **Yes**
+- Version mismatch detection when present: **Yes**
 - Repair loop feedback on mismatch: **Yes**
 - Validation telemetry persisted: **Yes** (`assistantEnvelopeValidationEvents`)
 

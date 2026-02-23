@@ -11,6 +11,10 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - Keep `tools.md` up to date whenever tool contracts/channels/schema change (add/remove/rename tools, validation loops, or apply behavior), so new agents can immediately see the current tool map.
 - Canonical playbook markdown scaffolds live under `playbooks/` (`skills.md`, `flights.md`, `train.md`, `concert.md`); curate there first, then publish active items into Convex knowledge docs for runtime injection.
 - Chat intake (`sendPrompt`) no longer starts/resumes research heuristically; research jobs now start only when `generateReplyInternal` emits valid `ResearchOps.start` with required criteria and at least one selected skill.
+- Product direction: researcher and chatbot are distinct actors; researcher can request user clarifications mid-run, chatbot mediates user interaction, and the user-facing UI should expose this runtime trace clearly (expandable panel/pop-up style is preferred).
+- Product direction: research quality should be LLM-led end-to-end (planning, analysis, synthesis, and ranking), while code-level logic primarily enforces safety guardrails, validation loops, and recovery behavior.
+- Chat model output contract: user-facing response text is always required; tool tags are optional and should be emitted only when the model intends to run that tool.
+- Research loop direction: use iterative, checkpointed rounds with quality-gated continuation (no full restart by default) and selective context promotion from raw sources.
 
 ## Reference Docs
 - Convex best practices: https://docs.convex.dev/understanding/best-practices
@@ -20,6 +24,12 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - Convex query functions: https://docs.convex.dev/functions/query-functions
 - AI SDK tool calling docs: https://sdk.vercel.ai/docs/ai-sdk-core/tools-and-tool-calling
 - Clerk UserProfile customization (custom pages/tabs): https://clerk.com/docs/nextjs/guides/customizing-clerk/adding-items/user-profile
+- GPT Researcher docs (official welcome): https://docs.gptr.dev/docs/welcome
+- GPT Researcher architecture intro: https://docs.gptr.dev/docs/gpt-researcher/getting-started/introduction
+- GPT Researcher deep research flow: https://docs.gptr.dev/docs/gpt-researcher/gptr/deep_research
+- GPT Researcher logs/observability: https://docs.gptr.dev/docs/gpt-researcher/handling-logs/all-about-logs
+- GPT Researcher retriever options: https://docs.gptr.dev/docs/gpt-researcher/search-engines/search-engines
+- GPT Researcher tailored research/context controls: https://docs.gptr.dev/docs/gpt-researcher/context/tailored-research
 
 ## Supplemental Reading (Non-Authoritative)
 - Advanced tool calling deep dive: https://sparkco.ai/blog/advanced-tool-calling-in-llm-agents-a-deep-dive

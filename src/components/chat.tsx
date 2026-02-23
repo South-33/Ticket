@@ -1093,6 +1093,7 @@ function stripAssistantEnvelope(raw: string) {
     .replace(/<ContractVersion>[\s\S]*?<\/ContractVersion>/gi, "")
     .replace(/<Response>[\s\S]*?<\/Response>/gi, "")
     .replace(/<MemoryOps>[\s\S]*?<\/MemoryOps>/gi, "")
+    .replace(/<ResearchOps>[\s\S]*?<\/ResearchOps>/gi, "")
     .replace(/<TitleOps>[\s\S]*?<\/TitleOps>/gi, "")
     .replace(/<MemoryNote>[\s\S]*?<\/MemoryNote>/gi, "")
     .trim();
