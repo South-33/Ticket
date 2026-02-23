@@ -20,6 +20,7 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - CI/preview quirk: avoid placeholder Clerk publishable keys (for example `pk_test_ci_placeholder`) because Next.js prerender can fail in auth-wrapped layouts; treat invalid/placeholder keys as unconfigured.
 - Clarification plumbing is in place (`requestUserClarificationInternal`, `submitClarificationAnswerInternal`, pending-request query), and chat now handles pending clarification answers then re-queues research automatically.
 - Current flight runtime behavior: if scan quality remains weak on numeric fare evidence and `flexibilityLevel` is missing (with core route/date present), research can pause and request a date-flexibility clarification before synthesis.
+- Planner runtime now includes an LLM planner contract with schema validation + repair attempts; if model output is invalid/unavailable, the pipeline falls back to a deterministic planner strategy instead of failing the run.
 
 ## Reference Docs
 - Convex best practices: https://docs.convex.dev/understanding/best-practices

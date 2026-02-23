@@ -556,6 +556,7 @@ When this section conflicts with older sections, this section wins.
 - [x] Clarification request lifecycle primitives exist (`requestUserClarificationInternal`, `submitClarificationAnswerInternal`, pending request query) with persisted request/answer records.
 - [x] Chat now consumes pending clarification requests, accepts user answers, and re-queues research automatically.
 - [x] Flight scan now quality-gates into clarification when numeric fare evidence remains thin and `flexibilityLevel` is missing.
+- [x] Planner stage now supports an LLM planner contract (structured JSON + repair attempts) with deterministic fallback when model output is unavailable/invalid.
 - [ ] LLM planner/executor/synthesizer runtime is not complete yet (current execution is still largely deterministic retrieval/scoring).
 - [ ] LLM-led final ranking is not complete yet (deterministic ranker still active primary path).
 - [ ] Researcher-to-chatbot clarification tooling and pause/resume handshake is not complete yet.
@@ -610,7 +611,7 @@ When this section conflicts with older sections, this section wins.
 
 #### D) LLM research runtime
 
-- [ ] Implement planner stage action using selected skills + domain adapters.
+- [x] Implement planner stage action using selected skills + domain adapters.
 - [ ] Implement branch analyzer stage with citation-bound findings.
 - [ ] Implement synthesizer stage to produce normalized candidate set.
 - [ ] Implement LLM ranking stage (domain/skill aware) for final prioritization.

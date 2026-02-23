@@ -1223,6 +1223,97 @@ describe("research pipeline", () => {
     }
   });
 
+  test("uses planner fallback strategy when model key is unavailable", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const threadId = "thread-planner-fallback";
+    const priorGoogleKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+    const priorTavilyKey = process.env.TAVILY_API_KEY;
+    delete process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+    process.env.TAVILY_API_KEY = "test-tavily-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("api.tavily.com/search")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  title: "Fallback planner source",
+                  url: "https://example.com/fallback-planner",
+                  content: "Fare from $420 direct 11h 10m with one carry-on.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        if (url.includes("api.tavily.com/extract")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  url: "https://example.com/fallback-planner",
+                  raw_content: "Official fare from $420 direct 11h 10m baggage included.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          json: async () => ({}),
+        } as Response;
+      }),
+    );
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const findings = await t.query(api.research.listFindingsByJob, {
+        researchJobId,
+        paginationOpts: {
+          numItems: 20,
+          cursor: null,
+        },
+      });
+      const dialogue = await t.query(api.research.listDialogueEventsByJob, {
+        researchJobId,
+        paginationOpts: {
+          numItems: 10,
+          cursor: null,
+        },
+      });
+
+      expect(findings.page.some((item) => item.title === "Planner fallback strategy used")).toBe(true);
+      expect(
+        dialogue.page.some((event) => event.kind === "plan" && event.message.toLowerCase().includes("fallback")),
+      ).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      if (priorGoogleKey === undefined) {
+        delete process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+      } else {
+        process.env.GOOGLE_GENERATIVE_AI_API_KEY = priorGoogleKey;
+      }
+      if (priorTavilyKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorTavilyKey;
+      }
+    }
+  });
+
   test("paginates tasks and findings by job", async () => {
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-task-finding-pagination";

@@ -1,4 +1,7 @@
 import { ConvexError, v } from "convex/values";
+import { google } from "@ai-sdk/google";
+import { generateText } from "ai";
+import { z } from "zod";
 import { internal } from "./_generated/api";
 import type { Id } from "./_generated/dataModel";
 import {
@@ -37,6 +40,26 @@ const JOB_LEASE_DURATION_MS = 9 * 60 * 1000;
 const MAX_RESEARCH_SCAN_ROUNDS = 2;
 const MAX_PROMOTED_CONTEXT_SOURCES = 4;
 const QUALITY_CONTINUE_THRESHOLD = 0.66;
+const MAX_PLANNER_REPAIR_ATTEMPTS = 2;
+
+const plannerEvidenceFocusValues = [
+  "price_total",
+  "duration",
+  "transfers",
+  "baggage",
+  "fare_rules",
+  "freshness",
+  "booking_path",
+] as const;
+
+const plannerOutputSchema = z.object({
+  strategy: z.string().min(12).max(400),
+  primaryQuery: z.string().min(6).max(220),
+  fallbackQuery: z.string().min(6).max(220).optional(),
+  subqueries: z.array(z.string().min(6).max(220)).min(1).max(5),
+  evidenceFocus: z.array(z.enum(plannerEvidenceFocusValues)).min(1).max(6),
+  qualityGate: z.string().min(12).max(300),
+});
 
 type ResearchJobStatus =
   | "draft"
@@ -69,6 +92,14 @@ type CandidateDraft = {
   recheckAfter: number;
   primarySourceUrl?: string;
   sourceUrls: string[];
+};
+
+type PlannerOutput = z.infer<typeof plannerOutputSchema>;
+
+type PlannerPlanResult = {
+  plan: PlannerOutput;
+  mode: "llm" | "fallback";
+  validationErrors: string[];
 };
 
 type ResearchStartResult = {
@@ -922,6 +953,154 @@ function buildPromptWithCriteria(prompt: string, criteria: Record<string, string
 
   const criteriaLines = entries.map(([key, value]) => `${key}: ${value}`).join("\n");
   return `${prompt}\n\nResearch criteria:\n${criteriaLines}`;
+}
+
+function compactText(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function extractJsonFromModelOutput(raw: string) {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenced?.[1]) {
+    return fenced[1].trim();
+  }
+
+  const firstBrace = raw.indexOf("{");
+  const lastBrace = raw.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    return raw.slice(firstBrace, lastBrace + 1).trim();
+  }
+
+  return raw.trim();
+}
+
+function parsePlannerOutput(raw: string) {
+  try {
+    const parsed = JSON.parse(extractJsonFromModelOutput(raw));
+    const result = plannerOutputSchema.safeParse(parsed);
+    if (result.success) {
+      return { plan: result.data, errors: [] as string[] };
+    }
+    return {
+      plan: null,
+      errors: result.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`),
+    };
+  } catch (error) {
+    return {
+      plan: null,
+      errors: [`planner_json_parse_error: ${errorMessage(error)}`],
+    };
+  }
+}
+
+function buildDeterministicPlannerOutput(args: {
+  prompt: string;
+  domain: ResearchDomain;
+  plannerHints: string[];
+  constraintSummary?: string;
+}): PlannerOutput {
+  const primaryQuery = buildSearchQuery(args.prompt, args.domain);
+  const fallbackQuery = `${primaryQuery} official fares baggage rules`.slice(0, 220);
+  const hintSubqueries = args.plannerHints
+    .slice(0, 2)
+    .map((hint) => `${primaryQuery} ${compactText(hint).slice(0, 80)}`.slice(0, 220));
+  const subqueries = Array.from(new Set([primaryQuery, ...hintSubqueries])).slice(0, 4);
+
+  return {
+    strategy: "Deterministic fallback plan: start with route-constrained query and add verification-focused expansions.",
+    primaryQuery,
+    fallbackQuery,
+    subqueries,
+    evidenceFocus: ["price_total", "duration", "transfers", "fare_rules", "freshness"],
+    qualityGate:
+      "Continue one targeted round when numeric fare evidence is weak; request clarification when required user criteria can unlock better coverage.",
+  };
+}
+
+function buildPlannerPrompt(args: {
+  prompt: string;
+  domain: ResearchDomain;
+  constraintSummary?: string;
+  plannerHints: string[];
+}) {
+  return [
+    "You are the research planner for a travel deep-research pipeline.",
+    "Return only JSON matching the schema.",
+    "Plan should be concise, query-focused, and evidence-first.",
+    "",
+    `domain: ${args.domain}`,
+    `user_prompt: ${compactText(args.prompt)}`,
+    `constraints: ${compactText(args.constraintSummary ?? "none")}`,
+    "planner_hints:",
+    args.plannerHints.length > 0 ? args.plannerHints.slice(0, 6).map((hint) => `- ${hint}`).join("\n") : "- none",
+    "",
+    "Required JSON schema:",
+    "{",
+    '  "strategy": "string (12-400)",',
+    '  "primaryQuery": "string (6-220)",',
+    '  "fallbackQuery": "string (6-220, optional)",',
+    '  "subqueries": ["1-5 strings"],',
+    '  "evidenceFocus": ["price_total|duration|transfers|baggage|fare_rules|freshness|booking_path"],',
+    '  "qualityGate": "string (12-300)"',
+    "}",
+    "",
+    "Do not include markdown, comments, or extra keys.",
+  ].join("\n");
+}
+
+async function generatePlannerPlan(args: {
+  prompt: string;
+  domain: ResearchDomain;
+  plannerHints: string[];
+  constraintSummary?: string;
+}): Promise<PlannerPlanResult> {
+  const fallback = buildDeterministicPlannerOutput(args);
+  const validationErrors: string[] = [];
+
+  if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
+    validationErrors.push("planner_model_api_key_missing");
+    return {
+      plan: fallback,
+      mode: "fallback",
+      validationErrors,
+    };
+  }
+
+  let plannerPrompt = buildPlannerPrompt(args);
+  for (let attempt = 0; attempt <= MAX_PLANNER_REPAIR_ATTEMPTS; attempt += 1) {
+    try {
+      const result = await generateText({
+        model: google("gemini-flash-lite-latest"),
+        prompt: plannerPrompt,
+      });
+
+      const parsed = parsePlannerOutput(result.text);
+      if (parsed.plan) {
+        return {
+          plan: parsed.plan,
+          mode: "llm",
+          validationErrors,
+        };
+      }
+
+      validationErrors.push(...parsed.errors);
+      plannerPrompt = [
+        buildPlannerPrompt(args),
+        "",
+        "Validation failed. Re-emit corrected JSON only.",
+        ...parsed.errors.map((error) => `- ${error}`),
+      ].join("\n");
+    } catch (error) {
+      validationErrors.push(`planner_model_error: ${errorMessage(error)}`);
+      break;
+    }
+  }
+
+  return {
+    plan: fallback,
+    mode: "fallback",
+    validationErrors,
+  };
 }
 
 function hasProvidedGoalSlot(
@@ -2803,6 +2982,13 @@ export const runJobInternal = internalAction({
                 domain: goal.domain,
                 asOfMs: Date.now(),
               });
+        const plannerResult = await generatePlannerPlan({
+          prompt: goal.prompt,
+          domain: goal.domain,
+          constraintSummary: goal.constraintSummary,
+          plannerHints,
+        });
+        const plannerPlan = plannerResult.plan;
 
         await ctx.runMutation(internal.research.patchJobInternal, {
           researchJobId: args.researchJobId,
@@ -2839,14 +3025,23 @@ export const runJobInternal = internalAction({
           key: "plan",
           status: "completed",
           output:
-            plannerHints.length > 0
-              ? `Generated scan strategy with ${plannerHints.length} planner hints from active playbooks.`
-              : "Generated scan strategy with one live web search branch.",
+            plannerResult.mode === "llm"
+              ? `Generated LLM planner strategy with ${plannerPlan.subqueries.length} query branch(es).`
+              : `Planner fallback strategy active with ${plannerPlan.subqueries.length} deterministic query branch(es).`,
           error: null,
           errorCode: null,
           nextRunAt: null,
         });
         activeTaskKey = undefined;
+
+        await ctx.runMutation(internal.research.addFindingInternal, {
+          researchJobId: args.researchJobId,
+          taskKey: "plan",
+          title: plannerResult.mode === "llm" ? "Planner strategy generated" : "Planner fallback strategy used",
+          summary: `${plannerPlan.strategy} Primary query: ${plannerPlan.primaryQuery}`,
+          confidence: plannerResult.mode === "llm" ? 0.72 : 0.55,
+          sourceType: "api",
+        });
 
         if (plannerHints.length > 0) {
           await ctx.runMutation(internal.research.addFindingInternal, {
@@ -2866,6 +3061,20 @@ export const runJobInternal = internalAction({
           });
         }
 
+        await ctx.runMutation(internal.research.addDialogueEventInternal, {
+          researchJobId: args.researchJobId,
+          actor: "researcher",
+          kind: "plan",
+          message:
+            plannerResult.mode === "llm"
+              ? "Planner produced structured search strategy."
+              : "Planner fallback strategy used due to model unavailability/validation errors.",
+          detail:
+            plannerResult.validationErrors.length > 0
+              ? plannerResult.validationErrors.slice(0, 3).join(" | ")
+              : plannerPlan.qualityGate,
+        });
+
         await ctx.runMutation(internal.research.patchJobInternal, {
           researchJobId: args.researchJobId,
           stage: "Scanning candidate sources",
@@ -2882,7 +3091,7 @@ export const runJobInternal = internalAction({
         });
         activeTaskKey = "scan";
 
-        const searchQuery = buildSearchQuery(goal.prompt, goal.domain);
+        const searchQuery = plannerPlan.primaryQuery;
         let webResults: SearchLead[] = [];
         let searchProvider: "tavily" | "fallback" = "fallback";
         let extractedByUrl = new Map<string, string>();
@@ -2957,7 +3166,8 @@ export const runJobInternal = internalAction({
         }
 
         if (roundOneQuality.decision === "continue") {
-          const followupQuery = buildFollowupSearchQuery(searchQuery, roundOneQuality);
+          const followupBaseQuery = plannerPlan.fallbackQuery ?? searchQuery;
+          const followupQuery = buildFollowupSearchQuery(followupBaseQuery, roundOneQuality);
           await ctx.runMutation(internal.research.addDialogueEventInternal, {
             researchJobId: args.researchJobId,
             actor: "researcher",
