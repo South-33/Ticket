@@ -827,6 +827,121 @@ describe("research pipeline", () => {
     expect(persisted.goal?.prompt).toContain("Research criteria:");
   });
 
+  test("requestUserClarificationInternal pauses job with pending request", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const researchJobId = await seedJob(t, {
+      threadId: "thread-clarification-request",
+      status: "running",
+      withTasks: true,
+    });
+
+    const created = await t.mutation(internal.research.requestUserClarificationInternal, {
+      researchJobId,
+      questions: [
+        {
+          key: "flexibilityLevel",
+          question: "Are your dates flexible by +/- 3 days?",
+          answerType: "boolean",
+          required: true,
+          reason: "Can broaden fare scan window",
+        },
+      ],
+    });
+
+    const state = await t.run(async (ctx) => {
+      const job = await ctx.db.get(researchJobId);
+      const request = await ctx.db.get(created.requestId);
+      return { job, request };
+    });
+
+    expect(created.askedMessage).toContain("Quick clarification");
+    expect(state.job?.status).toBe("awaiting_input");
+    expect(state.job?.blockedByRequestId).toBe(created.requestId);
+    expect(state.request?.status).toBe("pending");
+    expect(state.request?.questions[0]?.key).toBe("flexibilityLevel");
+  });
+
+  test("submitClarificationAnswerInternal accepts answers and requeues job", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const researchJobId = await seedJob(t, {
+      threadId: "thread-clarification-answer",
+      status: "running",
+      withTasks: true,
+    });
+
+    const created = await t.mutation(internal.research.requestUserClarificationInternal, {
+      researchJobId,
+      questions: [
+        {
+          key: "flexibilityLevel",
+          question: "Are your dates flexible by +/- 3 days?",
+          answerType: "boolean",
+          required: true,
+        },
+      ],
+    });
+
+    const submitted = await t.mutation(internal.research.submitClarificationAnswerInternal, {
+      requestId: created.requestId,
+      answers: [
+        {
+          key: "flexibilityLevel",
+          value: "yes",
+        },
+      ],
+    });
+
+    const state = await t.run(async (ctx) => {
+      const job = await ctx.db.get(researchJobId);
+      const request = await ctx.db.get(created.requestId);
+      const slots = await ctx.db
+        .query("projectGoalSlots")
+        .withIndex("by_goal_status", (q) => q.eq("projectGoalId", job!.projectGoalId).eq("status", "confirmed"))
+        .take(30);
+      const slot = slots.find((item) => item.key.toLowerCase() === "flexibilitylevel");
+      return { job, request, slot };
+    });
+
+    expect(submitted.accepted).toBe(true);
+    expect(submitted.resumed).toBe(false);
+    expect(state.request?.status).toBe("answered");
+    expect(state.job?.status).toBe("planned");
+    expect(state.job?.blockedByRequestId).toBeUndefined();
+    expect(state.slot?.status).toBe("confirmed");
+    expect(state.slot?.value).toBe("yes");
+  });
+
+  test("getPendingClarificationForThread returns latest pending request", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const threadId = "thread-clarification-query";
+    const researchJobId = await seedJob(t, {
+      threadId,
+      status: "running",
+      withTasks: true,
+    });
+
+    await t.mutation(internal.research.requestUserClarificationInternal, {
+      researchJobId,
+      questions: [
+        {
+          key: "preferredCabin",
+          question: "Do you prefer economy, premium economy, or business?",
+          answerType: "enum",
+          choices: ["economy", "premium economy", "business"],
+          required: true,
+        },
+      ],
+    });
+
+    const pending = await t.query(api.research.getPendingClarificationForThread, {
+      threadId,
+    });
+
+    expect(pending).not.toBeNull();
+    expect(pending?.researchJobId).toBe(researchJobId);
+    expect(pending?.questions[0]?.key).toBe("preferredCabin");
+  });
+
   test("allows manual recheck scheduling for terminal jobs", async () => {
     vi.useFakeTimers();
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);

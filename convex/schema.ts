@@ -72,6 +72,7 @@ export default defineSchema({
     selectedSkillSlugs: v.optional(v.array(v.string())),
     skillHintsSnapshot: v.optional(v.array(v.string())),
     skillPackDigest: v.optional(v.string()),
+    blockedByRequestId: v.optional(v.id("researchClarificationRequests")),
     createdAt: v.number(),
     updatedAt: v.number(),
     startedAt: v.optional(v.number()),
@@ -81,6 +82,40 @@ export default defineSchema({
     .index("by_user_thread_updatedAt", ["userId", "threadId", "updatedAt"])
     .index("by_status_updatedAt", ["status", "updatedAt"])
     .index("by_promptMessageId", ["promptMessageId"]),
+
+  researchClarificationRequests: defineTable({
+    jobId: v.id("researchJobs"),
+    userId: v.string(),
+    threadId: v.string(),
+    status: v.union(v.literal("pending"), v.literal("answered"), v.literal("expired"), v.literal("cancelled")),
+    requestedBy: v.union(v.literal("researcher"), v.literal("system")),
+    questions: v.array(
+      v.object({
+        key: v.string(),
+        question: v.string(),
+        answerType: v.union(v.literal("string"), v.literal("boolean"), v.literal("enum"), v.literal("date"), v.literal("number")),
+        required: v.boolean(),
+        choices: v.optional(v.array(v.string())),
+        reason: v.optional(v.string()),
+        evidenceUrls: v.optional(v.array(v.string())),
+      }),
+    ),
+    answers: v.optional(
+      v.array(
+        v.object({
+          key: v.string(),
+          value: v.string(),
+        }),
+      ),
+    ),
+    askedMessage: v.string(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    answeredAt: v.optional(v.number()),
+  })
+    .index("by_job_createdAt", ["jobId", "createdAt"])
+    .index("by_thread_createdAt", ["threadId", "createdAt"])
+    .index("by_thread_status_createdAt", ["threadId", "status", "createdAt"]),
 
   researchStageEvents: defineTable({
     jobId: v.id("researchJobs"),

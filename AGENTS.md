@@ -16,6 +16,7 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - Chat model output contract: user-facing response text is always required; tool tags are optional and should be emitted only when the model intends to run that tool.
 - Research loop direction: use iterative, checkpointed rounds with quality-gated continuation (no full restart by default) and selective context promotion from raw sources.
 - CI/preview quirk: avoid placeholder Clerk publishable keys (for example `pk_test_ci_placeholder`) because Next.js prerender can fail in auth-wrapped layouts; treat invalid/placeholder keys as unconfigured.
+- Clarification plumbing is partially in place (`requestUserClarificationInternal`, `submitClarificationAnswerInternal`, pending-request query); chat-mediated auto-resume wiring is still pending.
 
 ## Reference Docs
 - Convex best practices: https://docs.convex.dev/understanding/best-practices

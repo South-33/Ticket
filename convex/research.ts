@@ -924,6 +924,20 @@ function buildPromptWithCriteria(prompt: string, criteria: Record<string, string
   return `${prompt}\n\nResearch criteria:\n${criteriaLines}`;
 }
 
+function buildClarificationPrompt(questions: Array<{ key: string; question: string }>) {
+  const ask = questions
+    .map((item) => item.question.trim())
+    .filter((item) => item.length > 0)
+    .slice(0, 3);
+  if (ask.length === 0) {
+    return "Quick clarification before I continue the research.";
+  }
+  if (ask.length === 1) {
+    return `Quick clarification before I continue: ${ask[0]}`;
+  }
+  return `Quick clarification before I continue:\n- ${ask.join("\n- ")}`;
+}
+
 export async function createResearchJobForPrompt(
   ctx: MutationCtx,
   args: {
@@ -1308,6 +1322,292 @@ export const startResearchFromOpsInternal = internalMutation({
   },
 });
 
+export const requestUserClarificationInternal = internalMutation({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    requestedBy: v.optional(v.union(v.literal("researcher"), v.literal("system"))),
+    questions: v.array(
+      v.object({
+        key: v.string(),
+        question: v.string(),
+        answerType: v.union(v.literal("string"), v.literal("boolean"), v.literal("enum"), v.literal("date"), v.literal("number")),
+        required: v.boolean(),
+        choices: v.optional(v.array(v.string())),
+        reason: v.optional(v.string()),
+        evidenceUrls: v.optional(v.array(v.string())),
+      }),
+    ),
+  },
+  returns: v.object({
+    requestId: v.id("researchClarificationRequests"),
+    askedMessage: v.string(),
+  }),
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.researchJobId);
+    if (!job) {
+      throw new ConvexError("Research job not found");
+    }
+
+    if (args.questions.length === 0) {
+      throw new ConvexError("At least one clarification question is required");
+    }
+
+    const dedupedQuestions = Array.from(
+      new Map(
+        args.questions
+          .map((question) => ({
+            ...question,
+            key: question.key.trim(),
+            question: question.question.trim(),
+          }))
+          .filter((question) => question.key.length > 0 && question.question.length > 0)
+          .map((question) => [question.key.toLowerCase(), question] as const),
+      ).values(),
+    ).slice(0, 3);
+
+    if (dedupedQuestions.length === 0) {
+      throw new ConvexError("At least one valid clarification question is required");
+    }
+
+    const now = Date.now();
+    const askedMessage = buildClarificationPrompt(
+      dedupedQuestions.map((question) => ({ key: question.key, question: question.question })),
+    );
+
+    const existingPending = await ctx.db
+      .query("researchClarificationRequests")
+      .withIndex("by_thread_status_createdAt", (q) => q.eq("threadId", job.threadId).eq("status", "pending"))
+      .order("desc")
+      .take(1);
+    if (existingPending[0]?.jobId === job._id) {
+      await ctx.db.patch(existingPending[0]._id, {
+        questions: dedupedQuestions,
+        askedMessage,
+        updatedAt: now,
+      });
+      await ctx.db.patch(job._id, {
+        blockedByRequestId: existingPending[0]._id,
+        missingFields: dedupedQuestions.map((question) => question.key),
+        followUpQuestion: askedMessage,
+        updatedAt: now,
+      });
+      await patchJobAndRecordStageEvent(ctx, {
+        researchJobId: job._id,
+        status: "awaiting_input",
+        stage: "Awaiting clarification",
+      });
+      return { requestId: existingPending[0]._id, askedMessage };
+    }
+
+    const requestId = await ctx.db.insert("researchClarificationRequests", {
+      jobId: job._id,
+      userId: job.userId,
+      threadId: job.threadId,
+      status: "pending",
+      requestedBy: args.requestedBy ?? "researcher",
+      questions: dedupedQuestions,
+      askedMessage,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await patchJobAndRecordStageEvent(ctx, {
+      researchJobId: job._id,
+      status: "awaiting_input",
+      stage: "Awaiting clarification",
+    });
+    await ctx.db.patch(job._id, {
+      blockedByRequestId: requestId,
+      missingFields: dedupedQuestions.map((question) => question.key),
+      followUpQuestion: askedMessage,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("researchDialogueEvents", {
+      jobId: job._id,
+      userId: job.userId,
+      threadId: job.threadId,
+      actor: "researcher",
+      kind: "decision",
+      message: "Clarification requested from user.",
+      detail: dedupedQuestions.map((question) => question.key).join(","),
+      createdAt: now,
+    });
+
+    return { requestId, askedMessage };
+  },
+});
+
+export const submitClarificationAnswerInternal = internalMutation({
+  args: {
+    requestId: v.id("researchClarificationRequests"),
+    answers: v.array(
+      v.object({
+        key: v.string(),
+        value: v.string(),
+      }),
+    ),
+  },
+  returns: v.object({
+    accepted: v.boolean(),
+    resumed: v.boolean(),
+    missingKeys: v.array(v.string()),
+  }),
+  handler: async (ctx, args) => {
+    const request = await ctx.db.get(args.requestId);
+    if (!request) {
+      throw new ConvexError("Clarification request not found");
+    }
+    if (request.status !== "pending") {
+      return { accepted: false, resumed: false, missingKeys: [] };
+    }
+
+    const now = Date.now();
+    const answersByKey = new Map(
+      args.answers
+        .map((answer) => [answer.key.trim().toLowerCase(), answer.value.trim()] as const)
+        .filter(([key, value]) => key.length > 0 && value.length > 0),
+    );
+
+    const requiredKeys = request.questions.filter((question) => question.required).map((question) => question.key.toLowerCase());
+    const missingKeys = requiredKeys.filter((key) => !answersByKey.get(key));
+    if (missingKeys.length > 0) {
+      await ctx.db.patch(args.requestId, {
+        updatedAt: now,
+      });
+      return { accepted: false, resumed: false, missingKeys };
+    }
+
+    const normalizedAnswers = Array.from(answersByKey.entries()).map(([key, value]) => ({ key, value }));
+    await ctx.db.patch(args.requestId, {
+      status: "answered",
+      answers: normalizedAnswers,
+      answeredAt: now,
+      updatedAt: now,
+    });
+
+    const job = await ctx.db.get(request.jobId);
+    if (!job) {
+      throw new ConvexError("Research job not found");
+    }
+    const goal = await ctx.db.get(job.projectGoalId);
+    if (!goal) {
+      throw new ConvexError("Project goal not found");
+    }
+
+    const existingSlots = await ctx.db
+      .query("projectGoalSlots")
+      .withIndex("by_goal_key", (q) => q.eq("projectGoalId", goal._id))
+      .take(120);
+    const existingByKey = new Map(existingSlots.map((slot) => [slot.key.toLowerCase(), slot]));
+
+    for (const answer of normalizedAnswers) {
+      const existing = existingByKey.get(answer.key);
+      if (existing) {
+        await ctx.db.patch(existing._id, {
+          value: answer.value,
+          status: "confirmed",
+          sourceType: "user_confirmed",
+          isSensitive: isSensitiveSlot(answer.key),
+          updatedAt: now,
+        });
+      } else {
+        await ctx.db.insert("projectGoalSlots", {
+          projectGoalId: goal._id,
+          key: answer.key,
+          value: answer.value,
+          status: "confirmed",
+          sourceType: "user_confirmed",
+          isSensitive: isSensitiveSlot(answer.key),
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+
+      await upsertFactFromSlot(ctx, {
+        userId: job.userId,
+        key: answer.key,
+        value: answer.value,
+        sourceType: "user_confirmed",
+      });
+    }
+
+    await patchJobAndRecordStageEvent(ctx, {
+      researchJobId: job._id,
+      status: "planned",
+      stage: "Clarification received",
+    });
+    await ctx.db.patch(job._id, {
+      blockedByRequestId: undefined,
+      missingFields: undefined,
+      followUpQuestion: undefined,
+      error: undefined,
+      lastErrorCode: undefined,
+      nextRunAt: undefined,
+      updatedAt: now,
+    });
+
+    await ctx.db.insert("researchDialogueEvents", {
+      jobId: job._id,
+      userId: job.userId,
+      threadId: job.threadId,
+      actor: "chatbot",
+      kind: "decision",
+      message: "Clarification answers captured; resuming research.",
+      detail: normalizedAnswers.map((answer) => answer.key).join(","),
+      createdAt: now,
+    });
+
+    return { accepted: true, resumed: false, missingKeys: [] };
+  },
+});
+
+export const getPendingClarificationForThread = query({
+  args: {
+    threadId: v.string(),
+  },
+  returns: v.union(
+    v.null(),
+    v.object({
+      requestId: v.id("researchClarificationRequests"),
+      researchJobId: v.id("researchJobs"),
+      askedMessage: v.string(),
+      questions: v.array(
+        v.object({
+          key: v.string(),
+          question: v.string(),
+          answerType: v.union(v.literal("string"), v.literal("boolean"), v.literal("enum"), v.literal("date"), v.literal("number")),
+          required: v.boolean(),
+          choices: v.optional(v.array(v.string())),
+          reason: v.optional(v.string()),
+          evidenceUrls: v.optional(v.array(v.string())),
+        }),
+      ),
+      createdAt: v.number(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    const pending = await ctx.db
+      .query("researchClarificationRequests")
+      .withIndex("by_thread_status_createdAt", (q) => q.eq("threadId", args.threadId).eq("status", "pending"))
+      .order("desc")
+      .take(5);
+    const selected = pending.find((item) => item.userId === userId);
+    if (!selected) {
+      return null;
+    }
+
+    return {
+      requestId: selected._id,
+      researchJobId: selected.jobId,
+      askedMessage: selected.askedMessage,
+      questions: selected.questions,
+      createdAt: selected.createdAt,
+    };
+  },
+});
+
 export const getLatestJobForThread = query({
   args: {
     threadId: v.string(),
@@ -1324,6 +1624,7 @@ export const getLatestJobForThread = query({
       nextRunAt: v.optional(v.number()),
       missingFields: v.optional(v.array(v.string())),
       followUpQuestion: v.optional(v.string()),
+      blockedByRequestId: v.optional(v.id("researchClarificationRequests")),
       selectedSkillSlugs: v.optional(v.array(v.string())),
       startedAt: v.optional(v.number()),
       completedAt: v.optional(v.number()),
@@ -1446,6 +1747,7 @@ export const getLatestJobForThread = query({
       nextRunAt: selectedJob.nextRunAt,
       missingFields: selectedJob.missingFields,
       followUpQuestion: selectedJob.followUpQuestion,
+      blockedByRequestId: selectedJob.blockedByRequestId,
       selectedSkillSlugs: selectedJob.selectedSkillSlugs,
       startedAt: selectedJob.startedAt,
       completedAt: selectedJob.completedAt,
