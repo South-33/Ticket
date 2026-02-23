@@ -124,6 +124,42 @@ describe("research pipeline", () => {
     expect(result).toBeNull();
   });
 
+  test("runJobInternal exits when another runner already holds the lease", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const threadId = "thread-lease-guard";
+
+    const researchJobId = await seedJob(t, {
+      threadId,
+      status: "planned",
+      withTasks: true,
+    });
+
+    const lease = await t.mutation(internal.research.acquireJobLeaseInternal, {
+      researchJobId,
+      leaseToken: "external-lock",
+      leaseMs: 60_000,
+    });
+    expect(lease.acquired).toBe(true);
+
+    await t.action(internal.research.runJobInternal, {
+      researchJobId,
+    });
+
+    const state = await t.run(async (ctx) => {
+      const job = await ctx.db.get("researchJobs", researchJobId);
+      const tasks = await ctx.db
+        .query("researchTasks")
+        .withIndex("by_job_order", (q) => q.eq("jobId", researchJobId))
+        .order("asc")
+        .take(10);
+      return { job, tasks };
+    });
+
+    expect(state.job?.status).toBe("planned");
+    expect(state.job?.attempt).toBe(0);
+    expect(state.tasks.every((task) => task.status === "queued")).toBe(true);
+  });
+
   test("runs seeded job to completion with task and finding updates", async () => {
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-flow";
@@ -237,7 +273,12 @@ describe("research pipeline", () => {
           .withIndex("by_job_rank", (q) => q.eq("jobId", researchJobId))
           .order("asc")
           .take(10);
-        return { job, findings, sources, candidates, rankedResults };
+        const stageEvents = await ctx.db
+          .query("researchStageEvents")
+          .withIndex("by_job_createdAt", (q) => q.eq("jobId", researchJobId))
+          .order("asc")
+          .take(20);
+        return { job, findings, sources, candidates, rankedResults, stageEvents };
       });
 
       expect(persisted.job?.status).toBe("completed");
@@ -247,6 +288,9 @@ describe("research pipeline", () => {
       expect(persisted.sources[0]?.provider).toBe("tavily");
       expect(persisted.candidates).toHaveLength(3);
       expect(persisted.rankedResults).toHaveLength(3);
+      expect(persisted.stageEvents.length).toBeGreaterThanOrEqual(5);
+      expect(persisted.stageEvents[0]?.status).toBe("running");
+      expect(persisted.stageEvents.at(-1)?.status).toBe("completed");
     } finally {
       vi.unstubAllGlobals();
       if (priorApiKey === undefined) {
@@ -858,7 +902,12 @@ describe("research pipeline", () => {
           .query("researchTasks")
           .withIndex("by_job_taskKey", (q) => q.eq("jobId", researchJobId).eq("key", "scan"))
           .unique();
-        return { job, scanTask };
+        const stageEvents = await ctx.db
+          .query("researchStageEvents")
+          .withIndex("by_job_createdAt", (q) => q.eq("jobId", researchJobId))
+          .order("desc")
+          .take(8);
+        return { job, scanTask, stageEvents };
       });
 
       expect(state.job?.status).toBe("planned");
@@ -871,6 +920,86 @@ describe("research pipeline", () => {
       expect(state.scanTask?.attempt).toBe(1);
       expect(state.scanTask?.errorCode).toBe("provider_unavailable");
       expect(state.scanTask?.nextRunAt).toBeTruthy();
+      expect(state.stageEvents[0]?.status).toBe("planned");
+      expect(state.stageEvents[0]?.stage).toBe("Retry scheduled");
+      expect(state.stageEvents[0]?.errorCode).toBe("provider_unavailable");
+    } finally {
+      vi.unstubAllGlobals();
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
+    }
+  });
+
+  test("lists stage events through paginated API", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const threadId = "thread-stage-events-api";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    process.env.TAVILY_API_KEY = "test-tavily-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("api.tavily.com/search")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  title: "Deal One",
+                  url: "https://example.com/deal-1",
+                  content: "Cheap fare lead one",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        if (url.includes("api.tavily.com/extract")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  url: "https://example.com/deal-1",
+                  raw_content: "Extracted content one with richer context.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          json: async () => ({}),
+        } as Response;
+      }),
+    );
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const page = await t.query(api.research.listStageEventsByJob, {
+        researchJobId,
+        paginationOpts: {
+          numItems: 3,
+          cursor: null,
+        },
+      });
+
+      expect(page.page.length).toBe(3);
+      expect(page.page[0]?.status).toBe("completed");
+      expect(page.page[0]?.createdAt).toBeGreaterThan(0);
+      expect(page.continueCursor).toBeTruthy();
     } finally {
       vi.unstubAllGlobals();
       if (priorApiKey === undefined) {

@@ -21,6 +21,13 @@ pnpm install
 GOOGLE_GENERATIVE_AI_API_KEY=your_key_here
 ```
 
+Optional research/ops env vars:
+
+```bash
+TAVILY_API_KEY=your_tavily_key
+KNOWLEDGE_EDITOR_IDS=user_1,user_2
+```
+
 3. Start Convex in one terminal:
 
 ```bash

@@ -302,6 +302,15 @@ type RankedResultView = {
   updatedAt: number;
 };
 
+type ResearchStageEventView = {
+  status: string;
+  stage: string;
+  progress: number;
+  attempt: number;
+  errorCode?: string;
+  createdAt: number;
+};
+
 type ResearchJobView = {
   researchJobId: string;
   status: string;
@@ -321,10 +330,12 @@ type ResearchJobView = {
 
 function ResearchStatusPanel({
   latestResearchJob,
+  stageEvents,
   isResearchActive,
   onRecheckNow,
 }: {
   latestResearchJob: ResearchJobView;
+  stageEvents: ResearchStageEventView[];
   isResearchActive: boolean;
   onRecheckNow: () => Promise<void>;
 }) {
@@ -350,6 +361,21 @@ function ResearchStatusPanel({
           {latestResearchJob.lastErrorCode && latestResearchJob.nextRunAt ? " | " : ""}
           {latestResearchJob.nextRunAt ? `Next retry: ${formatUtcTimestamp(latestResearchJob.nextRunAt)}` : ""}
         </p>
+      )}
+      {stageEvents.length > 0 && (
+        <div className="research-status-events">
+          <div className="research-status-events-head">Recent Stage Events</div>
+          <ul className="research-status-events-list">
+            {stageEvents.map((event) => (
+              <li key={`${event.createdAt}-${event.stage}-${event.attempt}`} className="research-status-events-item">
+                <span>{formatUtcTimestamp(event.createdAt)}</span>
+                <span>{event.stage}</span>
+                <span>{toResearchStatusLabel(event.status)} {event.progress}% (#{event.attempt})</span>
+                <span>{event.errorCode ? `code: ${event.errorCode}` : ""}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {latestResearchJob.error && <p className="research-status-error">{latestResearchJob.error}</p>}
       {!isResearchActive && latestResearchJob.status !== "awaiting_input" && (
@@ -709,6 +735,19 @@ function AuthenticatedChat() {
     api.research.getLatestJobForThread,
     activeThreadIdForMessages ? { threadId: activeThreadIdForMessages } : "skip",
   );
+  const stageEventsPage = useQuery(
+    api.research.listStageEventsByJob,
+    latestResearchJob
+      ? {
+          researchJobId: latestResearchJob.researchJobId,
+          paginationOpts: {
+            numItems: 8,
+            cursor: null,
+          },
+        }
+      : "skip",
+  );
+  const stageEvents = stageEventsPage?.page ?? [];
 
   const visibleMessages = useMemo(
     () => (isComposingNew || !activeThreadIdForMessages ? [] : messageFeed.results),
@@ -901,6 +940,7 @@ function AuthenticatedChat() {
   const researchStatusPanel = latestResearchJob ? (
     <ResearchStatusPanel
       latestResearchJob={latestResearchJob}
+      stageEvents={stageEvents}
       isResearchActive={isResearchActive}
       onRecheckNow={handleRecheckNow}
     />

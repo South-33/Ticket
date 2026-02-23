@@ -32,6 +32,19 @@ const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "expi
 const MAX_PAGE_SIZE = 50;
 const MAX_JOB_ATTEMPTS = 3;
 const RETRY_BACKOFF_MS = [30_000, 120_000, 300_000] as const;
+const JOB_LEASE_DURATION_MS = 9 * 60 * 1000;
+
+type ResearchJobStatus =
+  | "draft"
+  | "awaiting_input"
+  | "planned"
+  | "running"
+  | "synthesizing"
+  | "verifying"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "expired";
 
 type CandidateCategory = "cheapest" | "best_value" | "most_convenient";
 
@@ -108,6 +121,115 @@ function classifyResearchError(error: unknown): { code: ResearchErrorCode; retry
 function computeRetryDelayMs(attempt: number) {
   const idx = Math.max(0, Math.min(RETRY_BACKOFF_MS.length - 1, attempt - 1));
   return RETRY_BACKOFF_MS[idx];
+}
+
+function createLeaseToken() {
+  return `lease_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+type PatchJobArgs = {
+  researchJobId: Id<"researchJobs">;
+  status?: ResearchJobStatus;
+  stage?: string;
+  progress?: number;
+  error?: string | null;
+  lastErrorCode?: string | null;
+  nextRunAt?: number | null;
+  attemptDelta?: number;
+  startedNow?: boolean;
+  completedNow?: boolean;
+};
+
+function shouldRecordStageEvent(args: {
+  status?: ResearchJobStatus;
+  stage?: string;
+  error?: string | null;
+  lastErrorCode?: string | null;
+}) {
+  return (
+    args.status !== undefined ||
+    args.stage !== undefined ||
+    args.error !== undefined ||
+    args.lastErrorCode !== undefined
+  );
+}
+
+async function patchJobAndRecordStageEvent(ctx: MutationCtx, args: PatchJobArgs) {
+  const current = await ctx.db.get(args.researchJobId);
+  if (!current) {
+    throw new ConvexError("Research job not found");
+  }
+
+  const now = Date.now();
+  const patch: Record<string, unknown> = {
+    updatedAt: now,
+  };
+
+  if (args.status !== undefined) {
+    patch.status = args.status;
+  }
+  if (args.stage !== undefined) {
+    patch.stage = args.stage;
+  }
+  if (args.progress !== undefined) {
+    patch.progress = args.progress;
+  }
+  if (args.error !== undefined) {
+    patch.error = args.error ?? undefined;
+  }
+  if (args.lastErrorCode !== undefined) {
+    patch.lastErrorCode = args.lastErrorCode ?? undefined;
+  }
+  if (args.nextRunAt !== undefined) {
+    patch.nextRunAt = args.nextRunAt ?? undefined;
+  }
+  if (args.attemptDelta !== undefined) {
+    patch.attempt = current.attempt + args.attemptDelta;
+  }
+  if (args.startedNow) {
+    patch.startedAt = now;
+  }
+  if (args.completedNow) {
+    patch.completedAt = now;
+  }
+
+  await ctx.db.patch(args.researchJobId, patch);
+
+  if (shouldRecordStageEvent(args)) {
+    const nextStatus = (args.status ?? current.status) as ResearchJobStatus;
+    const nextStage = args.stage ?? current.stage;
+    const nextProgress = args.progress ?? current.progress;
+    const nextAttempt = current.attempt + (args.attemptDelta ?? 0);
+    const nextErrorCode =
+      args.lastErrorCode !== undefined ? (args.lastErrorCode ?? undefined) : current.lastErrorCode;
+
+    const latestEvent = await ctx.db
+      .query("researchStageEvents")
+      .withIndex("by_job_createdAt", (q) => q.eq("jobId", args.researchJobId))
+      .order("desc")
+      .take(1);
+
+    const duplicate = latestEvent[0]
+      && latestEvent[0].status === nextStatus
+      && latestEvent[0].stage === nextStage
+      && latestEvent[0].progress === nextProgress
+      && latestEvent[0].attempt === nextAttempt
+      && latestEvent[0].errorCode === nextErrorCode;
+
+    if (!duplicate) {
+      await ctx.db.insert("researchStageEvents", {
+        jobId: args.researchJobId,
+        userId: current.userId,
+        threadId: current.threadId,
+        status: nextStatus,
+        stage: nextStage,
+        progress: nextProgress,
+        attempt: nextAttempt,
+        errorCode: nextErrorCode,
+        createdAt: now,
+      });
+    }
+  }
 }
 
 async function getOwnedJobOrThrow(
@@ -602,6 +724,16 @@ async function upsertFactFromSlot(
       createdAt: now,
       updatedAt: now,
     });
+    return;
+  }
+
+  const shouldProtectConfirmedFact =
+    args.sourceType === "inferred"
+    && existingFact[0].status === "confirmed"
+    && existingFact[0].confidence >= 0.85
+    && (existingFact[0].isSensitive || existingFact[0].sourceType === "user_confirmed");
+
+  if (shouldProtectConfirmedFact) {
     return;
   }
 
@@ -1315,6 +1447,36 @@ export const listRankedResultsByJob = query({
   },
 });
 
+export const listStageEventsByJob = query({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    await getOwnedJobOrThrow(ctx, args.researchJobId, userId);
+    assertPageSize(args.paginationOpts.numItems);
+
+    const result = await ctx.db
+      .query("researchStageEvents")
+      .withIndex("by_job_createdAt", (q) => q.eq("jobId", args.researchJobId))
+      .order("desc")
+      .paginate(args.paginationOpts);
+
+    return {
+      ...result,
+      page: result.page.map((event) => ({
+        status: event.status,
+        stage: event.stage,
+        progress: event.progress,
+        attempt: event.attempt,
+        errorCode: event.errorCode,
+        createdAt: event.createdAt,
+      })),
+    };
+  },
+});
+
 export const requestLiveRecheck = mutation({
   args: {
     researchJobId: v.id("researchJobs"),
@@ -1406,6 +1568,121 @@ export const listSourcesForJobInternal = internalQuery({
   },
 });
 
+export const acquireJobLeaseInternal = internalMutation({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    leaseToken: v.string(),
+    leaseMs: v.number(),
+  },
+  returns: v.object({
+    acquired: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.researchJobId);
+    if (!job) {
+      return { acquired: false };
+    }
+    if (job.status !== "planned" && job.status !== "running") {
+      return { acquired: false };
+    }
+
+    const now = Date.now();
+    const hasActiveLease =
+      !!job.runLeaseToken
+      && !!job.runLeaseExpiresAt
+      && job.runLeaseExpiresAt > now
+      && job.runLeaseToken !== args.leaseToken;
+
+    if (hasActiveLease) {
+      return { acquired: false };
+    }
+
+    await ctx.db.patch(args.researchJobId, {
+      runLeaseToken: args.leaseToken,
+      runLeaseExpiresAt: now + Math.max(1, args.leaseMs),
+    });
+
+    return { acquired: true };
+  },
+});
+
+export const releaseJobLeaseInternal = internalMutation({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    leaseToken: v.string(),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.researchJobId);
+    if (!job) {
+      return null;
+    }
+    if (job.runLeaseToken !== args.leaseToken) {
+      return null;
+    }
+
+    await ctx.db.patch(args.researchJobId, {
+      runLeaseToken: undefined,
+      runLeaseExpiresAt: undefined,
+    });
+
+    return null;
+  },
+});
+
+export const scheduleRetryInternal = internalMutation({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    taskKey: v.optional(v.string()),
+    error: v.string(),
+    errorCode: v.string(),
+    delayMs: v.number(),
+  },
+  returns: v.object({
+    nextRunAt: v.number(),
+  }),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const delayMs = Math.max(0, args.delayMs);
+    const nextRunAt = now + delayMs;
+
+    await patchJobAndRecordStageEvent(ctx, {
+      researchJobId: args.researchJobId,
+      status: "planned",
+      stage: "Retry scheduled",
+      error: args.error,
+      lastErrorCode: args.errorCode,
+      nextRunAt,
+    });
+
+    if (args.taskKey) {
+      const taskKey = args.taskKey;
+      const task = await ctx.db
+        .query("researchTasks")
+        .withIndex("by_job_taskKey", (q) => q.eq("jobId", args.researchJobId).eq("key", taskKey))
+        .unique();
+
+      if (task) {
+        await ctx.db.patch(task._id, {
+          status: "queued",
+          error: undefined,
+          errorCode: args.errorCode,
+          nextRunAt,
+          startedAt: undefined,
+          completedAt: undefined,
+          updatedAt: now,
+        });
+      }
+    }
+
+    await ctx.scheduler.runAfter(delayMs, internal.research.runJobInternal, {
+      researchJobId: args.researchJobId,
+    });
+
+    return { nextRunAt };
+  },
+});
+
 export const patchJobInternal = internalMutation({
   args: {
     researchJobId: v.id("researchJobs"),
@@ -1434,45 +1711,7 @@ export const patchJobInternal = internalMutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const current = await ctx.db.get(args.researchJobId);
-    if (!current) {
-      throw new ConvexError("Research job not found");
-    }
-
-    const now = Date.now();
-    const patch: Record<string, unknown> = {
-      updatedAt: now,
-    };
-
-    if (args.status !== undefined) {
-      patch.status = args.status;
-    }
-    if (args.stage !== undefined) {
-      patch.stage = args.stage;
-    }
-    if (args.progress !== undefined) {
-      patch.progress = args.progress;
-    }
-    if (args.error !== undefined) {
-      patch.error = args.error ?? undefined;
-    }
-    if (args.lastErrorCode !== undefined) {
-      patch.lastErrorCode = args.lastErrorCode ?? undefined;
-    }
-    if (args.nextRunAt !== undefined) {
-      patch.nextRunAt = args.nextRunAt ?? undefined;
-    }
-    if (args.attemptDelta !== undefined) {
-      patch.attempt = current.attempt + args.attemptDelta;
-    }
-    if (args.startedNow) {
-      patch.startedAt = now;
-    }
-    if (args.completedNow) {
-      patch.completedAt = now;
-    }
-
-    await ctx.db.patch(args.researchJobId, patch);
+    await patchJobAndRecordStageEvent(ctx, args);
     return null;
   },
 });
@@ -1764,345 +2003,343 @@ export const runJobInternal = internalAction({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
-    const job = await ctx.runQuery(internal.research.getJobInternal, {
+    const leaseToken = createLeaseToken();
+    const lease = await ctx.runMutation(internal.research.acquireJobLeaseInternal, {
       researchJobId: args.researchJobId,
+      leaseToken,
+      leaseMs: JOB_LEASE_DURATION_MS,
     });
-
-    if (!job) {
+    if (!lease.acquired) {
       return null;
     }
-
-    if (job.status !== "planned" && job.status !== "running") {
-      return null;
-    }
-
-    const goal = await ctx.runQuery(internal.research.getProjectGoalInternal, {
-      projectGoalId: job.projectGoalId,
-    });
-    if (!goal) {
-      await ctx.runMutation(internal.research.patchJobInternal, {
-        researchJobId: args.researchJobId,
-        status: "failed",
-        stage: "Research failed",
-        error: "Project goal not found",
-        lastErrorCode: "goal_missing",
-        nextRunAt: null,
-      });
-      return null;
-    }
-
-    let activeTaskKey: "plan" | "scan" | "synthesize" | undefined;
 
     try {
-      const plannerHints = await ctx.runQuery(internal.knowledge.getPlannerHintsInternal, {
-        domain: goal.domain,
-        asOfMs: Date.now(),
+      const job = await ctx.runQuery(internal.research.getJobInternal, {
+        researchJobId: args.researchJobId,
       });
 
-      await ctx.runMutation(internal.research.patchJobInternal, {
-        researchJobId: args.researchJobId,
-        status: "running",
-        stage: "Planning tasks",
-        progress: 8,
-        attemptDelta: 1,
-        startedNow: true,
-        error: null,
-        lastErrorCode: null,
-        nextRunAt: null,
-      });
-
-      activeTaskKey = "plan";
-      await ctx.runMutation(internal.research.patchTaskInternal, {
-        researchJobId: args.researchJobId,
-        key: "plan",
-        status: "running",
-        attemptDelta: 1,
-        error: null,
-        errorCode: null,
-        nextRunAt: null,
-      });
-      await sleep(250);
-      await ctx.runMutation(internal.research.patchTaskInternal, {
-        researchJobId: args.researchJobId,
-        key: "plan",
-        status: "completed",
-        output:
-          plannerHints.length > 0
-            ? `Generated scan strategy with ${plannerHints.length} planner hints from active playbooks.`
-            : "Generated scan strategy with one live web search branch.",
-        error: null,
-        errorCode: null,
-        nextRunAt: null,
-      });
-      activeTaskKey = undefined;
-
-      if (plannerHints.length > 0) {
-        await ctx.runMutation(internal.research.addFindingInternal, {
-          researchJobId: args.researchJobId,
-          taskKey: "plan",
-          title: "Planner hints injected",
-          summary: plannerHints.slice(0, 3).join(" | "),
-          confidence: 0.7,
-          sourceType: "simulated",
-        });
+      if (!job) {
+        return null;
       }
 
-      await ctx.runMutation(internal.research.patchJobInternal, {
-        researchJobId: args.researchJobId,
-        stage: "Scanning candidate sources",
-        progress: 42,
-      });
-      await ctx.runMutation(internal.research.patchTaskInternal, {
-        researchJobId: args.researchJobId,
-        key: "scan",
-        status: "running",
-        attemptDelta: 1,
-        error: null,
-        errorCode: null,
-        nextRunAt: null,
-      });
-      activeTaskKey = "scan";
+      if (job.status !== "planned" && job.status !== "running") {
+        return null;
+      }
 
-      const searchQuery = buildSearchQuery(goal.prompt, goal.domain);
-      let webResults: SearchLead[] = [];
-      let searchProvider: "tavily" | "fallback" = "fallback";
-      let extractedByUrl = new Map<string, string>();
+      const goal = await ctx.runQuery(internal.research.getProjectGoalInternal, {
+        projectGoalId: job.projectGoalId,
+      });
+      if (!goal) {
+        await ctx.runMutation(internal.research.patchJobInternal, {
+          researchJobId: args.researchJobId,
+          status: "failed",
+          stage: "Research failed",
+          error: "Project goal not found",
+          lastErrorCode: "goal_missing",
+          nextRunAt: null,
+        });
+        return null;
+      }
+
+      let activeTaskKey: "plan" | "scan" | "synthesize" | undefined;
 
       try {
-        const searchResponse = await searchWebWithTavily(searchQuery, 6);
-        webResults = searchResponse.results;
-        searchProvider = searchResponse.provider;
-
-        const extractTargets = webResults.slice(0, 3).map((result) => result.url);
-        if (extractTargets.length > 0) {
-          const extracted = await extractWithTavily(extractTargets, searchQuery);
-          extractedByUrl = new Map(
-            extracted.results
-              .filter((item) => !!item.rawContent)
-              .map((item) => [item.url, item.rawContent ?? ""]),
-          );
-        }
-      } catch (error) {
-        const message = errorMessage(error);
-        if (/TAVILY_API_KEY is not configured/i.test(message)) {
-          webResults = [];
-        } else {
-          throw error;
-        }
-      }
-
-      if (webResults.length > 0) {
-        await ctx.runMutation(internal.research.addSourcesInternal, {
-          researchJobId: args.researchJobId,
-          taskKey: "scan",
-          sources: webResults.map((result, index) => ({
-            rank: index + 1,
-            url: result.url,
-            title: result.title,
-            snippet: result.snippet,
-            provider: searchProvider,
-          })),
-        });
-
-        const top = webResults.slice(0, 2);
-        for (const result of top) {
-          const extractedSummary = summarizeExtractedContent(extractedByUrl.get(result.url));
-          await ctx.runMutation(internal.research.addFindingInternal, {
-            researchJobId: args.researchJobId,
-            taskKey: "scan",
-            title: result.title,
-            summary:
-              extractedSummary ?? result.snippet ?? "Captured a relevant source lead for this query.",
-            confidence: 0.62,
-            sourceType: "web",
-          });
-        }
-
-        if (extractedByUrl.size > 0) {
-          await ctx.runMutation(internal.research.addFindingInternal, {
-            researchJobId: args.researchJobId,
-            taskKey: "scan",
-            title: "Content extraction pass completed",
-            summary: `Extracted enriched content from ${extractedByUrl.size} source page(s) to improve evidence quality.`,
-            confidence: 0.68,
-            sourceType: "web",
-          });
-        }
-      } else {
-        await ctx.runMutation(internal.research.addFindingInternal, {
-          researchJobId: args.researchJobId,
-          taskKey: "scan",
-          title: "Tavily scan fallback used",
-          summary:
-            "Tavily returned no usable search results for this run (or API key is missing). Pipeline remained healthy and created a fallback lead.",
-          confidence: 0.38,
-          sourceType: "simulated",
-        });
-      }
-
-      await ctx.runMutation(internal.research.patchTaskInternal, {
-        researchJobId: args.researchJobId,
-        key: "scan",
-        status: "completed",
-        output:
-          webResults.length > 0
-            ? `Collected ${webResults.length} real web source leads and extracted ${extractedByUrl.size} page summaries.`
-            : "No parsed web leads; fallback evidence was recorded.",
-        error: null,
-        errorCode: null,
-        nextRunAt: null,
-      });
-      activeTaskKey = undefined;
-
-      await ctx.runMutation(internal.research.patchJobInternal, {
-        researchJobId: args.researchJobId,
-        status: "synthesizing",
-        stage: "Synthesizing shortlist",
-        progress: 76,
-      });
-
-      await ctx.runMutation(internal.research.patchTaskInternal, {
-        researchJobId: args.researchJobId,
-        key: "synthesize",
-        status: "running",
-        attemptDelta: 1,
-        error: null,
-        errorCode: null,
-        nextRunAt: null,
-      });
-      activeTaskKey = "synthesize";
-
-      const sourceDocs = await ctx.runQuery(internal.research.listSourcesForJobInternal, {
-        researchJobId: args.researchJobId,
-        limit: 6,
-      });
-
-      const candidateDrafts = buildCandidateDrafts(
-        {
-          prompt: goal.prompt,
+        const plannerHints = await ctx.runQuery(internal.knowledge.getPlannerHintsInternal, {
           domain: goal.domain,
-          constraintSummary: goal.constraintSummary,
-        },
-        sourceDocs.map((source: { title: string; url: string; snippet?: string }) => ({
-          title: source.title,
-          url: source.url,
-          snippet: source.snippet,
-          extractedSummary: summarizeExtractedContent(extractedByUrl.get(source.url)),
-        })),
-      );
-
-      await ctx.runMutation(internal.research.replaceCandidatesInternal, {
-        researchJobId: args.researchJobId,
-        candidates: candidateDrafts,
-      });
-
-      const ranked = buildRankedResultsFromCandidates(candidateDrafts);
-      await ctx.runMutation(internal.research.replaceRankedResultsInternal, {
-        researchJobId: args.researchJobId,
-        rankedResults: ranked,
-      });
-
-      await ctx.runMutation(internal.research.addFindingInternal, {
-        researchJobId: args.researchJobId,
-        taskKey: "synthesize",
-        title: "Early shortlist shell",
-        summary: createSynthesisSummary(
-          sourceDocs.map((source: { title: string; url: string }) => ({ title: source.title, url: source.url })),
-        ),
-        confidence: sourceDocs.length > 0 ? 0.66 : 0.42,
-        sourceType: sourceDocs.length > 0 ? "web" : "simulated",
-      });
-
-      await ctx.runMutation(internal.research.patchTaskInternal, {
-        researchJobId: args.researchJobId,
-        key: "synthesize",
-        status: "completed",
-        output: "Built a shortlist summary from captured source leads.",
-        error: null,
-        errorCode: null,
-        nextRunAt: null,
-      });
-      activeTaskKey = undefined;
-
-      await ctx.runMutation(internal.research.patchJobInternal, {
-        researchJobId: args.researchJobId,
-        status: "verifying",
-        stage: "Verifying freshness",
-        progress: 92,
-      });
-      await sleep(200);
-
-      await ctx.runMutation(internal.research.patchJobInternal, {
-        researchJobId: args.researchJobId,
-        status: "completed",
-        stage: "Research complete",
-        progress: 100,
-        error: null,
-        lastErrorCode: null,
-        nextRunAt: null,
-        completedNow: true,
-      });
-
-      return null;
-    } catch (error) {
-      const { code, retryable } = classifyResearchError(error);
-      const message = errorMessage(error);
-      const now = Date.now();
-
-      if (activeTaskKey) {
-        await ctx.runMutation(internal.research.patchTaskInternal, {
-          researchJobId: args.researchJobId,
-          key: activeTaskKey,
-          status: "failed",
-          error: message,
-          errorCode: code,
+          asOfMs: Date.now(),
         });
-      }
-
-      const latestJob = await ctx.runQuery(internal.research.getJobInternal, {
-        researchJobId: args.researchJobId,
-      });
-      const attempt = latestJob?.attempt ?? job.attempt;
-
-      if (retryable && attempt < MAX_JOB_ATTEMPTS) {
-        const delayMs = computeRetryDelayMs(attempt);
-        const nextRunAt = now + delayMs;
 
         await ctx.runMutation(internal.research.patchJobInternal, {
           researchJobId: args.researchJobId,
-          status: "planned",
-          stage: "Retry scheduled",
-          error: message,
-          lastErrorCode: code,
-          nextRunAt,
+          status: "running",
+          stage: "Planning tasks",
+          progress: 8,
+          attemptDelta: 1,
+          startedNow: true,
+          error: null,
+          lastErrorCode: null,
+          nextRunAt: null,
         });
+
+        activeTaskKey = "plan";
+        await ctx.runMutation(internal.research.patchTaskInternal, {
+          researchJobId: args.researchJobId,
+          key: "plan",
+          status: "running",
+          attemptDelta: 1,
+          error: null,
+          errorCode: null,
+          nextRunAt: null,
+        });
+        await sleep(250);
+        await ctx.runMutation(internal.research.patchTaskInternal, {
+          researchJobId: args.researchJobId,
+          key: "plan",
+          status: "completed",
+          output:
+            plannerHints.length > 0
+              ? `Generated scan strategy with ${plannerHints.length} planner hints from active playbooks.`
+              : "Generated scan strategy with one live web search branch.",
+          error: null,
+          errorCode: null,
+          nextRunAt: null,
+        });
+        activeTaskKey = undefined;
+
+        if (plannerHints.length > 0) {
+          await ctx.runMutation(internal.research.addFindingInternal, {
+            researchJobId: args.researchJobId,
+            taskKey: "plan",
+            title: "Planner hints injected",
+            summary: plannerHints.slice(0, 3).join(" | "),
+            confidence: 0.7,
+            sourceType: "simulated",
+          });
+        }
+
+        await ctx.runMutation(internal.research.patchJobInternal, {
+          researchJobId: args.researchJobId,
+          stage: "Scanning candidate sources",
+          progress: 42,
+        });
+        await ctx.runMutation(internal.research.patchTaskInternal, {
+          researchJobId: args.researchJobId,
+          key: "scan",
+          status: "running",
+          attemptDelta: 1,
+          error: null,
+          errorCode: null,
+          nextRunAt: null,
+        });
+        activeTaskKey = "scan";
+
+        const searchQuery = buildSearchQuery(goal.prompt, goal.domain);
+        let webResults: SearchLead[] = [];
+        let searchProvider: "tavily" | "fallback" = "fallback";
+        let extractedByUrl = new Map<string, string>();
+
+        try {
+          const searchResponse = await searchWebWithTavily(searchQuery, 6);
+          webResults = searchResponse.results;
+          searchProvider = searchResponse.provider;
+
+          const extractTargets = webResults.slice(0, 3).map((result) => result.url);
+          if (extractTargets.length > 0) {
+            const extracted = await extractWithTavily(extractTargets, searchQuery);
+            extractedByUrl = new Map(
+              extracted.results
+                .filter((item) => !!item.rawContent)
+                .map((item) => [item.url, item.rawContent ?? ""]),
+            );
+          }
+        } catch (error) {
+          const message = errorMessage(error);
+          if (/TAVILY_API_KEY is not configured/i.test(message)) {
+            webResults = [];
+          } else {
+            throw error;
+          }
+        }
+
+        if (webResults.length > 0) {
+          await ctx.runMutation(internal.research.addSourcesInternal, {
+            researchJobId: args.researchJobId,
+            taskKey: "scan",
+            sources: webResults.map((result, index) => ({
+              rank: index + 1,
+              url: result.url,
+              title: result.title,
+              snippet: result.snippet,
+              provider: searchProvider,
+            })),
+          });
+
+          const top = webResults.slice(0, 2);
+          for (const result of top) {
+            const extractedSummary = summarizeExtractedContent(extractedByUrl.get(result.url));
+            await ctx.runMutation(internal.research.addFindingInternal, {
+              researchJobId: args.researchJobId,
+              taskKey: "scan",
+              title: result.title,
+              summary:
+                extractedSummary ?? result.snippet ?? "Captured a relevant source lead for this query.",
+              confidence: 0.62,
+              sourceType: "web",
+            });
+          }
+
+          if (extractedByUrl.size > 0) {
+            await ctx.runMutation(internal.research.addFindingInternal, {
+              researchJobId: args.researchJobId,
+              taskKey: "scan",
+              title: "Content extraction pass completed",
+              summary: `Extracted enriched content from ${extractedByUrl.size} source page(s) to improve evidence quality.`,
+              confidence: 0.68,
+              sourceType: "web",
+            });
+          }
+        } else {
+          await ctx.runMutation(internal.research.addFindingInternal, {
+            researchJobId: args.researchJobId,
+            taskKey: "scan",
+            title: "Tavily scan fallback used",
+            summary:
+              "Tavily returned no usable search results for this run (or API key is missing). Pipeline remained healthy and created a fallback lead.",
+            confidence: 0.38,
+            sourceType: "simulated",
+          });
+        }
+
+        await ctx.runMutation(internal.research.patchTaskInternal, {
+          researchJobId: args.researchJobId,
+          key: "scan",
+          status: "completed",
+          output:
+            webResults.length > 0
+              ? `Collected ${webResults.length} real web source leads and extracted ${extractedByUrl.size} page summaries.`
+              : "No parsed web leads; fallback evidence was recorded.",
+          error: null,
+          errorCode: null,
+          nextRunAt: null,
+        });
+        activeTaskKey = undefined;
+
+        await ctx.runMutation(internal.research.patchJobInternal, {
+          researchJobId: args.researchJobId,
+          status: "synthesizing",
+          stage: "Synthesizing shortlist",
+          progress: 76,
+        });
+
+        await ctx.runMutation(internal.research.patchTaskInternal, {
+          researchJobId: args.researchJobId,
+          key: "synthesize",
+          status: "running",
+          attemptDelta: 1,
+          error: null,
+          errorCode: null,
+          nextRunAt: null,
+        });
+        activeTaskKey = "synthesize";
+
+        const sourceDocs = await ctx.runQuery(internal.research.listSourcesForJobInternal, {
+          researchJobId: args.researchJobId,
+          limit: 6,
+        });
+
+        const candidateDrafts = buildCandidateDrafts(
+          {
+            prompt: goal.prompt,
+            domain: goal.domain,
+            constraintSummary: goal.constraintSummary,
+          },
+          sourceDocs.map((source: { title: string; url: string; snippet?: string }) => ({
+            title: source.title,
+            url: source.url,
+            snippet: source.snippet,
+            extractedSummary: summarizeExtractedContent(extractedByUrl.get(source.url)),
+          })),
+        );
+
+        await ctx.runMutation(internal.research.replaceCandidatesInternal, {
+          researchJobId: args.researchJobId,
+          candidates: candidateDrafts,
+        });
+
+        const ranked = buildRankedResultsFromCandidates(candidateDrafts);
+        await ctx.runMutation(internal.research.replaceRankedResultsInternal, {
+          researchJobId: args.researchJobId,
+          rankedResults: ranked,
+        });
+
+        await ctx.runMutation(internal.research.addFindingInternal, {
+          researchJobId: args.researchJobId,
+          taskKey: "synthesize",
+          title: "Early shortlist shell",
+          summary: createSynthesisSummary(
+            sourceDocs.map((source: { title: string; url: string }) => ({ title: source.title, url: source.url })),
+          ),
+          confidence: sourceDocs.length > 0 ? 0.66 : 0.42,
+          sourceType: sourceDocs.length > 0 ? "web" : "simulated",
+        });
+
+        await ctx.runMutation(internal.research.patchTaskInternal, {
+          researchJobId: args.researchJobId,
+          key: "synthesize",
+          status: "completed",
+          output: "Built a shortlist summary from captured source leads.",
+          error: null,
+          errorCode: null,
+          nextRunAt: null,
+        });
+        activeTaskKey = undefined;
+
+        await ctx.runMutation(internal.research.patchJobInternal, {
+          researchJobId: args.researchJobId,
+          status: "verifying",
+          stage: "Verifying freshness",
+          progress: 92,
+        });
+        await sleep(200);
+
+        await ctx.runMutation(internal.research.patchJobInternal, {
+          researchJobId: args.researchJobId,
+          status: "completed",
+          stage: "Research complete",
+          progress: 100,
+          error: null,
+          lastErrorCode: null,
+          nextRunAt: null,
+          completedNow: true,
+        });
+
+        return null;
+      } catch (error) {
+        const { code, retryable } = classifyResearchError(error);
+        const message = errorMessage(error);
 
         if (activeTaskKey) {
           await ctx.runMutation(internal.research.patchTaskInternal, {
             researchJobId: args.researchJobId,
             key: activeTaskKey,
-            status: "queued",
-            error: null,
+            status: "failed",
+            error: message,
             errorCode: code,
-            nextRunAt,
           });
         }
 
-        await ctx.scheduler.runAfter(delayMs, internal.research.runJobInternal, {
+        const latestJob = await ctx.runQuery(internal.research.getJobInternal, {
           researchJobId: args.researchJobId,
+        });
+        const attempt = latestJob?.attempt ?? job.attempt;
+
+        if (retryable && attempt < MAX_JOB_ATTEMPTS) {
+          const delayMs = computeRetryDelayMs(attempt);
+          await ctx.runMutation(internal.research.scheduleRetryInternal, {
+            researchJobId: args.researchJobId,
+            taskKey: activeTaskKey,
+            error: message,
+            errorCode: code,
+            delayMs,
+          });
+          return null;
+        }
+
+        await ctx.runMutation(internal.research.patchJobInternal, {
+          researchJobId: args.researchJobId,
+          status: "failed",
+          stage: "Research failed",
+          error: message,
+          lastErrorCode: code,
+          nextRunAt: null,
         });
         return null;
       }
-
-      await ctx.runMutation(internal.research.patchJobInternal, {
+    } finally {
+      await ctx.runMutation(internal.research.releaseJobLeaseInternal, {
         researchJobId: args.researchJobId,
-        status: "failed",
-        stage: "Research failed",
-        error: message,
-        lastErrorCode: code,
-        nextRunAt: null,
+        leaseToken,
       });
-      return null;
     }
   },
 });

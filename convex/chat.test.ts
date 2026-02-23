@@ -92,4 +92,33 @@ describe("chat intake flow", () => {
     expect(sent.researchJobId).toBeNull();
     expect(latest).toBeNull();
   });
+
+  test("sendPrompt does not overwrite confirmed sensitive memory with inferred slots", async () => {
+    vi.useFakeTimers();
+    const testConvex = convexTest(schema, modules);
+    registerAgentComponent(testConvex);
+    const t = testConvex.withIdentity(AUTH_IDENTITY);
+
+    await t.mutation(api.memory.upsertUserMemoryFact, {
+      key: "nationality",
+      value: "Filipino",
+      sourceType: "user_confirmed",
+      confidence: 1,
+      status: "confirmed",
+      isSensitive: true,
+    });
+
+    const created = await t.mutation(api.chat.createThread, {});
+    await t.mutation(api.chat.sendPrompt, {
+      threadId: created.threadId,
+      prompt: "Need a flight from Manila to Tokyo on 2026-11-03 budget 850 nationality is Canadian",
+    });
+
+    const memory = await t.query(api.memory.getUserMemory, {});
+    const nationality = memory.facts.find((fact: { key: string }) => fact.key === "nationality");
+
+    expect(nationality?.value).toBe("Filipino");
+    expect(nationality?.sourceType).toBe("user_confirmed");
+    expect(nationality?.status).toBe("confirmed");
+  });
 });

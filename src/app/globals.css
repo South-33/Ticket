@@ -701,6 +701,45 @@ body.resizing-sidebar * {
   color: var(--text-secondary);
 }
 
+.research-status-events {
+  margin-top: 0.65rem;
+  border-top: 1px solid var(--border-color);
+  padding-top: 0.6rem;
+}
+
+.research-status-events-head {
+  font-size: 0.63rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: 0.35rem;
+}
+
+.research-status-events-list {
+  list-style: none;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.research-status-events-item {
+  display: grid;
+  gap: 0.12rem;
+  font-size: 0.68rem;
+  color: var(--text-primary);
+}
+
+.research-status-events-item span:first-child {
+  color: var(--text-secondary);
+  font-size: 0.62rem;
+  letter-spacing: 0.05em;
+}
+
+.research-status-events-item span:last-child {
+  color: #9a3b2f;
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+}
+
 .research-status-recheck {
   margin-top: 0.6rem;
   border: 1px solid var(--border-color);

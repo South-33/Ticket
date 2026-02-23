@@ -273,6 +273,15 @@ Track:
 - citation coverage
 - user corrections to memory
 
+Implementation notes (current):
+
+- Job stage transitions are now persisted in `researchStageEvents` from internal job patching logic.
+- Events include status/stage/progress/attempt/errorCode and can be queried via paginated `listStageEventsByJob`.
+- Retry and terminal failure paths emit stage events, enabling operational debugging without scanning full job/task documents.
+- `runJobInternal` now uses a per-job lease (`runLeaseToken`, `runLeaseExpiresAt`) to avoid duplicate concurrent runners.
+- Retry scheduling now runs through `scheduleRetryInternal` (single mutation) so status/task updates and scheduling are atomic.
+- Inferred intake writes no longer overwrite high-confidence confirmed sensitive memory facts.
+
 Evaluate with fixed benchmark scenarios per domain:
 
 - accuracy

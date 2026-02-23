@@ -62,6 +62,8 @@ export default defineSchema({
     stage: v.string(),
     progress: v.number(),
     attempt: v.number(),
+    runLeaseToken: v.optional(v.string()),
+    runLeaseExpiresAt: v.optional(v.number()),
     error: v.optional(v.string()),
     lastErrorCode: v.optional(v.string()),
     nextRunAt: v.optional(v.number()),
@@ -76,6 +78,32 @@ export default defineSchema({
     .index("by_user_thread_updatedAt", ["userId", "threadId", "updatedAt"])
     .index("by_status_updatedAt", ["status", "updatedAt"])
     .index("by_promptMessageId", ["promptMessageId"]),
+
+  researchStageEvents: defineTable({
+    jobId: v.id("researchJobs"),
+    userId: v.string(),
+    threadId: v.string(),
+    status: v.union(
+      v.literal("draft"),
+      v.literal("awaiting_input"),
+      v.literal("planned"),
+      v.literal("running"),
+      v.literal("synthesizing"),
+      v.literal("verifying"),
+      v.literal("completed"),
+      v.literal("failed"),
+      v.literal("cancelled"),
+      v.literal("expired"),
+    ),
+    stage: v.string(),
+    progress: v.number(),
+    attempt: v.number(),
+    errorCode: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_job_createdAt", ["jobId", "createdAt"])
+    .index("by_status_createdAt", ["status", "createdAt"])
+    .index("by_thread_createdAt", ["threadId", "createdAt"]),
 
   projectGoalSlots: defineTable({
     projectGoalId: v.id("projectGoals"),
