@@ -1344,6 +1344,219 @@ textarea::placeholder {
   }
 }
 
+.knowledge-admin-page {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 2.25rem 1.5rem 3rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.knowledge-admin-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.knowledge-admin-header h1 {
+  font-size: clamp(1.2rem, 2.2vw, 1.8rem);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin: 0.15rem 0 0;
+}
+
+.knowledge-kicker {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.knowledge-panel {
+  border: 1px solid var(--border-color);
+  background: color-mix(in oklab, var(--bg-color) 94%, #ffffff 6%);
+  padding: 0.9rem 1rem;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.knowledge-panel h2 {
+  margin: 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-secondary);
+}
+
+.knowledge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  align-items: end;
+}
+
+.knowledge-row label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.67rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+}
+
+.knowledge-form {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.knowledge-form input,
+.knowledge-form textarea,
+.knowledge-row input,
+.knowledge-row select,
+.knowledge-row textarea,
+.knowledge-row button,
+.knowledge-panel select {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  background: color-mix(in oklab, var(--bg-color) 92%, #ffffff 8%);
+  padding: 0.45rem 0.55rem;
+  font-size: 0.82rem;
+}
+
+.knowledge-form textarea,
+.knowledge-markdown {
+  resize: vertical;
+}
+
+.knowledge-btn {
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.68rem;
+  padding: 0.45rem 0.7rem;
+  cursor: pointer;
+}
+
+.knowledge-btn:hover {
+  background: color-mix(in oklab, var(--bg-color) 86%, #ffffff 14%);
+}
+
+.knowledge-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.knowledge-list-item {
+  border: 1px solid var(--border-color);
+  text-align: left;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 0.5rem 0.6rem;
+  display: grid;
+  gap: 0.22rem;
+  cursor: pointer;
+}
+
+.knowledge-list-item.active {
+  border-color: var(--text-primary);
+  background: color-mix(in oklab, var(--bg-color) 88%, #ffffff 12%);
+}
+
+.knowledge-list-item strong {
+  font-size: 0.78rem;
+}
+
+.knowledge-list-item span {
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+}
+
+.knowledge-notice,
+.knowledge-note,
+.knowledge-error,
+.knowledge-admin-state {
+  border: 1px solid var(--border-color);
+  padding: 0.65rem 0.8rem;
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.knowledge-error {
+  color: #8e2c2c;
+  border-color: color-mix(in oklab, #8e2c2c 40%, var(--border-color) 60%);
+}
+
+.knowledge-note-grid {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.knowledge-note-grid p {
+  margin: 0;
+  font-size: 0.77rem;
+}
+
+.knowledge-markdown {
+  width: 100%;
+  border: 1px solid var(--border-color);
+  background: color-mix(in oklab, var(--bg-color) 95%, #ffffff 5%);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  padding: 0.65rem;
+  font-size: 0.74rem;
+}
+
+.knowledge-table-wrap {
+  overflow-x: auto;
+}
+
+.knowledge-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.74rem;
+}
+
+.knowledge-table th,
+.knowledge-table td {
+  border: 1px solid var(--border-color);
+  padding: 0.4rem 0.5rem;
+  text-align: left;
+}
+
+.knowledge-table th {
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-secondary);
+  font-size: 0.62rem;
+}
+
+.knowledge-link {
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.64rem;
+  cursor: pointer;
+  padding: 0;
+}
+
+.knowledge-links {
+  margin: 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 0.22rem;
+  font-size: 0.75rem;
+}
+
 @media (max-width: 980px) {
   .grid-bg {
     left: 280px;
@@ -1458,6 +1671,20 @@ textarea::placeholder {
 
   .research-status {
     max-height: none;
+  }
+
+  .knowledge-admin-page {
+    padding: 1.2rem 0.8rem 2rem;
+  }
+
+  .knowledge-admin-header {
+    align-items: start;
+    flex-direction: column;
+  }
+
+  .knowledge-row {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .message {
