@@ -1608,6 +1608,52 @@ export const getPendingClarificationForThread = query({
   },
 });
 
+export const getPendingClarificationForThreadInternal = internalQuery({
+  args: {
+    threadId: v.string(),
+    userId: v.string(),
+  },
+  returns: v.union(
+    v.null(),
+    v.object({
+      requestId: v.id("researchClarificationRequests"),
+      researchJobId: v.id("researchJobs"),
+      askedMessage: v.string(),
+      questions: v.array(
+        v.object({
+          key: v.string(),
+          question: v.string(),
+          answerType: v.union(v.literal("string"), v.literal("boolean"), v.literal("enum"), v.literal("date"), v.literal("number")),
+          required: v.boolean(),
+          choices: v.optional(v.array(v.string())),
+          reason: v.optional(v.string()),
+          evidenceUrls: v.optional(v.array(v.string())),
+        }),
+      ),
+      createdAt: v.number(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const pending = await ctx.db
+      .query("researchClarificationRequests")
+      .withIndex("by_thread_status_createdAt", (q) => q.eq("threadId", args.threadId).eq("status", "pending"))
+      .order("desc")
+      .take(5);
+    const selected = pending.find((item) => item.userId === args.userId);
+    if (!selected) {
+      return null;
+    }
+
+    return {
+      requestId: selected._id,
+      researchJobId: selected.jobId,
+      askedMessage: selected.askedMessage,
+      questions: selected.questions,
+      createdAt: selected.createdAt,
+    };
+  },
+});
+
 export const getLatestJobForThread = query({
   args: {
     threadId: v.string(),

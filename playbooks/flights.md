@@ -54,6 +54,7 @@ Policy:
 - Default to safe/compliant tactics.
 - Only surface grey tactics when user explicitly opts in.
 - High-risk tactics are documented in the appendix and are never default suggestions.
+- Experimental tactics are documented in a dedicated section and must be labeled clearly as unproven.
 
 ## Module 3 - Verification + Risk Gate
 Before final recommendation, verify top candidates:
@@ -71,6 +72,11 @@ Before final recommendation, verify top candidates:
 
 ## Tactic Bank (Tips and Tricks)
 Use these as modular tactics. Prefer combining 2-3 tactics per run, not all at once.
+
+Evidence labeling guidance:
+- `verified`: corroborated by strong sources and repeatable checks.
+- `mixed`: useful in some markets/periods, but inconsistent.
+- `experimental`: hypothesis-level; useful for discovery, not for confident claims.
 
 ### Search Space Expansion
 - `nearby_origin_radius`: Try secondary origin airports within realistic transfer distance.
@@ -123,6 +129,30 @@ Use these as modular tactics. Prefer combining 2-3 tactics per run, not all at o
 - `cooling_off_rule`: Warn user to delay irreversible add-ons for 7-14 days.
 - `ticketing_status_monitor`: Track whether ticket remains honored before chaining plans.
 
+## Experimental (Unproven) Tactics
+Use this section for high-upside ideas that are not consistently reproducible.
+These can be explored, but should not be framed as reliable unless revalidated on the current route/date.
+
+Execution rules:
+- Always label these as `experimental` in results.
+- Never use fixed global savings percentages for these tactics.
+- Require route, date-window, and source checks before ranking them above verified options.
+- If an experimental tactic conflicts with a verified tactic, prefer the verified tactic.
+
+Experimental tactics:
+- `ndc_vs_gds_delta_probe` (experimental): Compare direct/NDC surfaced offers versus legacy aggregator output for the same itinerary shape.
+- `direct_only_carrier_probe` (experimental): Probe carriers with partial/no index coverage for route-specific misses.
+- `regional_blind_spot_scan` (experimental): Test whether a region has persistent metasearch gaps on low-cost or regional operators.
+- `price_change_velocity_watch` (experimental): Track short-interval repricing velocity as a proxy for buy-now versus wait.
+- `bucket_depletion_proxy_signal` (experimental): Use observable fare-class availability shifts as a rough scarcity signal.
+- `new_route_launch_flash_watch` (experimental): Watch newly launched routes for short-lived promotional underpricing.
+- `secondary_airport_suppression_probe` (experimental): Test nearby secondary airports for hub-premium suppression effects.
+- `pos_currency_lag_probe` (experimental): Compare point-of-sale and checkout currency pathways for temporary conversion lag.
+
+Anti-pitfall note:
+- Treat experimental tactics as search expansion, not proof.
+- Promote to `mixed` or `verified` only after repeated route-level confirmation.
+
 ### Myth Debunk Tactics
 - `debunk_incognito_only`: Do not claim incognito mode alone reliably reduces fares.
 - `debunk_fixed_booking_day`: Do not claim universal cheapest weekday/hour rule.
@@ -159,6 +189,7 @@ Return ranked options in this structure:
       "itinerary": "...",
       "total_price": "...",
       "value_rationale": "...",
+      "evidence_tier": "verified|mixed|experimental",
       "risk_class": "safe_compliant|grey_common|high_risk_contract",
       "caveats": ["..."],
       "last_checked_utc": "ISO-8601"

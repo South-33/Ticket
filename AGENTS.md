@@ -10,13 +10,14 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - Keep `architecture-plan.md` as the implementation source of truth and update it when architecture decisions or constraints change.
 - Keep `tools.md` up to date whenever tool contracts/channels/schema change (add/remove/rename tools, validation loops, or apply behavior), so new agents can immediately see the current tool map.
 - Canonical playbook markdown scaffolds live under `playbooks/` (`skills.md`, `flights.md`, `train.md`, `concert.md`); curate there first, then publish active items into Convex knowledge docs for runtime injection.
+- `playbooks/flights.md` includes an explicit `Experimental (Unproven) Tactics` section; these tactics are for search expansion only and should always be labeled `experimental` (never presented as reliable without route-level revalidation).
 - Chat intake (`sendPrompt`) no longer starts/resumes research heuristically; research jobs now start only when `generateReplyInternal` emits valid `ResearchOps.start` with required criteria and at least one selected skill.
 - Product direction: researcher and chatbot are distinct actors; researcher can request user clarifications mid-run, chatbot mediates user interaction, and the user-facing UI should expose this runtime trace clearly (expandable panel/pop-up style is preferred).
 - Product direction: research quality should be LLM-led end-to-end (planning, analysis, synthesis, and ranking), while code-level logic primarily enforces safety guardrails, validation loops, and recovery behavior.
 - Chat model output contract: user-facing response text is always required; tool tags are optional and should be emitted only when the model intends to run that tool.
 - Research loop direction: use iterative, checkpointed rounds with quality-gated continuation (no full restart by default) and selective context promotion from raw sources.
 - CI/preview quirk: avoid placeholder Clerk publishable keys (for example `pk_test_ci_placeholder`) because Next.js prerender can fail in auth-wrapped layouts; treat invalid/placeholder keys as unconfigured.
-- Clarification plumbing is partially in place (`requestUserClarificationInternal`, `submitClarificationAnswerInternal`, pending-request query); chat-mediated auto-resume wiring is still pending.
+- Clarification plumbing is in place (`requestUserClarificationInternal`, `submitClarificationAnswerInternal`, pending-request query), and chat now handles pending clarification answers then re-queues research automatically.
 
 ## Reference Docs
 - Convex best practices: https://docs.convex.dev/understanding/best-practices

@@ -554,6 +554,7 @@ When this section conflicts with older sections, this section wins.
 - [x] Scan stage now has deterministic quality assessment with selective source promotion and one targeted continuation round (`continue` vs `finalize`).
 - [x] Backend dialogue event bus is scaffolded (`researchDialogueEvents`) with actor/kind metadata and paginated query API.
 - [x] Clarification request lifecycle primitives exist (`requestUserClarificationInternal`, `submitClarificationAnswerInternal`, pending request query) with persisted request/answer records.
+- [x] Chat now consumes pending clarification requests, accepts user answers, and re-queues research automatically.
 - [ ] LLM planner/executor/synthesizer runtime is not complete yet (current execution is still largely deterministic retrieval/scoring).
 - [ ] LLM-led final ranking is not complete yet (deterministic ranker still active primary path).
 - [ ] Researcher-to-chatbot clarification tooling and pause/resume handshake is not complete yet.
@@ -604,7 +605,7 @@ When this section conflicts with older sections, this section wins.
 - [x] Add `requestUserClarificationInternal` mutation with batched fields (`<= 3`).
 - [x] Add clarification request storage with status lifecycle (`pending`, `answered`, `expired`, `cancelled`).
 - [x] Add answer ingestion + normalization + validation path from chatbot user replies.
-- [ ] Auto-resume paused jobs after valid clarification answers.
+- [x] Auto-resume paused jobs after valid clarification answers.
 
 #### D) LLM research runtime
 

@@ -573,6 +573,51 @@ function normalizeSkillSlug(value: string) {
   return value.trim().toLowerCase();
 }
 
+function normalizeClarificationKey(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function parseClarificationAnswers(
+  prompt: string,
+  questions: Array<{ key: string; question: string }>,
+) {
+  const trimmed = prompt.trim();
+  if (!trimmed) {
+    return [] as Array<{ key: string; value: string }>;
+  }
+
+  if (questions.length === 1) {
+    return [{ key: questions[0].key, value: trimmed }];
+  }
+
+  const questionsByNormalizedKey = new Map(
+    questions.map((item) => [normalizeClarificationKey(item.key), item.key] as const),
+  );
+  const answers = new Map<string, string>();
+
+  const segments = trimmed.split(/\n|;/).map((segment) => segment.trim()).filter(Boolean);
+  for (const segment of segments) {
+    const match = segment.match(/^([a-zA-Z0-9_\-\s]{2,60})\s*[:=-]\s*(.+)$/);
+    if (!match) {
+      continue;
+    }
+
+    const maybeKey = normalizeClarificationKey(match[1] ?? "");
+    const value = (match[2] ?? "").trim();
+    const canonicalKey = questionsByNormalizedKey.get(maybeKey);
+    if (!canonicalKey || !value) {
+      continue;
+    }
+    answers.set(canonicalKey, value);
+  }
+
+  return Array.from(answers.entries()).map(([key, value]) => ({ key, value }));
+}
+
 function validateResearchOpsSemantics(args: {
   researchOps: z.infer<typeof researchOpSchema>;
   confirmedFacts: Array<{ key: string; value: string }>;
@@ -944,6 +989,75 @@ export const generateReplyInternal = internalAction({
     }
 
     try {
+      const pendingClarification = await ctx.runQuery(internal.research.getPendingClarificationForThreadInternal, {
+        threadId: args.threadId,
+        userId: threadState.userId,
+      });
+
+      if (pendingClarification) {
+        const parsedAnswers = parseClarificationAnswers(args.prompt, pendingClarification.questions);
+        let clarificationHandled = false;
+        let clarificationMissingKeys: string[] = [];
+
+        if (parsedAnswers.length > 0) {
+          const submitted = await ctx.runMutation(internal.research.submitClarificationAnswerInternal, {
+            requestId: pendingClarification.requestId,
+            answers: parsedAnswers,
+          });
+          clarificationHandled = submitted.accepted;
+          clarificationMissingKeys = submitted.missingKeys;
+
+          logRaw("CLARIFICATION_SUBMIT_ATTEMPT", {
+            threadId: args.threadId,
+            requestId: pendingClarification.requestId,
+            parsedAnswerCount: parsedAnswers.length,
+            accepted: submitted.accepted,
+            missingKeys: submitted.missingKeys,
+          });
+
+          if (submitted.accepted) {
+            await ctx.scheduler.runAfter(0, internal.research.runJobInternal, {
+              researchJobId: pendingClarification.researchJobId,
+            });
+
+            const ackMessage = "Thanks, got it. I will continue the research now.";
+            await chatAgent.saveMessage(ctx, {
+              threadId: args.threadId,
+              userId: threadState.userId,
+              message: {
+                role: "assistant",
+                content: ackMessage,
+              },
+            });
+            await ctx.runMutation(internal.chat.updateThreadPreviewInternal, {
+              threadId: args.threadId,
+              preview: ackMessage,
+            });
+            return;
+          }
+        }
+
+        const followUp = clarificationHandled
+          ? pendingClarification.askedMessage
+          : clarificationMissingKeys.length > 0
+            ? `I still need: ${clarificationMissingKeys.join(", ")}.\n${pendingClarification.askedMessage}`
+            : pendingClarification.askedMessage;
+
+        await chatAgent.saveMessage(ctx, {
+          threadId: args.threadId,
+          userId: threadState.userId,
+          message: {
+            role: "assistant",
+            content: followUp,
+          },
+        });
+        await ctx.runMutation(internal.chat.updateThreadPreviewInternal, {
+          threadId: args.threadId,
+          preview: followUp,
+        });
+        return;
+      }
+
       const [profile, confirmedFacts, preferenceHints, skillCatalog] = await Promise.all([
         ctx.runQuery(internal.memory.getUserProfileInternal, {
           userId: threadState.userId,

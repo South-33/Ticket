@@ -148,4 +148,60 @@ describe("chat intake flow", () => {
     expect(secondRename.changed).toBe(true);
     expect(thread?.title).toBe("Cheapest Manila to Tokyo Flight");
   });
+
+  test("generateReplyInternal routes single-question clarification answers and resumes research", async () => {
+    const testConvex = convexTest(schema, modules);
+    registerAgentComponent(testConvex);
+    const t = testConvex.withIdentity(AUTH_IDENTITY);
+
+    const created = await t.mutation(api.chat.createThread, {});
+    const started = await t.mutation(internal.research.startResearchFromOpsInternal, {
+      userId: DEMO_USER_ID,
+      threadId: created.threadId,
+      promptMessageId: "pm-clarification-start",
+      prompt: "Find me flight options to Frankfurt",
+      domain: "flight",
+      selectedSkillSlugs: ["skills"],
+      criteria: [
+        { key: "origin", value: "Manila" },
+        { key: "destination", value: "Frankfurt" },
+        { key: "departureDate", value: "2026-08-11" },
+        { key: "budget", value: "900" },
+        { key: "nationality", value: "Filipino" },
+      ],
+      skillHintsSnapshot: ["[skills] Keep constraints explicit"],
+    });
+
+    await t.mutation(internal.research.requestUserClarificationInternal, {
+      researchJobId: started.researchJobId,
+      questions: [
+        {
+          key: "flexibilityLevel",
+          question: "Are your dates flexible by +/- 3 days?",
+          answerType: "boolean",
+          required: true,
+        },
+      ],
+    });
+
+    const sent = await t.mutation(api.chat.sendPrompt, {
+      threadId: created.threadId,
+      prompt: "yes",
+    });
+
+    await t.action(internal.chat.generateReplyInternal, {
+      threadId: created.threadId,
+      promptMessageId: sent.promptMessageId,
+      prompt: "yes",
+    });
+
+    const pending = await t.query(api.research.getPendingClarificationForThread, {
+      threadId: created.threadId,
+    });
+    const threads = await t.query(api.chat.listThreads, {});
+    const thread = threads.find((item) => item.threadId === created.threadId);
+
+    expect(pending).toBeNull();
+    expect(thread?.preview).toContain("Thanks, got it");
+  });
 });
