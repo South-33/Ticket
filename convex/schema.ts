@@ -108,6 +108,27 @@ export default defineSchema({
     .index("by_status_createdAt", ["status", "createdAt"])
     .index("by_thread_createdAt", ["threadId", "createdAt"]),
 
+  researchDialogueEvents: defineTable({
+    jobId: v.id("researchJobs"),
+    userId: v.string(),
+    threadId: v.string(),
+    actor: v.union(v.literal("researcher"), v.literal("chatbot"), v.literal("system")),
+    kind: v.union(
+      v.literal("status"),
+      v.literal("plan"),
+      v.literal("quality"),
+      v.literal("context"),
+      v.literal("decision"),
+      v.literal("error"),
+    ),
+    message: v.string(),
+    detail: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index("by_job_createdAt", ["jobId", "createdAt"])
+    .index("by_thread_createdAt", ["threadId", "createdAt"])
+    .index("by_actor_createdAt", ["actor", "createdAt"]),
+
   projectGoalSlots: defineTable({
     projectGoalId: v.id("projectGoals"),
     key: v.string(),

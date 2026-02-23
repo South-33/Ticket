@@ -1196,6 +1196,85 @@ describe("research pipeline", () => {
     }
   });
 
+  test("lists dialogue events through paginated API", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const threadId = "thread-dialogue-events-api";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    process.env.TAVILY_API_KEY = "test-tavily-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("api.tavily.com/search")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  title: "Deal One",
+                  url: "https://example.com/deal-1",
+                  content: "Cheap fare lead one",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        if (url.includes("api.tavily.com/extract")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  url: "https://example.com/deal-1",
+                  raw_content: "Extracted content one with richer context.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          json: async () => ({}),
+        } as Response;
+      }),
+    );
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const page = await t.query(api.research.listDialogueEventsByJob, {
+        researchJobId,
+        paginationOpts: {
+          numItems: 4,
+          cursor: null,
+        },
+      });
+
+      expect(page.page.length).toBeGreaterThan(0);
+      expect(page.page[0]?.actor).toBeTruthy();
+      expect(page.page[0]?.kind).toBeTruthy();
+      expect(
+        page.page.some((event: { kind: string }) => event.kind === "decision" || event.kind === "quality"),
+      ).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
+    }
+  });
+
   test("fails terminally after max retry attempts", async () => {
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-retry-terminal";

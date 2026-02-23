@@ -1741,6 +1741,35 @@ export const listStageEventsByJob = query({
   },
 });
 
+export const listDialogueEventsByJob = query({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    await getOwnedJobOrThrow(ctx, args.researchJobId, userId);
+    assertPageSize(args.paginationOpts.numItems);
+
+    const result = await ctx.db
+      .query("researchDialogueEvents")
+      .withIndex("by_job_createdAt", (q) => q.eq("jobId", args.researchJobId))
+      .order("desc")
+      .paginate(args.paginationOpts);
+
+    return {
+      ...result,
+      page: result.page.map((event) => ({
+        actor: event.actor,
+        kind: event.kind,
+        message: event.message,
+        detail: event.detail,
+        createdAt: event.createdAt,
+      })),
+    };
+  },
+});
+
 export const requestLiveRecheck = mutation({
   args: {
     researchJobId: v.id("researchJobs"),
@@ -2077,6 +2106,43 @@ export const addFindingInternal = internalMutation({
   },
 });
 
+export const addDialogueEventInternal = internalMutation({
+  args: {
+    researchJobId: v.id("researchJobs"),
+    actor: v.union(v.literal("researcher"), v.literal("chatbot"), v.literal("system")),
+    kind: v.union(
+      v.literal("status"),
+      v.literal("plan"),
+      v.literal("quality"),
+      v.literal("context"),
+      v.literal("decision"),
+      v.literal("error"),
+    ),
+    message: v.string(),
+    detail: v.optional(v.string()),
+  },
+  returns: v.null(),
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.researchJobId);
+    if (!job) {
+      throw new ConvexError("Research job not found");
+    }
+
+    await ctx.db.insert("researchDialogueEvents", {
+      jobId: args.researchJobId,
+      userId: job.userId,
+      threadId: job.threadId,
+      actor: args.actor,
+      kind: args.kind,
+      message: args.message,
+      detail: args.detail,
+      createdAt: Date.now(),
+    });
+
+    return null;
+  },
+});
+
 export const addSourcesInternal = internalMutation({
   args: {
     researchJobId: v.id("researchJobs"),
@@ -2327,6 +2393,13 @@ export const runJobInternal = internalAction({
           lastErrorCode: null,
           nextRunAt: null,
         });
+        await ctx.runMutation(internal.research.addDialogueEventInternal, {
+          researchJobId: args.researchJobId,
+          actor: "researcher",
+          kind: "status",
+          message: "Started planning research tasks.",
+          detail: `Domain=${goal.domain}`,
+        });
 
         activeTaskKey = "plan";
         await ctx.runMutation(internal.research.patchTaskInternal, {
@@ -2361,6 +2434,13 @@ export const runJobInternal = internalAction({
             summary: plannerHints.slice(0, 3).join(" | "),
             confidence: 0.7,
             sourceType: "simulated",
+          });
+          await ctx.runMutation(internal.research.addDialogueEventInternal, {
+            researchJobId: args.researchJobId,
+            actor: "researcher",
+            kind: "plan",
+            message: "Loaded skill planner hints.",
+            detail: `hint_count=${plannerHints.length}`,
           });
         }
 
@@ -2444,10 +2524,24 @@ export const runJobInternal = internalAction({
             confidence: clamp(roundOneQuality.score, 0.2, 0.95),
             sourceType: "api",
           });
+          await ctx.runMutation(internal.research.addDialogueEventInternal, {
+            researchJobId: args.researchJobId,
+            actor: "researcher",
+            kind: "quality",
+            message: `Round 1 quality score ${(roundOneQuality.score * 100).toFixed(0)} (${roundOneQuality.decision}).`,
+            detail: roundOneQuality.reason,
+          });
         }
 
         if (roundOneQuality.decision === "continue") {
           const followupQuery = buildFollowupSearchQuery(searchQuery, roundOneQuality);
+          await ctx.runMutation(internal.research.addDialogueEventInternal, {
+            researchJobId: args.researchJobId,
+            actor: "researcher",
+            kind: "decision",
+            message: "Quality gate requested a targeted continuation scan.",
+            detail: `gaps=${roundOneQuality.gaps.join(",") || "coverage"}`,
+          });
           await ctx.runMutation(internal.research.addFindingInternal, {
             researchJobId: args.researchJobId,
             taskKey: "scan",
@@ -2497,6 +2591,13 @@ export const runJobInternal = internalAction({
               summary: `${roundTwoQuality.reason} Promoted ${promotedSecondRound.length}/${webResults.length} source(s) into compact context.`,
               confidence: clamp(roundTwoQuality.score, 0.2, 0.95),
               sourceType: "api",
+            });
+            await ctx.runMutation(internal.research.addDialogueEventInternal, {
+              researchJobId: args.researchJobId,
+              actor: "researcher",
+              kind: "quality",
+              message: `Round 2 quality score ${(roundTwoQuality.score * 100).toFixed(0)} (${roundTwoQuality.decision}).`,
+              detail: roundTwoQuality.reason,
             });
           }
         }
@@ -2620,6 +2721,13 @@ export const runJobInternal = internalAction({
             ),
             sourceType: "api",
           });
+          await ctx.runMutation(internal.research.addDialogueEventInternal, {
+            researchJobId: args.researchJobId,
+            actor: "researcher",
+            kind: "context",
+            message: `Promoted ${promotedEvidence.length} high-signal source(s) for synthesis context.`,
+            detail: reasons,
+          });
         }
 
         const candidateDrafts = buildCandidateDrafts(
@@ -2682,6 +2790,13 @@ export const runJobInternal = internalAction({
           nextRunAt: null,
           completedNow: true,
         });
+        await ctx.runMutation(internal.research.addDialogueEventInternal, {
+          researchJobId: args.researchJobId,
+          actor: "researcher",
+          kind: "decision",
+          message: "Research run completed and shortlist is ready.",
+          detail: `candidates=${candidateDrafts.length}; ranked=${ranked.length}`,
+        });
 
         return null;
       } catch (error) {
@@ -2712,6 +2827,13 @@ export const runJobInternal = internalAction({
             errorCode: code,
             delayMs,
           });
+          await ctx.runMutation(internal.research.addDialogueEventInternal, {
+            researchJobId: args.researchJobId,
+            actor: "system",
+            kind: "error",
+            message: "Transient research error detected; retry scheduled.",
+            detail: `code=${code}; delay_ms=${delayMs}`,
+          });
           return null;
         }
 
@@ -2722,6 +2844,13 @@ export const runJobInternal = internalAction({
           error: message,
           lastErrorCode: code,
           nextRunAt: null,
+        });
+        await ctx.runMutation(internal.research.addDialogueEventInternal, {
+          researchJobId: args.researchJobId,
+          actor: "system",
+          kind: "error",
+          message: "Research run failed after retries.",
+          detail: `code=${code}; message=${message.slice(0, 220)}`,
         });
         return null;
       }
