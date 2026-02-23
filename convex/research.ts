@@ -1740,6 +1740,15 @@ export const getLatestJobForThread = query({
           updatedAt: v.number(),
         }),
       ),
+      dialogueEvents: v.array(
+        v.object({
+          actor: v.string(),
+          kind: v.string(),
+          message: v.string(),
+          detail: v.optional(v.string()),
+          createdAt: v.number(),
+        }),
+      ),
     }),
   ),
   handler: async (ctx, args) => {
@@ -1755,7 +1764,7 @@ export const getLatestJobForThread = query({
       return null;
     }
 
-    const [tasks, findings, sources, candidates, rankedResults] = await Promise.all([
+    const [tasks, findings, sources, candidates, rankedResults, dialogueEvents] = await Promise.all([
       ctx.db
         .query("researchTasks")
         .withIndex("by_job_order", (q) => q.eq("jobId", selectedJob._id))
@@ -1780,6 +1789,11 @@ export const getLatestJobForThread = query({
         .query("rankedResults")
         .withIndex("by_job_rank", (q) => q.eq("jobId", selectedJob._id))
         .order("asc")
+        .take(10),
+      ctx.db
+        .query("researchDialogueEvents")
+        .withIndex("by_job_createdAt", (q) => q.eq("jobId", selectedJob._id))
+        .order("desc")
         .take(10),
     ]);
 
@@ -1859,6 +1873,16 @@ export const getLatestJobForThread = query({
         sourceUrls: ranked.sourceUrls,
         updatedAt: ranked.updatedAt,
       })),
+      dialogueEvents: dialogueEvents
+        .slice()
+        .reverse()
+        .map((event) => ({
+          actor: event.actor,
+          kind: event.kind,
+          message: event.message,
+          detail: event.detail,
+          createdAt: event.createdAt,
+        })),
     };
   },
 });
