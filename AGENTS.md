@@ -15,6 +15,7 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - Product direction: research quality should be LLM-led end-to-end (planning, analysis, synthesis, and ranking), while code-level logic primarily enforces safety guardrails, validation loops, and recovery behavior.
 - Chat model output contract: user-facing response text is always required; tool tags are optional and should be emitted only when the model intends to run that tool.
 - Research loop direction: use iterative, checkpointed rounds with quality-gated continuation (no full restart by default) and selective context promotion from raw sources.
+- CI/preview quirk: avoid placeholder Clerk publishable keys (for example `pk_test_ci_placeholder`) because Next.js prerender can fail in auth-wrapped layouts; treat invalid/placeholder keys as unconfigured.
 
 ## Reference Docs
 - Convex best practices: https://docs.convex.dev/understanding/best-practices

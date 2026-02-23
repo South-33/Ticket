@@ -484,6 +484,126 @@ describe("research pipeline", () => {
     }
   });
 
+  test("runs a targeted continuation scan when first round quality is weak", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const threadId = "thread-quality-continuation";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    process.env.TAVILY_API_KEY = "test-tavily-key";
+
+    const searchQueries: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const payload = init?.body && typeof init.body === "string"
+          ? (JSON.parse(init.body) as { query?: string; urls?: string[] })
+          : undefined;
+
+        if (url.includes("api.tavily.com/search")) {
+          const query = payload?.query ?? "";
+          searchQueries.push(query);
+
+          if (searchQueries.length === 1) {
+            return {
+              ok: true,
+              json: async () => ({
+                results: [
+                  {
+                    title: "Generic travel guide",
+                    url: "https://example.com/weak-signal",
+                    content: "Travel tips and destination ideas without concrete pricing.",
+                  },
+                ],
+              }),
+            } as Response;
+          }
+
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  title: "Official airline flash fare",
+                  url: "https://example.com/strong-signal",
+                  content: "From $430 nonstop 11h 20m with carry-on included",
+                },
+              ],
+            }),
+          } as Response;
+        }
+
+        if (url.includes("api.tavily.com/extract")) {
+          const extractUrls = payload?.urls ?? [];
+          const results = extractUrls.map((itemUrl) => {
+            if (itemUrl.includes("weak-signal")) {
+              return {
+                url: itemUrl,
+                raw_content: "Narrative blog advice with no explicit fare or duration numbers.",
+              };
+            }
+
+            return {
+              url: itemUrl,
+              raw_content: "Official offer from $430 direct 11h 20m with one carry-on included.",
+            };
+          });
+
+          return {
+            ok: true,
+            json: async () => ({ results }),
+          } as Response;
+        }
+
+        return {
+          ok: true,
+          json: async () => ({}),
+        } as Response;
+      }),
+    );
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const latest = await t.query(api.research.getLatestJobForThread, {
+        threadId,
+      });
+      const persisted = await t.run(async (ctx) => {
+        return await ctx.db
+          .query("findings")
+          .withIndex("by_job_createdAt", (q) => q.eq("jobId", researchJobId))
+          .order("desc")
+          .take(20);
+      });
+
+      expect(latest?.status).toBe("completed");
+      expect(searchQueries.length).toBeGreaterThanOrEqual(2);
+      expect(searchQueries[1]).toContain("price duration layover");
+      expect(latest?.sources.length).toBeGreaterThanOrEqual(2);
+      expect(
+        persisted.some((finding) => finding.title === "Quality gate triggered continuation round"),
+      ).toBe(true);
+      expect(
+        persisted.some((finding) => finding.title === "Quality assessment (round 2)"),
+      ).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
+    }
+  });
+
   test("does not rerun terminal jobs", async () => {
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-terminal";
