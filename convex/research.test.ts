@@ -604,6 +604,116 @@ describe("research pipeline", () => {
     }
   });
 
+  test("requests flexibility clarification when quality remains thin", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const threadId = "thread-quality-clarification";
+    const priorApiKey = process.env.TAVILY_API_KEY;
+    process.env.TAVILY_API_KEY = "test-tavily-key";
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const payload = init?.body && typeof init.body === "string"
+          ? (JSON.parse(init.body) as { query?: string; urls?: string[] })
+          : undefined;
+
+        if (url.includes("api.tavily.com/search")) {
+          const query = payload?.query ?? "";
+          if (query.includes("official booking fare rules")) {
+            return {
+              ok: true,
+              json: async () => ({
+                results: [
+                  {
+                    title: "Weak signal source B",
+                    url: "https://example.com/weak-b",
+                    content: "General travel narrative without concrete fares.",
+                  },
+                ],
+              }),
+            } as Response;
+          }
+
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  title: "Weak signal source A",
+                  url: "https://example.com/weak-a",
+                  content: "Planning advice with no prices, durations, or transfers.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+
+        if (url.includes("api.tavily.com/extract")) {
+          const extractUrls = payload?.urls ?? [];
+          return {
+            ok: true,
+            json: async () => ({
+              results: extractUrls.map((itemUrl) => ({
+                url: itemUrl,
+                raw_content: "Contextual travel writeup without actionable fare metrics.",
+              })),
+            }),
+          } as Response;
+        }
+
+        return {
+          ok: true,
+          json: async () => ({}),
+        } as Response;
+      }),
+    );
+
+    try {
+      const started = await t.mutation(internal.research.startResearchFromOpsInternal, {
+        userId: DEMO_USER_ID,
+        threadId,
+        promptMessageId: "pm-quality-clarification",
+        prompt: "Find me options to Frankfurt",
+        domain: "flight",
+        selectedSkillSlugs: ["skills"],
+        criteria: [
+          { key: "origin", value: "Manila" },
+          { key: "destination", value: "Frankfurt" },
+          { key: "departureDate", value: "2026-08-11" },
+          { key: "budget", value: "900" },
+          { key: "nationality", value: "Filipino" },
+        ],
+        skillHintsSnapshot: ["[skills] Keep constraints explicit"],
+      });
+
+      expect(started.jobStatus).toBe("planned");
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId: started.researchJobId,
+      });
+
+      const latest = await t.query(api.research.getLatestJobForThread, {
+        threadId,
+      });
+      const pending = await t.query(api.research.getPendingClarificationForThread, {
+        threadId,
+      });
+
+      expect(latest?.status).toBe("awaiting_input");
+      expect(latest?.followUpQuestion?.toLowerCase()).toContain("flexible");
+      expect(pending).not.toBeNull();
+      expect(pending?.questions[0]?.key.toLowerCase()).toBe("flexibilitylevel");
+    } finally {
+      vi.unstubAllGlobals();
+      if (priorApiKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorApiKey;
+      }
+    }
+  });
+
   test("does not rerun terminal jobs", async () => {
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-terminal";

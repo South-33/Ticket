@@ -11,6 +11,7 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - Keep `tools.md` up to date whenever tool contracts/channels/schema change (add/remove/rename tools, validation loops, or apply behavior), so new agents can immediately see the current tool map.
 - Canonical playbook markdown scaffolds live under `playbooks/` (`skills.md`, `flights.md`, `train.md`, `concert.md`); curate there first, then publish active items into Convex knowledge docs for runtime injection.
 - `playbooks/flights.md` includes an explicit `Experimental (Unproven) Tactics` section; these tactics are for search expansion only and should always be labeled `experimental` (never presented as reliable without route-level revalidation).
+- Product direction now includes a PR-style community signal loop for flight knowledge (proposal -> testing -> temporary active -> promoted/invalidated/expired) so volatile finds can be injected quickly without contaminating verified core tactics.
 - Chat intake (`sendPrompt`) no longer starts/resumes research heuristically; research jobs now start only when `generateReplyInternal` emits valid `ResearchOps.start` with required criteria and at least one selected skill.
 - Product direction: researcher and chatbot are distinct actors; researcher can request user clarifications mid-run, chatbot mediates user interaction, and the user-facing UI should expose this runtime trace clearly (expandable panel/pop-up style is preferred).
 - Product direction: research quality should be LLM-led end-to-end (planning, analysis, synthesis, and ranking), while code-level logic primarily enforces safety guardrails, validation loops, and recovery behavior.
@@ -18,6 +19,7 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - Research loop direction: use iterative, checkpointed rounds with quality-gated continuation (no full restart by default) and selective context promotion from raw sources.
 - CI/preview quirk: avoid placeholder Clerk publishable keys (for example `pk_test_ci_placeholder`) because Next.js prerender can fail in auth-wrapped layouts; treat invalid/placeholder keys as unconfigured.
 - Clarification plumbing is in place (`requestUserClarificationInternal`, `submitClarificationAnswerInternal`, pending-request query), and chat now handles pending clarification answers then re-queues research automatically.
+- Current flight runtime behavior: if scan quality remains weak on numeric fare evidence and `flexibilityLevel` is missing (with core route/date present), research can pause and request a date-flexibility clarification before synthesis.
 
 ## Reference Docs
 - Convex best practices: https://docs.convex.dev/understanding/best-practices

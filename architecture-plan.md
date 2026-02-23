@@ -555,6 +555,7 @@ When this section conflicts with older sections, this section wins.
 - [x] Backend dialogue event bus is scaffolded (`researchDialogueEvents`) with actor/kind metadata and paginated query API.
 - [x] Clarification request lifecycle primitives exist (`requestUserClarificationInternal`, `submitClarificationAnswerInternal`, pending request query) with persisted request/answer records.
 - [x] Chat now consumes pending clarification requests, accepts user answers, and re-queues research automatically.
+- [x] Flight scan now quality-gates into clarification when numeric fare evidence remains thin and `flexibilityLevel` is missing.
 - [ ] LLM planner/executor/synthesizer runtime is not complete yet (current execution is still largely deterministic retrieval/scoring).
 - [ ] LLM-led final ranking is not complete yet (deterministic ranker still active primary path).
 - [ ] Researcher-to-chatbot clarification tooling and pause/resume handshake is not complete yet.
@@ -638,3 +639,93 @@ When this section conflicts with older sections, this section wins.
 - [ ] Add fixed pass/fail thresholds (citation coverage, contradiction rate, clarification completion, latency/cost budgets).
 - [ ] Ship behind feature flag (`llm_research_pipeline_v1`) with safe fallback path.
 - [ ] Promote to default only after quality gates pass on benchmark suite.
+
+## 26) Community Signal PR Loop for Flights (Living Knowledge)
+
+Goal:
+
+- Keep flight intelligence continuously updated from real user-run discoveries (promos, channel-only discounts, booking quirks) without polluting verified core tactics.
+- Model this as an internal PR workflow with automated triage, validation, and promotion/demotion.
+
+### 26.1 Scope and source of truth
+
+- Runtime source of truth remains Convex knowledge tables.
+- `playbooks/flights.md` remains the canonical playbook scaffold and is regenerated/published from active curated entries.
+- Do not directly trust one-off findings from a single run; all findings enter the PR loop first.
+
+### 26.2 New data model additions
+
+- `knowledgeProposals`
+  - Candidate findings submitted by research runs or admins.
+  - Example types: promo code, fare-rule quirk, channel-specific discount, route-level anomaly.
+- `knowledgeProposalEvents`
+  - Evidence events attached to a proposal (confirm/fail/expired/abuse/no-longer-working).
+- `knowledgeProposalReviews`
+  - Reviewer decisions (agent or human) with rationale and confidence.
+- `knowledgeProposalUsage`
+  - Runtime attempts and outcomes when a proposal is surfaced to users.
+
+Recommended key fields:
+
+- `domain`, `tacticKey`, `title`, `description`, `carrier`, `region`, `routeScope`
+- `evidenceTier` (`verified|mixed|experimental`)
+- `riskClass` (`safe_compliant|grey_common|high_risk_contract`)
+- `status` (see lifecycle below)
+- `firstSeenAt`, `lastValidatedAt`, `expiresAt`
+- `maxUses`, `remainingUses` (for limited promo inventory when known)
+- `sourceRefs` (internal source IDs, optional external links)
+
+### 26.3 Proposal lifecycle (PR-style)
+
+`proposed -> triaged -> testing -> active_temp -> promoted_verified | rejected | expired | invalidated`
+
+Rules:
+
+- New findings start as `proposed` and default to `experimental`.
+- `active_temp` means visible to runtime as temporary intelligence with explicit caveats.
+- `promoted_verified` requires repeated positive validation and conflict checks.
+- Any repeated failure reports or hard expiry trigger `invalidated`/`expired` and removal from active injection.
+
+### 26.4 Reviewer agent responsibilities
+
+- Triage incoming proposals for duplicates, obvious spam, and policy risk.
+- Request/trigger validation runs for high-impact proposals.
+- Approve promotion, demotion, expiry, or rejection with explicit rationale.
+- Keep temporary findings in a bounded queue; prune stale/low-signal items automatically.
+
+### 26.5 Runtime injection contract
+
+- Inject temporary findings into research context as a separate block (for example, `temporary_flight_signals`).
+- Temporary findings must always be labeled `experimental` unless promoted.
+- Temporary findings can expand search, but cannot outrank verified options without route-level revalidation in the current run.
+- If temporary and verified guidance conflict, verified guidance wins by default.
+
+### 26.6 Auto-promotion and auto-demotion policy
+
+Promotion candidates:
+
+- Minimum independent confirmations (configurable) across runs/sessions.
+- Recent validation freshness window satisfied.
+- No unresolved policy/safety conflicts.
+
+Demotion triggers:
+
+- Consecutive failed attempts above threshold.
+- Explicit user-run invalidation reports.
+- Expired validity window or exhausted promo uses.
+
+### 26.7 GitHub mirror (optional)
+
+- Internal proposal tables are the operational truth.
+- Optional GitHub PR mirror can publish high-signal changes for auditability and manual review.
+- Avoid mirroring every low-signal event to prevent noisy PR churn.
+
+### 26.8 Implementation checklist
+
+- [ ] Add Convex tables/indexes for proposals, events, reviews, usage.
+- [ ] Add `KnowledgeProposalOps` internal functions (`submit`, `triage`, `review`, `promote`, `demote`, `expire`).
+- [ ] Add reviewer agent job that processes proposal queues on schedule.
+- [ ] Add runtime injection path for `active_temp` signals into planning context.
+- [ ] Add stale cleanup job and usage-based invalidation.
+- [ ] Add admin UI for proposal queue and review actions.
+- [ ] Add metrics dashboard (proposal volume, promotion rate, invalidation rate, savings impact).

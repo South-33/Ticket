@@ -233,6 +233,15 @@ Execution:
 - High-priority active entries require >=2 corroborating sources.
 - Add expiry to volatile tactics (promos, loopholes, devaluations).
 
+### Continuous Update Loop (PR-Managed)
+- Treat new route-level discoveries from research runs as proposal items first (PR-style), not immediate permanent tactics.
+- Keep temporary discoveries in a dedicated `temporary_flight_signals` block in runtime knowledge.
+- Required metadata for temporary entries: `evidence_tier`, `first_seen_utc`, `last_validated_utc`, `expires_utc`, and `status`.
+- Allowed temporary statuses: `proposed`, `testing`, `active_temp`, `invalidated`, `expired`, `promoted`.
+- Promotion rule: promote from temporary to core tactic only after repeated confirmations across independent runs.
+- Demotion rule: repeated failures or expiry should invalidate quickly to avoid stale savings claims.
+- When a temporary signal is surfaced to users, include plain-language caveat that it may no longer work.
+
 ## Appendix - High-Risk Tactics (Explicit Opt-In Only)
 Never suggest by default. Only discuss if the user explicitly asks for high-risk methods.
 

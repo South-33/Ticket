@@ -924,6 +924,22 @@ function buildPromptWithCriteria(prompt: string, criteria: Record<string, string
   return `${prompt}\n\nResearch criteria:\n${criteriaLines}`;
 }
 
+function hasProvidedGoalSlot(
+  slots: Array<{ key: string; value?: string; status: "missing" | "provided" | "confirmed" }>,
+  targetKey: string,
+) {
+  const normalizedTarget = targetKey.trim().toLowerCase();
+  return slots.some((slot) => {
+    if (slot.key.trim().toLowerCase() !== normalizedTarget) {
+      return false;
+    }
+    if (slot.status === "missing") {
+      return false;
+    }
+    return !!slot.value?.trim();
+  });
+}
+
 function buildClarificationPrompt(questions: Array<{ key: string; question: string }>) {
   const ask = questions
     .map((item) => item.question.trim())
@@ -2219,6 +2235,36 @@ export const getProjectGoalInternal = internalQuery({
   },
 });
 
+export const listGoalSlotsInternal = internalQuery({
+  args: {
+    projectGoalId: v.id("projectGoals"),
+  },
+  returns: v.array(
+    v.object({
+      key: v.string(),
+      value: v.optional(v.string()),
+      status: v.union(v.literal("missing"), v.literal("provided"), v.literal("confirmed")),
+      sourceType: v.union(v.literal("prompt"), v.literal("memory"), v.literal("user_confirmed")),
+      isSensitive: v.boolean(),
+      updatedAt: v.number(),
+    }),
+  ),
+  handler: async (ctx, args) => {
+    const slots = await ctx.db
+      .query("projectGoalSlots")
+      .withIndex("by_goal_key", (q) => q.eq("projectGoalId", args.projectGoalId))
+      .take(120);
+    return slots.map((slot) => ({
+      key: slot.key,
+      value: slot.value,
+      status: slot.status,
+      sourceType: slot.sourceType,
+      isSensitive: slot.isSensitive,
+      updatedAt: slot.updatedAt,
+    }));
+  },
+});
+
 export const listSourcesForJobInternal = internalQuery({
   args: {
     researchJobId: v.id("researchJobs"),
@@ -2743,6 +2789,10 @@ export const runJobInternal = internalAction({
         return null;
       }
 
+      const goalSlots = await ctx.runQuery(internal.research.listGoalSlotsInternal, {
+        projectGoalId: goal._id,
+      });
+
       let activeTaskKey: "plan" | "scan" | "synthesize" | undefined;
 
       try {
@@ -2886,6 +2936,7 @@ export const runJobInternal = internalAction({
           totalSourceCount: webResults.length,
           round: 1,
         });
+        let finalQuality = roundOneQuality;
 
         if (webResults.length > 0) {
           await ctx.runMutation(internal.research.addFindingInternal, {
@@ -2954,6 +3005,7 @@ export const runJobInternal = internalAction({
             totalSourceCount: webResults.length,
             round: 2,
           });
+          finalQuality = roundTwoQuality;
 
           if (webResults.length > 0) {
             await ctx.runMutation(internal.research.addFindingInternal, {
@@ -3036,6 +3088,41 @@ export const runJobInternal = internalAction({
           nextRunAt: null,
         });
         activeTaskKey = undefined;
+
+        const shouldRequestFlexibilityClarification =
+          goal.domain === "flight"
+          && webResults.length > 0
+          && finalQuality.score < QUALITY_CONTINUE_THRESHOLD
+          && finalQuality.gaps.includes("numeric_evidence")
+          && hasProvidedGoalSlot(goalSlots, "departureDate")
+          && hasProvidedGoalSlot(goalSlots, "destination")
+          && !hasProvidedGoalSlot(goalSlots, "flexibilityLevel");
+
+        if (shouldRequestFlexibilityClarification) {
+          const clarification = await ctx.runMutation(internal.research.requestUserClarificationInternal, {
+            researchJobId: args.researchJobId,
+            requestedBy: "researcher",
+            questions: [
+              {
+                key: "flexibilityLevel",
+                question: "Are your travel dates flexible by plus or minus 3 days?",
+                answerType: "boolean",
+                required: true,
+                reason: "Needed to widen the search window when pricing evidence is thin.",
+              },
+            ],
+          });
+
+          await ctx.runMutation(internal.research.addDialogueEventInternal, {
+            researchJobId: args.researchJobId,
+            actor: "chatbot",
+            kind: "decision",
+            message: "Asked user a clarification to improve price coverage before synthesis.",
+            detail: clarification.askedMessage,
+          });
+
+          return null;
+        }
 
         await ctx.runMutation(internal.research.patchJobInternal, {
           researchJobId: args.researchJobId,
