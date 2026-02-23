@@ -1399,6 +1399,99 @@ describe("research pipeline", () => {
     }
   });
 
+  test("uses flag-gated fallback when llm research pipeline is disabled", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+    const threadId = "thread-llm-flag-disabled";
+    const priorGoogleKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+    const priorTavilyKey = process.env.TAVILY_API_KEY;
+    const priorFlag = process.env.LLM_RESEARCH_PIPELINE_V1;
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY = "test-model-key";
+    process.env.TAVILY_API_KEY = "test-tavily-key";
+    process.env.LLM_RESEARCH_PIPELINE_V1 = "0";
+
+    const fetchedUrls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        fetchedUrls.push(url);
+
+        if (url.includes("api.tavily.com/search")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  title: "Flag-disabled source",
+                  url: "https://example.com/flag-disabled",
+                  content: "Fare from $540, 1 stop, 12h 40m",
+                },
+              ],
+            }),
+          } as Response;
+        }
+
+        if (url.includes("api.tavily.com/extract")) {
+          return {
+            ok: true,
+            json: async () => ({
+              results: [
+                {
+                  url: "https://example.com/flag-disabled",
+                  raw_content: "Offer from $540 with one stop and baggage policy details.",
+                },
+              ],
+            }),
+          } as Response;
+        }
+
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      }),
+    );
+
+    try {
+      const researchJobId = await seedJob(t, {
+        threadId,
+        status: "planned",
+        withTasks: true,
+      });
+
+      await t.action(internal.research.runJobInternal, {
+        researchJobId,
+      });
+
+      const dialogue = await t.query(api.research.listDialogueEventsByJob, {
+        researchJobId,
+        paginationOpts: {
+          numItems: 20,
+          cursor: null,
+        },
+      });
+
+      expect(dialogue.page.some((event) => (event.detail ?? "").includes("planner_flag_disabled"))).toBe(true);
+      expect(dialogue.page.some((event) => (event.detail ?? "").includes("ranking_flag_disabled"))).toBe(true);
+      expect(fetchedUrls.every((url) => url.includes("api.tavily.com"))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+      if (priorGoogleKey === undefined) {
+        delete process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+      } else {
+        process.env.GOOGLE_GENERATIVE_AI_API_KEY = priorGoogleKey;
+      }
+      if (priorTavilyKey === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = priorTavilyKey;
+      }
+      if (priorFlag === undefined) {
+        delete process.env.LLM_RESEARCH_PIPELINE_V1;
+      } else {
+        process.env.LLM_RESEARCH_PIPELINE_V1 = priorFlag;
+      }
+    }
+  });
+
   test("paginates tasks and findings by job", async () => {
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
     const threadId = "thread-task-finding-pagination";

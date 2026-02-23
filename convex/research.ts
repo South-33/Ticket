@@ -75,6 +75,10 @@ const rankingOutputSchema = z.object({
   ).min(1).max(3),
 });
 
+function isLlmResearchPipelineEnabled() {
+  return process.env.LLM_RESEARCH_PIPELINE_V1 !== "0";
+}
+
 type ResearchJobStatus =
   | "draft"
   | "awaiting_input"
@@ -1079,6 +1083,15 @@ async function generatePlannerPlan(args: {
   const fallback = buildDeterministicPlannerOutput(args);
   const validationErrors: string[] = [];
 
+  if (!isLlmResearchPipelineEnabled()) {
+    validationErrors.push("planner_flag_disabled");
+    return {
+      plan: fallback,
+      mode: "fallback",
+      validationErrors,
+    };
+  }
+
   if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
     validationErrors.push("planner_model_api_key_missing");
     return {
@@ -1240,6 +1253,15 @@ async function generateLlmRanking(args: {
 }): Promise<RankingResult> {
   const baseline = buildRankedResultsFromCandidates(args.candidates);
   const validationErrors: string[] = [];
+
+  if (!isLlmResearchPipelineEnabled()) {
+    validationErrors.push("ranking_flag_disabled");
+    return {
+      rankedResults: baseline,
+      mode: "fallback",
+      validationErrors,
+    };
+  }
 
   if (!process.env.GOOGLE_GENERATIVE_AI_API_KEY) {
     validationErrors.push("ranking_model_api_key_missing");
@@ -1778,6 +1800,7 @@ export const requestUserClarificationInternal = internalMutation({
         status: "awaiting_input",
         stage: "Awaiting clarification",
       });
+
       return { requestId: existingPending[0]._id, askedMessage };
     }
 
@@ -3517,6 +3540,22 @@ export const runJobInternal = internalAction({
             message: "Asked user a clarification to improve price coverage before synthesis.",
             detail: clarification.askedMessage,
           });
+
+          try {
+            await ctx.runAction(internal.chat.postPendingClarificationPromptInternal, {
+              threadId: job.threadId,
+              userId: job.userId,
+              requestId: clarification.requestId,
+            });
+          } catch {
+            await ctx.runMutation(internal.research.addDialogueEventInternal, {
+              researchJobId: args.researchJobId,
+              actor: "system",
+              kind: "decision",
+              message: "Clarification prompt dispatch skipped due to missing chat thread context.",
+              detail: "clarification_prompt_dispatch_skipped",
+            });
+          }
 
           return null;
         }

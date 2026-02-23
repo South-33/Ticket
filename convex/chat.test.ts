@@ -149,6 +149,56 @@ describe("chat intake flow", () => {
     expect(thread?.title).toBe("Cheapest Manila to Tokyo Flight");
   });
 
+  test("postPendingClarificationPromptInternal mirrors pending clarification into chat", async () => {
+    const testConvex = convexTest(schema, modules);
+    registerAgentComponent(testConvex);
+    const t = testConvex.withIdentity(AUTH_IDENTITY);
+
+    const created = await t.mutation(api.chat.createThread, {});
+    const started = await t.mutation(internal.research.startResearchFromOpsInternal, {
+      userId: DEMO_USER_ID,
+      threadId: created.threadId,
+      promptMessageId: "pm-clarification-immediate",
+      prompt: "Find me flight options to Frankfurt",
+      domain: "flight",
+      selectedSkillSlugs: ["skills"],
+      criteria: [
+        { key: "origin", value: "Manila" },
+        { key: "destination", value: "Frankfurt" },
+        { key: "departureDate", value: "2026-08-11" },
+      ],
+      skillHintsSnapshot: ["[skills] Keep constraints explicit"],
+    });
+
+    const pendingRequest = await t.mutation(internal.research.requestUserClarificationInternal, {
+      researchJobId: started.researchJobId,
+      questions: [
+        {
+          key: "flexibilityLevel",
+          question: "Are your dates flexible by +/- 3 days?",
+          answerType: "boolean",
+          required: true,
+        },
+      ],
+    });
+
+    const posted = await t.action(internal.chat.postPendingClarificationPromptInternal, {
+      threadId: created.threadId,
+      userId: DEMO_USER_ID,
+      requestId: pendingRequest.requestId,
+    });
+
+    const pending = await t.query(api.research.getPendingClarificationForThread, {
+      threadId: created.threadId,
+    });
+    const threads = await t.query(api.chat.listThreads, {});
+    const thread = threads.find((item) => item.threadId === created.threadId);
+
+    expect(posted.posted).toBe(true);
+    expect(pending).not.toBeNull();
+    expect(thread?.preview).toContain("Quick clarification before I continue");
+  });
+
   test("generateReplyInternal routes single-question clarification answers and resumes research", async () => {
     const testConvex = convexTest(schema, modules);
     registerAgentComponent(testConvex);

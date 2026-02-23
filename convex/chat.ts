@@ -970,6 +970,42 @@ export const setThreadTitleFromToolInternal = internalMutation({
   },
 });
 
+export const postPendingClarificationPromptInternal = internalAction({
+  args: {
+    threadId: v.string(),
+    userId: v.string(),
+    requestId: v.id("researchClarificationRequests"),
+  },
+  returns: v.object({
+    posted: v.boolean(),
+  }),
+  handler: async (ctx, args) => {
+    const pendingClarification = await ctx.runQuery(internal.research.getPendingClarificationForThreadInternal, {
+      threadId: args.threadId,
+      userId: args.userId,
+    });
+
+    if (!pendingClarification || pendingClarification.requestId !== args.requestId) {
+      return { posted: false };
+    }
+
+    await chatAgent.saveMessage(ctx, {
+      threadId: args.threadId,
+      userId: args.userId,
+      message: {
+        role: "assistant",
+        content: pendingClarification.askedMessage,
+      },
+    });
+    await ctx.runMutation(internal.chat.updateThreadPreviewInternal, {
+      threadId: args.threadId,
+      preview: pendingClarification.askedMessage,
+    });
+
+    return { posted: true };
+  },
+});
+
 export const generateReplyInternal = internalAction({
   args: {
     threadId: v.string(),

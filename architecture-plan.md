@@ -555,6 +555,7 @@ When this section conflicts with older sections, this section wins.
 - [x] Backend dialogue event bus is scaffolded (`researchDialogueEvents`) with actor/kind metadata and paginated query API.
 - [x] Clarification request lifecycle primitives exist (`requestUserClarificationInternal`, `submitClarificationAnswerInternal`, pending request query) with persisted request/answer records.
 - [x] Chat now consumes pending clarification requests, accepts user answers, and re-queues research automatically.
+- [x] Clarification requests now trigger an immediate assistant prompt when thread state exists (no extra user turn required to see the question).
 - [x] Flight scan now quality-gates into clarification when numeric fare evidence remains thin and `flexibilityLevel` is missing.
 - [x] Planner stage now supports an LLM planner contract (structured JSON + repair attempts) with deterministic fallback when model output is unavailable/invalid.
 - [x] Ranking stage now supports LLM prioritization with schema validation/repair and deterministic fallback.
@@ -639,7 +640,7 @@ When this section conflicts with older sections, this section wins.
 - [ ] Add benchmark scenarios per domain and skill mix (accuracy/freshness/actionability/cost/latency).
 - [ ] Add regression tests for pause/resume clarification loop and envelope-stage repair behavior.
 - [ ] Add fixed pass/fail thresholds (citation coverage, contradiction rate, clarification completion, latency/cost budgets).
-- [ ] Ship behind feature flag (`llm_research_pipeline_v1`) with safe fallback path.
+- [x] Ship behind feature flag (`llm_research_pipeline_v1`) with safe fallback path.
 - [ ] Promote to default only after quality gates pass on benchmark suite.
 
 ## 26) Community Signal PR Loop for Flights (Living Knowledge)
