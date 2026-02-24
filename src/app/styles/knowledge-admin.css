@@ -1,0 +1,182 @@
+/* Playbook/knowledge admin UI */
+.knowledge-admin-page {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 2.25rem 1.5rem 3rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.knowledge-admin-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.knowledge-admin-header h1 {
+  font-size: clamp(1.2rem, 2.2vw, 1.8rem);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  margin: 0.15rem 0 0;
+}
+
+.knowledge-kicker {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: 0.65rem;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.knowledge-panel {
+  border: 1px solid var(--border-color);
+  background: color-mix(in oklab, var(--bg-color) 94%, #ffffff 6%);
+  padding: 0.9rem 1rem;
+  display: grid;
+  gap: 0.8rem;
+}
+
+.knowledge-panel h2 {
+  margin: 0;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-secondary);
+}
+
+.knowledge-doc-grid {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.knowledge-doc-row {
+  border: 1px solid var(--border-color);
+  text-align: left;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 0.55rem 0.65rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  cursor: pointer;
+}
+
+.knowledge-doc-row div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.knowledge-doc-row strong {
+  font-size: 0.77rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.knowledge-doc-row p {
+  margin: 0;
+  font-size: 0.76rem;
+}
+
+.knowledge-doc-row span {
+  font-size: 0.63rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+}
+
+.knowledge-doc-row.active {
+  border-color: var(--text-primary);
+  background: color-mix(in oklab, var(--bg-color) 88%, #ffffff 12%);
+}
+
+.knowledge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  align-items: end;
+}
+
+.knowledge-row label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.67rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+}
+
+.knowledge-form {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.knowledge-form input,
+.knowledge-form textarea,
+.knowledge-row input,
+.knowledge-row select,
+.knowledge-row textarea,
+.knowledge-panel select {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  background: color-mix(in oklab, var(--bg-color) 92%, #ffffff 8%);
+  padding: 0.45rem 0.55rem;
+  font-size: 0.82rem;
+}
+
+.knowledge-form textarea {
+  resize: vertical;
+}
+
+.knowledge-btn {
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.68rem;
+  padding: 0.45rem 0.7rem;
+  cursor: pointer;
+}
+
+.knowledge-btn:hover {
+  background: color-mix(in oklab, var(--bg-color) 86%, #ffffff 14%);
+}
+
+.knowledge-notice,
+.knowledge-error,
+.knowledge-admin-state {
+  border: 1px solid var(--border-color);
+  padding: 0.65rem 0.8rem;
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.knowledge-error {
+  color: #8e2c2c;
+  border-color: color-mix(in oklab, #8e2c2c 40%, var(--border-color) 60%);
+}
+
+@media (max-width: 760px) {
+  .knowledge-admin-page {
+    padding: 1.2rem 0.8rem 2rem;
+  }
+
+  .knowledge-admin-header {
+    align-items: start;
+    flex-direction: column;
+  }
+
+  .knowledge-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .knowledge-doc-row {
+    align-items: start;
+    flex-direction: column;
+  }
+}

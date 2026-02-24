@@ -1,0 +1,243 @@
+/* Clerk appearance + class override layer */
+.brutalist-clerk-card-box {
+  box-shadow: none !important;
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-color);
+  border-radius: 0 !important;
+}
+
+.brutalist-clerk-card {
+  box-shadow: none !important;
+  border-radius: 0 !important;
+  padding: 3rem 2rem !important;
+  background-color: transparent !important;
+  border: none !important;
+}
+
+.brutalist-clerk-header {
+  font-family: var(--font-serif);
+  font-size: 1.5rem;
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-primary);
+}
+
+.brutalist-clerk-subtitle {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.brutalist-clerk-social-btn {
+  border: 1px solid var(--text-primary) !important;
+  border-radius: 0 !important;
+  background-color: transparent !important;
+  transition: var(--transition-fast) !important;
+  box-shadow: none !important;
+}
+
+.brutalist-clerk-social-btn:hover {
+  background-color: var(--text-primary) !important;
+}
+
+.brutalist-clerk-social-btn:hover .brutalist-clerk-social-btn-text {
+  color: var(--bg-color) !important;
+}
+
+.brutalist-clerk-social-btn:hover [class*="badge"],
+.brutalist-clerk-social-btn:hover [class*="lastUsed"],
+.brutalist-clerk-social-btn:hover [class*="tag"],
+.brutalist-clerk-social-btn:hover [class*="chip"] {
+  background: var(--bg-color) !important;
+  color: var(--text-primary) !important;
+}
+
+.brutalist-clerk-social-btn-text {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-primary);
+  transition: var(--transition-fast) !important;
+}
+
+.brutalist-clerk-divider {
+  border-top: none !important;
+}
+
+.brutalist-clerk-divider-text {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+  background: var(--bg-color) !important;
+}
+
+.brutalist-clerk-label {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-primary);
+}
+
+.brutalist-clerk-input {
+  border: 1px dashed var(--border-color) !important;
+  border-radius: 0 !important;
+  font-family: var(--font-mono) !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0.75rem !important;
+  color: var(--text-primary) !important;
+}
+
+.brutalist-clerk-input:focus {
+  border-style: solid !important;
+  border-color: var(--text-primary) !important;
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.brutalist-clerk-primary-btn {
+  background: transparent !important;
+  border: 1px solid var(--text-primary) !important;
+  color: var(--text-primary) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 0.75rem !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.1em !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  transition: var(--transition-fast) !important;
+  text-align: center;
+}
+
+.brutalist-clerk-primary-btn::before {
+  content: none !important;
+}
+
+.brutalist-clerk-primary-btn:hover {
+  background: var(--text-primary) !important;
+  color: var(--bg-color) !important;
+}
+
+.brutalist-clerk-footer-text,
+.brutalist-clerk-footer-link {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.brutalist-clerk-footer-link {
+  color: var(--text-primary) !important;
+  text-decoration: none;
+  border-bottom: 1px dashed var(--border-color);
+  padding-bottom: 2px;
+}
+
+.brutalist-clerk-footer-link:hover {
+  border-bottom-color: var(--text-primary);
+}
+
+.brutalist-clerk-logo,
+.cl-internal-b3fm6y,
+.cl-internal-ph726s,
+.cl-footer,
+.cl-dev-mode-banner,
+.cl-userButtonPopoverFooter,
+.cl-internal-10p0mnd,
+.cl-internal-1ksn9w5,
+.cl-profilePage__security + div,
+[data-localization-key="userProfile.navbar.description"],
+.cl-navbar ~ .cl-pageScrollBox > .cl-footer,
+[class*="cl-"][class*="Footer"],
+[class*="cl-"][class*="devMode"],
+[class*="cl-"][class*="powered"] {
+  display: none !important;
+}
+
+.cl-card,
+.cl-rootBox {
+  background: var(--bg-color) !important;
+  background-image: none !important;
+}
+
+.cl-main {
+  display: flex !important;
+  flex-direction: column-reverse !important;
+}
+
+.cl-userButtonPopoverCard {
+  border: 1px solid var(--border-color) !important;
+  border-radius: 0 !important;
+  background: var(--bg-color) !important;
+  box-shadow: none !important;
+  min-width: 220px !important;
+}
+
+.cl-userButtonPopoverActionButton {
+  padding: 0.5rem 1rem !important;
+  border-radius: 0 !important;
+}
+
+.cl-userButtonPopoverActionButtonText {
+  font-family: var(--font-mono) !important;
+  font-size: 0.65rem !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.05em !important;
+}
+
+.cl-userPreview {
+  padding: 0.75rem 1rem !important;
+  border-radius: 0 !important;
+}
+
+.cl-userPreviewMainIdentifier {
+  font-family: var(--font-serif) !important;
+  font-size: 0.85rem !important;
+  font-weight: 500 !important;
+}
+
+.cl-userPreviewSecondaryIdentifier {
+  font-family: var(--font-mono) !important;
+  font-size: 0.6rem !important;
+  opacity: 0.7 !important;
+}
+
+.cl-modalBackdrop {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 2rem !important;
+}
+
+.cl-modalContent {
+  margin: 0 !important;
+  position: relative !important;
+  top: 0 !important;
+  transform: none !important;
+}
+
+.cl-modalCloseButton {
+  top: 1.5rem !important;
+  right: 1.5rem !important;
+}
+
+.cl-modalCloseButton:focus,
+.cl-modalCloseButton:active,
+.cl-internal-tnai3c:focus,
+.cl-internal-1t6y74e:focus {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+[class^="cl-"]:focus {
+  outline: none !important;
+  box-shadow: none !important;
+}

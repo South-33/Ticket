@@ -1,0 +1,109 @@
+:root {
+  --bg-color: #f4f4f0;
+  --text-primary: #111111;
+  --text-secondary: #777777;
+  --border-color: #dcdcdc;
+  --grid-color: rgba(0, 0, 0, 0.04);
+
+  --font-serif: "Cormorant Garamond", serif;
+  --font-mono: "JetBrains Mono", monospace;
+
+  --input-side-fade-color: var(--bg-color);
+  --input-side-fade-size: 5rem;
+  --research-dock-height: 18rem;
+
+  --transition-slow: 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-fast: 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  min-height: 100%;
+  scrollbar-gutter: stable;
+}
+
+html {
+  scrollbar-width: none;
+}
+
+html::-webkit-scrollbar {
+  display: none;
+}
+
+body {
+  background-color: var(--bg-color);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  overflow-x: hidden;
+  overflow-y: scroll;
+  --scrollbar-track-alpha: 0;
+  --scrollbar-thumb-alpha: 0.7;
+  --scrollbar-thumb-hover-alpha: 0.9;
+  --scrollbar-fade-mask-opacity: 0;
+  --scrollbar-fade-mask-width: 14px;
+  display: flex;
+  position: relative;
+}
+
+body::after {
+  content: "";
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--scrollbar-fade-mask-width);
+  background: var(--bg-color);
+  opacity: var(--scrollbar-fade-mask-opacity);
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 10001;
+  transition: opacity 500ms ease, visibility 500ms ease;
+}
+
+body.chat-switching::after {
+  visibility: visible;
+}
+
+body.chat-switching {
+  --scrollbar-track-alpha: 0;
+  --scrollbar-thumb-alpha: 0;
+  --scrollbar-thumb-hover-alpha: 0;
+  --scrollbar-fade-mask-opacity: 1;
+}
+
+::selection {
+  background-color: #3b4252;
+  color: #eceff4;
+}
+
+::-moz-selection {
+  background-color: #3b4252;
+  color: #eceff4;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, var(--scrollbar-track-alpha));
+  transition: background-color 500ms ease;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, var(--scrollbar-thumb-alpha));
+  border-radius: 20px;
+  border: 2px solid var(--bg-color);
+  transition: background-color 500ms ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, var(--scrollbar-thumb-hover-alpha));
+}
