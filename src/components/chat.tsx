@@ -780,8 +780,9 @@ const THREAD_SWITCH_LOCK_OBSERVER_MIN_GAP_MS = 300;
 const THREAD_SWITCH_SETTLE_DELAYS_MS = [120, 320, 640, 980] as const;
 const AUTO_FOLLOW_PROGRAMMATIC_GUARD_MS = 240;
 const AUTO_FOLLOW_USER_INTENT_WINDOW_MS = 420;
-const SCROLL_DEBUG_ENABLED = true;
+const SCROLL_DEBUG_ENABLED = process.env.NEXT_PUBLIC_SCROLL_DEBUG === "1";
 const SCROLL_DEBUG_SCROLL_LOG_INTERVAL_MS = 120;
+const AUTO_FOLLOW_ANCHOR_MARGIN_PX = 24;
 
 const AUTO_FOLLOW_EASING = (t: number) => {
   return t < 0.5 ? 4 * t ** 3 : 1 - ((-2 * t + 2) ** 3) / 2;
@@ -1509,6 +1510,7 @@ function AuthenticatedChat() {
   const scrollDebugLastIntentLogTsRef = useRef(0);
   const scrollDebugLastPositionRef = useRef(0);
   const scrollDebugLastPositionTsRef = useRef(0);
+  const isFeedEndVisibleRef = useRef(true);
   const touchLastYRef = useRef<number | null>(null);
   const waitingForDataRef = useRef(false);
   const autoFollowEnabledRef = useRef(true);
@@ -1533,7 +1535,12 @@ function AuthenticatedChat() {
   }, [lenis]);
 
   const isNearBottom = useCallback(
-    (threshold = AUTO_FOLLOW_ATTACH_THRESHOLD_PX) => getBottomDistance() <= threshold,
+    (threshold = AUTO_FOLLOW_ATTACH_THRESHOLD_PX) => {
+      if (isFeedEndVisibleRef.current) {
+        return true;
+      }
+      return getBottomDistance() <= threshold;
+    },
     [getBottomDistance],
   );
 
@@ -1550,6 +1557,7 @@ function AuthenticatedChat() {
       stickyRemainingMs: Math.max(0, autoFollowStickyUntilRef.current - Date.now()),
       threadSwitchLockActive: Date.now() <= threadSwitchBottomLockUntilRef.current,
       threadSwitchLockRemainingMs: Math.max(0, threadSwitchBottomLockUntilRef.current - Date.now()),
+      anchorVisible: isFeedEndVisibleRef.current,
       currentScrollY: getCurrentScrollPosition(),
       bottomDistance,
       bottomDistanceVh: viewportHeight > 0 ? Number((bottomDistance / viewportHeight).toFixed(3)) : null,
@@ -1590,6 +1598,43 @@ function AuthenticatedChat() {
     }
     console.info("[scroll-debug] diagnostics enabled");
   }, []);
+
+  useEffect(() => {
+    const target = feedEndRef.current;
+    if (!target || typeof IntersectionObserver === "undefined") {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (!entry) {
+          return;
+        }
+
+        const visible = entry.isIntersecting;
+        isFeedEndVisibleRef.current = visible;
+
+        if (visible && !autoFollowEnabledRef.current) {
+          autoFollowEnabledRef.current = true;
+          logScrollDebug("anchor:reattach", {
+            reason: "feed-end-visible",
+          });
+        }
+      },
+      {
+        root: null,
+        threshold: 0,
+        rootMargin: `0px 0px -${AUTO_FOLLOW_ANCHOR_MARGIN_PX}px 0px`,
+      },
+    );
+
+    observer.observe(target);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [logScrollDebug]);
 
   const isAutoFollowStickyActive = useCallback(() => {
     return Date.now() <= autoFollowStickyUntilRef.current;
@@ -1696,6 +1741,10 @@ function AuthenticatedChat() {
       return;
     }
 
+    if (isFeedEndVisibleRef.current) {
+      return;
+    }
+
     const bottomDistance = getBottomDistance();
     if (bottomDistance <= AUTO_FOLLOW_MIN_BOTTOM_DISTANCE_PX) {
       return;
@@ -1745,6 +1794,9 @@ function AuthenticatedChat() {
 
     for (const delay of THREAD_SWITCH_SETTLE_DELAYS_MS) {
       const timer = window.setTimeout(() => {
+        if (isFeedEndVisibleRef.current) {
+          return;
+        }
         const bottomDistance = getBottomDistance();
         if (bottomDistance <= AUTO_FOLLOW_ATTACH_THRESHOLD_PX) {
           return;
@@ -2053,6 +2105,9 @@ function AuthenticatedChat() {
 
         const now = performance.now();
         const bottomDistance = getBottomDistance();
+        if (isFeedEndVisibleRef.current) {
+          return;
+        }
         if (bottomDistance <= AUTO_FOLLOW_MIN_BOTTOM_DISTANCE_PX) {
           return;
         }
@@ -2278,6 +2333,10 @@ function AuthenticatedChat() {
         return;
       }
 
+      if (isFeedEndVisibleRef.current) {
+        return;
+      }
+
       const bottomDistance = getBottomDistance();
       lastScrollPositionRef.current = getCurrentScrollPosition();
 
@@ -2350,6 +2409,7 @@ function AuthenticatedChat() {
     const syncFollowFromCurrentPosition = () => {
       const current = getCurrentScrollPosition();
       const bottomDistance = getBottomDistance();
+      const effectiveBottomDistance = isFeedEndVisibleRef.current ? 0 : bottomDistance;
       const movedUp = current < lastScrollPositionRef.current - 1;
       const now = Date.now();
       const stickyActive = isAutoFollowStickyActive();
@@ -2362,7 +2422,7 @@ function AuthenticatedChat() {
         wasEnabled: autoFollowEnabledRef.current,
         isOutputting: shouldAutoFollow || stickyActive || threadSwitchLockActive,
         movedUp: movedUp && hasRecentUserUpIntent && !isProgrammaticWindow && !threadSwitchLockActive,
-        bottomDistance,
+        bottomDistance: effectiveBottomDistance,
         attachThresholdPx: AUTO_FOLLOW_ATTACH_THRESHOLD_PX,
         detachThresholdPx: AUTO_FOLLOW_DETACH_THRESHOLD_PX,
       });
@@ -2385,6 +2445,7 @@ function AuthenticatedChat() {
           stickyActive,
           threadSwitchLockActive,
           bottomDistance: Number(bottomDistance.toFixed(1)),
+          effectiveBottomDistance: Number(effectiveBottomDistance.toFixed(1)),
           attachedBefore: wasAttached,
           attachedAfter: autoFollowEnabledRef.current,
         });
@@ -2401,6 +2462,7 @@ function AuthenticatedChat() {
           stickyActive,
           threadSwitchLockActive,
           bottomDistance: Number(bottomDistance.toFixed(1)),
+          effectiveBottomDistance: Number(effectiveBottomDistance.toFixed(1)),
         });
       }
 
