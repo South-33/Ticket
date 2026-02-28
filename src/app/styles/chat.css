@@ -1176,6 +1176,18 @@
   animation: messageFadeIn 220ms ease forwards;
 }
 
+.retry-fading-content {
+  pointer-events: none;
+  animation: messageRetryFadeOut 180ms ease forwards;
+}
+
+@keyframes messageRetryFadeOut {
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
 .reasoning-container {
   grid-column: 1;
   justify-self: start;
@@ -1225,15 +1237,24 @@
 }
 
 
-.message-actions {
+.message-footer {
   display: flex;
-  gap: 0.75rem;
-  margin-top: 1.5rem;
-  padding-top: 1rem;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.7rem;
+  margin-top: 1rem;
+  padding-top: 0.8rem;
   border-top: 1px dashed var(--border-color);
   opacity: 0;
   transform: translateY(5px);
-  animation: actionsFadeIn 0.4s var(--transition-fast) forwards;
+  animation: actionsFadeIn 0.2s var(--transition-fast) forwards;
+}
+
+.message-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 @keyframes actionsFadeIn {
@@ -1257,6 +1278,7 @@
   display: flex;
   align-items: center;
   gap: 0.4rem;
+  min-height: 1.9rem;
   transition: var(--transition-fast);
 }
 
@@ -1276,6 +1298,107 @@
 
 .message-action-btn:hover svg {
   opacity: 1;
+}
+
+.message-action-btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+  border-color: var(--border-color);
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.message-variant-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.message-variant-btn {
+  appearance: none;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  min-height: 1.9rem;
+  transition: var(--transition-fast);
+}
+
+.message-variant-btn:hover {
+  border-color: var(--text-primary);
+  color: var(--text-primary);
+}
+
+.message-variant-btn:disabled {
+  opacity: 0.42;
+  cursor: default;
+  border-color: var(--border-color);
+  color: var(--text-secondary);
+}
+
+.message-variant-indicator {
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  min-width: 2.9rem;
+  text-align: center;
+}
+
+.response-text-shell {
+  position: relative;
+}
+
+.response-content-shell,
+.reasoning-content-shell {
+  position: relative;
+}
+
+.response-content-shell.inline-pending-cursor {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.response-content-shell.variant-swapping-out,
+.reasoning-content-shell.variant-swapping-out {
+  animation: variantSwapOut 140ms cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+}
+
+.response-content-shell.variant-swapping-in,
+.reasoning-content-shell.variant-swapping-in {
+  animation: variantSwapIn 220ms cubic-bezier(0.22, 0.61, 0.36, 1) both;
+}
+
+@keyframes variantSwapOut {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  35% {
+    opacity: 0.45;
+    transform: translateY(1px);
+  }
+  to {
+    opacity: 0.08;
+    transform: translateY(3px);
+  }
+}
+
+@keyframes variantSwapIn {
+  from {
+    opacity: 0.08;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 
@@ -1570,6 +1693,21 @@
   gap: 0.5rem;
   line-height: 1;
   width: 100%;
+}
+
+.reasoning-summary.variant-swapping-out {
+  animation: reasoningSummaryFadeOut 140ms cubic-bezier(0.2, 0.8, 0.3, 1) forwards;
+}
+
+@keyframes reasoningSummaryFadeOut {
+  from {
+    opacity: 0.92;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0.2;
+    transform: translateY(2px);
+  }
 }
 
 .reasoning-summary::before {

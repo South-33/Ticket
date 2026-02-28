@@ -3,11 +3,12 @@
 import {
   optimisticallySendMessage,
   useSmoothText,
-  useUIMessages,
+  useStreamingUIMessages,
   type UIMessage,
 } from "@convex-dev/agent/react";
 import { SignInButton, UserProfile, useClerk, useUser } from "@clerk/nextjs";
 import { useConvexAuth, useMutation, useQuery } from "convex/react";
+import { usePaginatedQuery } from "convex-helpers/react";
 import clsx from "clsx";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
@@ -774,6 +775,9 @@ const THREAD_SWITCH_FIRST_REVEAL_DURATION_S = 0.22;
 const THREAD_SWITCH_REVEAL_FALLBACK_MS = 900;
 const THREAD_SWITCH_LONG_CONVO_VIEWPORT_MULTIPLIER = 1.15;
 const THREAD_SWITCH_FINAL_HARD_SNAP_THRESHOLD_PX = 220;
+const RETRY_FADE_OUT_MS = 180;
+const RESPONSE_VARIANT_SWAP_OUT_MS = 140;
+const RESPONSE_VARIANT_SWAP_IN_MS = 220;
 
 const AUTO_FOLLOW_EASING = (t: number) => {
   return t < 0.5 ? 4 * t ** 3 : 1 - ((-2 * t + 2) ** 3) / 2;
@@ -1321,20 +1325,85 @@ function getReasoningKeyPoints(reasoning: string) {
   return points;
 }
 
-function Message({ message, onCopy, onRetry }: { message: UIMessage; onCopy?: () => void; onRetry?: () => void }) {
+function getMessageIdentity(message: UIMessage) {
+  return message.id ?? message.key;
+}
+
+function hasMessageReasoningPanelContent(message: UIMessage) {
+  const reasoning = getReasoningText(message);
+  if (reasoning.trim().length > 0) {
+    return true;
+  }
+  const payload = parseAssistantOutput(message.text ?? "");
+  return payload.eventNotes.length > 0;
+}
+
+function hasMessageRenderableContent(message: UIMessage) {
+  const payload = parseAssistantOutput(message.text ?? "");
+  if (payload.response.trim().length > 0 || payload.eventNotes.length > 0) {
+    return true;
+  }
+  return getReasoningText(message).trim().length > 0;
+}
+
+function isAssistantVariantSelectable(message: UIMessage, allowTransient: boolean) {
+  if (message.status === "failed") {
+    return true;
+  }
+  if (allowTransient && (message.status === "pending" || message.status === "streaming")) {
+    return true;
+  }
+  return hasMessageRenderableContent(message);
+}
+
+type ResponseVariantControls = {
+  current: number;
+  total: number;
+  canPrev: boolean;
+  canNext: boolean;
+  onPrev: () => void;
+  onNext: () => void;
+};
+
+function Message({
+  message,
+  onCopy,
+  onRetry,
+  canRetry = true,
+  hideActions = false,
+  showInlinePendingCursor = false,
+  animateReasoningSummaryOut = false,
+  variantControls,
+  isRetryFading = false,
+  variantSwapPhase,
+}: {
+  message: UIMessage;
+  onCopy?: () => void;
+  onRetry?: () => void;
+  canRetry?: boolean;
+  hideActions?: boolean;
+  showInlinePendingCursor?: boolean;
+  animateReasoningSummaryOut?: boolean;
+  variantControls?: ResponseVariantControls;
+  isRetryFading?: boolean;
+  variantSwapPhase?: "out" | "in" | null;
+}) {
   const assistantPayload = useMemo(() => parseAssistantOutput(message.text ?? ""), [message.text]);
   const reasoning = getReasoningText(message);
   const [visibleText, smoothTextState] = useSmoothText(assistantPayload.response, {
     startStreaming: message.status === "streaming",
   });
   const [visibleReasoning, smoothReasoningState] = useSmoothText(reasoning, {
-    startStreaming: message.status === "streaming",
+    startStreaming: message.status === "streaming" || message.status === "pending",
   });
   const [isReasoningOpen, setIsReasoningOpen] = useState(false);
   const [showCopied, setShowCopied] = useState(false);
 
   const isReasoningExpanded = isReasoningOpen;
-  const isReasoningTypewriterActive = message.status === "streaming" || smoothReasoningState.isStreaming;
+  const isReasoningTypewriterActive =
+    message.status === "streaming"
+    || message.status === "pending"
+    || smoothReasoningState.isStreaming;
   const displayReasoning = isReasoningTypewriterActive ? visibleReasoning : reasoning;
   const eventNotes = assistantPayload.eventNotes;
   const reasoningKeyPoints = useMemo(
@@ -1367,7 +1436,10 @@ function Message({ message, onCopy, onRetry }: { message: UIMessage; onCopy?: ()
 
   const safetyFallback = message.status === "failed" && !(message.text ?? "").trim();
   const displayText = safetyFallback ? "Response blocked by safety policies." : visibleText;
-  const isTypewriterActive = message.status === "streaming" || smoothTextState.isStreaming;
+  const isTypewriterActive =
+    message.status === "streaming"
+    || message.status === "pending"
+    || smoothTextState.isStreaming;
 
   const handleCopy = () => {
     onCopy?.();
@@ -1385,40 +1457,52 @@ function Message({ message, onCopy, onRetry }: { message: UIMessage; onCopy?: ()
         <div className="reasoning-container">
           <div className={clsx("reasoning-block", isReasoningExpanded && "open")}>
             <button
-              className="reasoning-summary"
+              className={clsx(
+                "reasoning-summary",
+                variantSwapPhase === "out" && animateReasoningSummaryOut && "variant-swapping-out",
+              )}
               onClick={() => setIsReasoningOpen((current) => !current)}
               type="button"
             >
               Reasoning Process
             </button>
-            <div className={clsx("reasoning-points-shell", !isReasoningExpanded && "visible")}>
-              {collapsedReasoningPoints.length > 0 && (
-                <ul className="reasoning-points">
-                  {collapsedReasoningPoints.map((point, index) => (
-                    <li key={`${point}-${index}`}>
-                      <MarkdownRenderer content={point} />
-                    </li>
-                  ))}
-                </ul>
+            <div
+              className={clsx(
+                "reasoning-content-shell",
+                isRetryFading && "retry-fading-content",
+                variantSwapPhase === "out" && "variant-swapping-out",
+                variantSwapPhase === "in" && "variant-swapping-in",
               )}
-            </div>
-            <div className={clsx("reasoning-accordion", isReasoningExpanded && "open")}>
-              <div className="reasoning-content-wrapper">
-                <div className={clsx("message-content reasoning-content", isReasoningTypewriterActive && "is-streaming")}>
-                  {(displayReasoning || isReasoningTypewriterActive) && (
-                    <>
-                      <MarkdownRenderer content={displayReasoning} isStreaming={isReasoningTypewriterActive} />
-                    </>
-                  )}
-                  {eventNotes.length > 0 && (
-                    <ul className="reasoning-points reasoning-points-inline">
-                      {eventNotes.map((note, index) => (
-                        <li key={`${note}-${index}`}>
-                          <MarkdownRenderer content={note} />
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+            >
+              <div className={clsx("reasoning-points-shell", !isReasoningExpanded && "visible")}>
+                {collapsedReasoningPoints.length > 0 && (
+                  <ul className="reasoning-points">
+                    {collapsedReasoningPoints.map((point, index) => (
+                      <li key={`${point}-${index}`}>
+                        <MarkdownRenderer content={point} />
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div className={clsx("reasoning-accordion", isReasoningExpanded && "open")}>
+                <div className="reasoning-content-wrapper">
+                  <div className={clsx("message-content reasoning-content", isReasoningTypewriterActive && "is-streaming")}>
+                    {(displayReasoning || isReasoningTypewriterActive) && (
+                      <>
+                        <MarkdownRenderer content={displayReasoning} isStreaming={isReasoningTypewriterActive} />
+                      </>
+                    )}
+                    {eventNotes.length > 0 && (
+                      <ul className="reasoning-points reasoning-points-inline">
+                        {eventNotes.map((note, index) => (
+                          <li key={`${note}-${index}`}>
+                            <MarkdownRenderer content={note} />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -1430,37 +1514,86 @@ function Message({ message, onCopy, onRetry }: { message: UIMessage; onCopy?: ()
         <div className="message-meta">
           {isTypewriterActive ? "Aura Processing" : "Aura Response"}
         </div>
-        {(displayText || isTypewriterActive) && (
-          <div className={clsx("message-content", isTypewriterActive && "is-streaming")}>
-            <MarkdownRenderer content={displayText} isStreaming={isTypewriterActive} />
+        <div
+          className={clsx(
+            "response-content-shell",
+            isRetryFading && !showInlinePendingCursor && "retry-fading-content",
+            showInlinePendingCursor && "inline-pending-cursor",
+            variantSwapPhase === "out" && "variant-swapping-out",
+            variantSwapPhase === "in" && "variant-swapping-in",
+          )}
+        >
+          <div className="response-text-shell">
+            {(displayText || isTypewriterActive || showInlinePendingCursor) && (
+              <div className={clsx("message-content", isTypewriterActive && "is-streaming")}>
+                {showInlinePendingCursor ? (
+                  <span className="typewriter-cursor" aria-label="Generating response" />
+                ) : (
+                  <MarkdownRenderer content={displayText} isStreaming={isTypewriterActive} />
+                )}
+              </div>
+            )}
           </div>
-        )}
 
-        {!isTypewriterActive && (
-          <div className="message-actions">
-            <button
-              className="message-action-btn"
-              onClick={handleCopy}
-              title="Copy response"
-            >
-              {showCopied ? (
-                <Check size={13} weight="bold" />
-              ) : (
-                <CopySimple size={13} />
+          {!isTypewriterActive && !hideActions && (
+            <div className="message-footer">
+              <div className="message-actions">
+                <button
+                  className="message-action-btn"
+                  type="button"
+                  onClick={handleCopy}
+                  title="Copy response"
+                >
+                  {showCopied ? (
+                    <Check size={13} weight="bold" />
+                  ) : (
+                    <CopySimple size={13} />
+                  )}
+                  <span>{showCopied ? "Copied" : "Copy"}</span>
+                </button>
+
+                {onRetry && (
+                  <button
+                    className="message-action-btn"
+                    type="button"
+                    onClick={onRetry}
+                    title="Regenerate response"
+                    disabled={!canRetry}
+                  >
+                    <ArrowClockwise size={13} />
+                    <span>Retry</span>
+                  </button>
+                )}
+              </div>
+
+              {variantControls && variantControls.total > 1 && (
+                <div className="message-variant-switcher">
+                  <button
+                    type="button"
+                    className="message-variant-btn"
+                    onClick={variantControls.onPrev}
+                    disabled={!variantControls.canPrev}
+                    aria-label="Previous response variant"
+                  >
+                    Prev
+                  </button>
+                  <span className="message-variant-indicator">
+                    {variantControls.current}/{variantControls.total}
+                  </span>
+                  <button
+                    type="button"
+                    className="message-variant-btn"
+                    onClick={variantControls.onNext}
+                    disabled={!variantControls.canNext}
+                    aria-label="Next response variant"
+                  >
+                    Next
+                  </button>
+                </div>
               )}
-              <span>{showCopied ? "Copied" : "Copy"}</span>
-            </button>
-
-            <button
-              className="message-action-btn"
-              onClick={onRetry}
-              title="Regenerate response"
-            >
-              <ArrowClockwise size={13} />
-              <span>Retry</span>
-            </button>
-          </div>
-        )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1483,6 +1616,7 @@ function AuthenticatedChat() {
   const createThread = useMutation(api.chat.createThread);
   const deleteThread = useMutation(api.chat.deleteThread);
   const requestLiveRecheck = useMutation(api.research.requestLiveRecheck);
+  const retryPrompt = useMutation(api.chat.retryPrompt);
   const sendPrompt = useMutation(api.chat.sendPrompt).withOptimisticUpdate(
     optimisticallySendMessage(api.chat.listMessages),
   );
@@ -1492,6 +1626,11 @@ function AuthenticatedChat() {
   const [draft, setDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [awaitingAssistantThreadId, setAwaitingAssistantThreadId] = useState<string | null>(null);
+  const [latestResponseVariantIndex, setLatestResponseVariantIndex] = useState(0);
+  const [latestResponseVariantSwapPhase, setLatestResponseVariantSwapPhase] = useState<"out" | "in" | null>(null);
+  const [animateReasoningSummaryOut, setAnimateReasoningSummaryOut] = useState(false);
+  const [retryFadingMessageKey, setRetryFadingMessageKey] = useState<string | null>(null);
+  const [isRetryWaitingCursor, setIsRetryWaitingCursor] = useState(false);
   const [introHtml, setIntroHtml] = useState("");
   const [isIntroTyping, setIsIntroTyping] = useState(false);
   const [isFeedScrolling, setIsFeedScrolling] = useState(false);
@@ -1532,6 +1671,9 @@ function AuthenticatedChat() {
   const autoFollowProgrammaticUntilRef = useRef(0);
   const touchLastYRef = useRef<number | null>(null);
   const scrollDebugCounterRef = useRef(0);
+  const latestResponseVariantCountRef = useRef(0);
+  const latestResponseVariantSwapOutTimerRef = useRef<number | null>(null);
+  const latestResponseVariantSwapInTimerRef = useRef<number | null>(null);
   const activeThreadIdDebugRef = useRef<string | null>(null);
   const isFadingOutDebugRef = useRef(false);
   const isThreadSwitchRevealingDebugRef = useRef(false);
@@ -1763,6 +1905,17 @@ function AuthenticatedChat() {
 
   const sidebarThreads = threads ?? cachedSidebarThreads;
 
+  const clearVariantSwapTimers = useCallback(() => {
+    if (latestResponseVariantSwapOutTimerRef.current !== null) {
+      window.clearTimeout(latestResponseVariantSwapOutTimerRef.current);
+      latestResponseVariantSwapOutTimerRef.current = null;
+    }
+    if (latestResponseVariantSwapInTimerRef.current !== null) {
+      window.clearTimeout(latestResponseVariantSwapInTimerRef.current);
+      latestResponseVariantSwapInTimerRef.current = null;
+    }
+  }, []);
+
 
   const switchThread = useCallback(
     (newThreadId: string | null, composingNew: boolean) => {
@@ -1780,6 +1933,12 @@ function AuthenticatedChat() {
       setAwaitingAssistantThreadId(null);
       awaitingAssistantBaselineKeyRef.current = null;
       keepAttachedUntilFreshAssistantRef.current = false;
+      setRetryFadingMessageKey(null);
+      setIsRetryWaitingCursor(false);
+      clearVariantSwapTimers();
+      setLatestResponseVariantSwapPhase(null);
+      setAnimateReasoningSummaryOut(false);
+      setLatestResponseVariantIndex(0);
       autoFollowLastUserIntentRef.current = 0;
       setIsFadingOut(true);
       setIsThreadSwitchRevealing(false);
@@ -1837,6 +1996,7 @@ function AuthenticatedChat() {
       activeThreadId,
       isComposingNew,
       isFadingOut,
+      clearVariantSwapTimers,
       logScrollDebug,
       setSessionVersion,
       setActiveThreadId,
@@ -1850,10 +2010,66 @@ function AuthenticatedChat() {
 
   const activeThreadIdForMessages = isAuthenticated ? activeThreadId : null;
 
-  const messageFeed = useUIMessages(
+  const paginatedMessageFeed = usePaginatedQuery(
     api.chat.listMessages,
     activeThreadIdForMessages ? { threadId: activeThreadIdForMessages } : "skip",
-    { initialNumItems: 40, stream: true },
+    { initialNumItems: 40 },
+  );
+  const paginatedFeedResults = paginatedMessageFeed.results as UIMessage[];
+  const streamStartOrder = paginatedFeedResults.length > 0
+    ? Math.min(...paginatedFeedResults.map((message) => message.order))
+    : 0;
+  const streamMessages = useStreamingUIMessages(
+    api.chat.listMessages,
+    !activeThreadIdForMessages || paginatedMessageFeed.status === "LoadingFirstPage"
+      ? "skip"
+      : {
+        threadId: activeThreadIdForMessages,
+        paginationOpts: {
+          cursor: null,
+          numItems: 0,
+        },
+      },
+    { startOrder: streamStartOrder },
+  );
+  const mergedMessageFeed = useMemo(() => {
+    const statusRank = (status: UIMessage["status"]) => {
+      if (status === "success" || status === "failed") {
+        return 3;
+      }
+      if (status === "streaming") {
+        return 2;
+      }
+      return 1;
+    };
+
+    const combined = [...paginatedFeedResults, ...((streamMessages ?? []) as UIMessage[])].sort((a, b) => {
+      if (a.order !== b.order) {
+        return a.order - b.order;
+      }
+      if (a.stepOrder !== b.stepOrder) {
+        return a.stepOrder - b.stepOrder;
+      }
+      return a._creationTime - b._creationTime;
+    });
+
+    return combined.reduce<UIMessage[]>((messages, message) => {
+      const last = messages.at(-1);
+      if (!last || getMessageIdentity(last) !== getMessageIdentity(message)) {
+        messages.push(message);
+        return messages;
+      }
+
+      if (statusRank(message.status) >= statusRank(last.status)) {
+        messages[messages.length - 1] = message;
+      }
+      return messages;
+    }, []);
+  }, [paginatedFeedResults, streamMessages]);
+
+  const messageFeed = useMemo(
+    () => ({ results: mergedMessageFeed }),
+    [mergedMessageFeed],
   );
   const latestResearchJob = useQuery(
     api.research.getLatestJobForThread,
@@ -1877,6 +2093,148 @@ function AuthenticatedChat() {
     () => (isComposingNew || !activeThreadIdForMessages ? [] : messageFeed.results),
     [activeThreadIdForMessages, isComposingNew, messageFeed.results],
   );
+
+  const latestUserMessageIndex = useMemo(() => {
+    for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
+      if (visibleMessages[i].role === "user") {
+        return i;
+      }
+    }
+    return -1;
+  }, [visibleMessages]);
+
+  const latestTurnUserMessage = latestUserMessageIndex >= 0 ? visibleMessages[latestUserMessageIndex] : null;
+  const latestTurnUserMessageId = latestTurnUserMessage?.id;
+  const includeTransientAssistantVariants =
+    awaitingAssistantThreadId !== null
+    && activeThreadIdForMessages === awaitingAssistantThreadId;
+
+  const latestTurnAssistantVariants = useMemo(() => {
+    if (latestUserMessageIndex < 0) {
+      return [] as UIMessage[];
+    }
+
+    const variants: UIMessage[] = [];
+    for (let i = latestUserMessageIndex + 1; i < visibleMessages.length; i += 1) {
+      const message = visibleMessages[i];
+      if (message.role === "user") {
+        break;
+      }
+      if (
+        message.role === "assistant"
+        && isAssistantVariantSelectable(message, includeTransientAssistantVariants)
+      ) {
+        variants.push(message);
+      }
+    }
+
+    return variants;
+  }, [includeTransientAssistantVariants, latestUserMessageIndex, visibleMessages]);
+
+  useEffect(() => {
+    const variantCount = latestTurnAssistantVariants.length;
+    const previousCount = latestResponseVariantCountRef.current;
+    latestResponseVariantCountRef.current = variantCount;
+
+    if (variantCount === 0) {
+      clearVariantSwapTimers();
+      setLatestResponseVariantSwapPhase(null);
+      setAnimateReasoningSummaryOut(false);
+      setIsRetryWaitingCursor(false);
+      setLatestResponseVariantIndex(0);
+      return;
+    }
+
+    setLatestResponseVariantIndex((current) => {
+      if (variantCount > previousCount) {
+        if (retryFadingMessageKey !== null) {
+          return current;
+        }
+        return variantCount - 1;
+      }
+      if (current < 0 || current >= variantCount) {
+        return variantCount - 1;
+      }
+      return current;
+    });
+  }, [clearVariantSwapTimers, latestTurnAssistantVariants.length, retryFadingMessageKey]);
+
+  const selectedLatestResponseVariant = useMemo(() => {
+    if (latestTurnAssistantVariants.length === 0) {
+      return null;
+    }
+    const clampedIndex = Math.max(0, Math.min(latestResponseVariantIndex, latestTurnAssistantVariants.length - 1));
+    return latestTurnAssistantVariants[clampedIndex] ?? null;
+  }, [latestResponseVariantIndex, latestTurnAssistantVariants]);
+
+  const selectedLatestResponseVariantId = selectedLatestResponseVariant
+    ? getMessageIdentity(selectedLatestResponseVariant)
+    : null;
+
+  const selectedLatestResponseVariantListIndex = useMemo(() => {
+    if (!selectedLatestResponseVariantId) {
+      return -1;
+    }
+    return latestTurnAssistantVariants.findIndex((variant) => getMessageIdentity(variant) === selectedLatestResponseVariantId);
+  }, [latestTurnAssistantVariants, selectedLatestResponseVariantId]);
+
+  const startLatestResponseVariantSwap = useCallback((targetIndex: number) => {
+    if (latestResponseVariantSwapPhase !== null) {
+      return;
+    }
+    if (targetIndex === latestResponseVariantIndex) {
+      return;
+    }
+    if (targetIndex < 0 || targetIndex >= latestTurnAssistantVariants.length) {
+      return;
+    }
+
+    const currentVariant = latestTurnAssistantVariants[latestResponseVariantIndex] ?? null;
+    const targetVariant = latestTurnAssistantVariants[targetIndex] ?? null;
+    const shouldAnimateReasoningOut = Boolean(
+      currentVariant
+      && targetVariant
+      && hasMessageReasoningPanelContent(currentVariant)
+      && !hasMessageReasoningPanelContent(targetVariant),
+    );
+
+    clearVariantSwapTimers();
+    setAnimateReasoningSummaryOut(shouldAnimateReasoningOut);
+    setLatestResponseVariantSwapPhase("out");
+    latestResponseVariantSwapOutTimerRef.current = window.setTimeout(() => {
+      setLatestResponseVariantIndex(targetIndex);
+      setLatestResponseVariantSwapPhase("in");
+      latestResponseVariantSwapOutTimerRef.current = null;
+      latestResponseVariantSwapInTimerRef.current = window.setTimeout(() => {
+        setLatestResponseVariantSwapPhase(null);
+        setAnimateReasoningSummaryOut(false);
+        latestResponseVariantSwapInTimerRef.current = null;
+      }, RESPONSE_VARIANT_SWAP_IN_MS);
+    }, RESPONSE_VARIANT_SWAP_OUT_MS);
+  }, [
+    clearVariantSwapTimers,
+    latestResponseVariantIndex,
+    latestResponseVariantSwapPhase,
+    latestTurnAssistantVariants,
+  ]);
+
+  const renderedMessages = useMemo(() => {
+    if (!selectedLatestResponseVariant || latestTurnAssistantVariants.length <= 1) {
+      return visibleMessages;
+    }
+
+    const hiddenVariantKeys = new Set(
+      latestTurnAssistantVariants
+        .map((variant) => getMessageIdentity(variant))
+        .filter((identity) => identity !== getMessageIdentity(selectedLatestResponseVariant)),
+    );
+
+    if (hiddenVariantKeys.size === 0) {
+      return visibleMessages;
+    }
+
+    return visibleMessages.filter((message) => !hiddenVariantKeys.has(getMessageIdentity(message)));
+  }, [latestTurnAssistantVariants, selectedLatestResponseVariant, visibleMessages]);
 
   const latestTurnAssistantMessage = useMemo(() => {
     for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
@@ -1913,14 +2271,17 @@ function AuthenticatedChat() {
     if (!latestTurnAssistantMessage) {
       return false;
     }
-    return latestTurnAssistantMessage.key !== awaitingAssistantBaselineKeyRef.current;
+    return getMessageIdentity(latestTurnAssistantMessage) !== awaitingAssistantBaselineKeyRef.current;
   }, [latestTurnAssistantMessage]);
 
   const hasFreshAssistantStarted = useMemo(() => {
     if (!latestTurnAssistantMessage || !hasFreshAssistantForAwaitedTurn) {
       return false;
     }
-    return latestTurnAssistantMessage.status === "streaming" || latestTurnAssistantIsRenderable;
+    if (latestTurnAssistantMessage.status === "pending" || latestTurnAssistantMessage.status === "streaming") {
+      return true;
+    }
+    return latestTurnAssistantIsRenderable;
   }, [hasFreshAssistantForAwaitedTurn, latestTurnAssistantIsRenderable, latestTurnAssistantMessage]);
 
   const isAwaitingAssistant =
@@ -1941,13 +2302,13 @@ function AuthenticatedChat() {
       return;
     }
 
-    const latestAssistantKey = latestTurnAssistantMessage?.key ?? null;
+    const latestAssistantKey = latestTurnAssistantMessage ? getMessageIdentity(latestTurnAssistantMessage) : null;
     const latestAssistantStatus = latestTurnAssistantMessage?.status ?? null;
 
     if (
       hasFreshAssistantForAwaitedTurn
       && latestAssistantKey
-      && latestAssistantStatus !== "streaming"
+      && (latestAssistantStatus === "success" || latestAssistantStatus === "failed")
       && latestTurnAssistantIsRenderable
     ) {
       logScrollDebug("awaiting:cleared", {
@@ -1975,11 +2336,22 @@ function AuthenticatedChat() {
       return;
     }
     keepAttachedUntilFreshAssistantRef.current = false;
+    if (retryFadingMessageKey !== null) {
+      setLatestResponseVariantIndex(Math.max(0, latestTurnAssistantVariants.length - 1));
+    }
+    setRetryFadingMessageKey(null);
+    setIsRetryWaitingCursor(false);
     logScrollDebug("awaiting:fresh-started", {
       baselineKey: awaitingAssistantBaselineKeyRef.current,
-      latestAssistantKey: latestTurnAssistantMessage?.key ?? null,
+      latestAssistantKey: latestTurnAssistantMessage ? getMessageIdentity(latestTurnAssistantMessage) : null,
     });
-  }, [hasFreshAssistantStarted, latestTurnAssistantMessage, logScrollDebug]);
+  }, [
+    hasFreshAssistantStarted,
+    latestTurnAssistantMessage,
+    latestTurnAssistantVariants.length,
+    logScrollDebug,
+    retryFadingMessageKey,
+  ]);
 
   useEffect(() => {
     document.body.classList.toggle("chat-switching", isFadingOut);
@@ -2269,6 +2641,7 @@ function AuthenticatedChat() {
     activeThreadIdForMessages,
     awaitingAssistantThreadId,
     isFadingOut,
+    lenis,
     logScrollDebug,
     scrollToPageBottom,
     visibleMessages.length,
@@ -2616,6 +2989,7 @@ function AuthenticatedChat() {
 
   useEffect(() => {
     return () => {
+      clearVariantSwapTimers();
       if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
       if (fadingTimerRef.current !== null) window.clearTimeout(fadingTimerRef.current);
       if (dataWaitTimerRef.current !== null) window.clearTimeout(dataWaitTimerRef.current);
@@ -2623,7 +2997,7 @@ function AuthenticatedChat() {
       isThreadSwitchTransitionRef.current = false;
       keepAttachedUntilFreshAssistantRef.current = false;
     };
-  }, []);
+  }, [clearVariantSwapTimers]);
 
   const resizeTextarea = useCallback(() => {
     const textarea = textareaRef.current;
@@ -2634,24 +3008,25 @@ function AuthenticatedChat() {
     textarea.style.height = `${Math.min(textarea.scrollHeight, 150)}px`;
   }, []);
 
-  const handleSend = async (event?: FormEvent, customPrompt?: string) => {
+  const handleSend = async (event?: FormEvent) => {
     event?.preventDefault();
-    const isRetry = typeof customPrompt === "string";
-    const prompt = isRetry ? customPrompt.trim() : draft.trim();
+    const prompt = draft.trim();
     if (!prompt || isSubmitting) {
       return;
     }
 
-    if (!isRetry) {
-      setDraft("");
-    }
+    setDraft("");
+    setRetryFadingMessageKey(null);
+    setIsRetryWaitingCursor(false);
+    clearVariantSwapTimers();
+    setLatestResponseVariantSwapPhase(null);
+    setAnimateReasoningSummaryOut(false);
     autoFollowEnabledRef.current = true;
     autoFollowLastUserIntentRef.current = 0;
     keepAttachedUntilFreshAssistantRef.current = true;
     logScrollDebug("send:start", {
       promptLength: prompt.length,
       activeThreadIdForMessages,
-      isRetry,
     });
     window.requestAnimationFrame(() => {
       scrollToPageBottom({
@@ -2661,7 +3036,7 @@ function AuthenticatedChat() {
       });
       lastScrollPositionRef.current = getCurrentScrollPosition();
     });
-    if (!isRetry && textareaRef.current) {
+    if (textareaRef.current) {
       textareaRef.current.style.height = "28px";
     }
     setIsSubmitting(true);
@@ -2704,7 +3079,9 @@ function AuthenticatedChat() {
         return;
       }
 
-      awaitingAssistantBaselineKeyRef.current = latestTurnAssistantMessage?.key ?? null;
+      awaitingAssistantBaselineKeyRef.current = latestTurnAssistantMessage
+        ? getMessageIdentity(latestTurnAssistantMessage)
+        : null;
       setAwaitingAssistantThreadId(threadId);
       logScrollDebug("awaiting:set", {
         threadId,
@@ -2777,18 +3154,128 @@ function AuthenticatedChat() {
   ) : null;
 
   const handleRetry = useCallback(
-    (targetMessage: UIMessage) => {
-      const idx = visibleMessages.findIndex((m) => m.key === targetMessage.key);
-      if (idx === -1) return;
-      for (let i = idx - 1; i >= 0; i -= 1) {
-        if (visibleMessages[i].role === "user") {
-          const prompt = visibleMessages[i].text ?? "";
-          void handleSend(undefined, prompt);
-          break;
+    async (targetMessage: UIMessage) => {
+      if (targetMessage.role !== "assistant" || isSubmitting) {
+        return;
+      }
+
+      const threadId = activeThreadIdForMessages;
+      const promptMessageId = latestTurnUserMessageId;
+      const targetMessageId = getMessageIdentity(targetMessage);
+      const isLatestTurnVariant = latestTurnAssistantVariants.some(
+        (variant) => getMessageIdentity(variant) === targetMessageId,
+      );
+
+      if (!threadId || typeof promptMessageId !== "string" || !isLatestTurnVariant) {
+        logScrollDebug("retry:ignored", {
+          reason: !threadId
+            ? "missing-thread"
+            : typeof promptMessageId !== "string"
+              ? "missing-latest-user-id"
+              : "non-latest-turn",
+          targetKey: targetMessageId,
+        });
+        return;
+      }
+
+      setIsSubmitting(true);
+      setRetryFadingMessageKey(targetMessageId);
+      setIsRetryWaitingCursor(false);
+      clearVariantSwapTimers();
+      setLatestResponseVariantSwapPhase(null);
+      setAnimateReasoningSummaryOut(false);
+      await new Promise<void>((resolve) => {
+        window.setTimeout(resolve, RETRY_FADE_OUT_MS);
+      });
+      setIsRetryWaitingCursor(true);
+
+      autoFollowEnabledRef.current = true;
+      autoFollowLastUserIntentRef.current = 0;
+      keepAttachedUntilFreshAssistantRef.current = true;
+      awaitingAssistantBaselineKeyRef.current = latestTurnAssistantMessage
+        ? getMessageIdentity(latestTurnAssistantMessage)
+        : targetMessageId;
+      setAwaitingAssistantThreadId(threadId);
+
+      logScrollDebug("retry:start", {
+        threadId,
+        promptMessageId,
+        baselineKey: awaitingAssistantBaselineKeyRef.current,
+        targetKey: targetMessageId,
+      });
+
+      window.requestAnimationFrame(() => {
+        scrollToPageBottom({
+          force: true,
+          duration: AUTO_FOLLOW_SEND_DURATION_S,
+          reason: "retry-initial-follow",
+        });
+        lastScrollPositionRef.current = getCurrentScrollPosition();
+      });
+
+      let keepFadedUntilFreshAssistant = false;
+
+      try {
+        const result = await retryPrompt({
+          threadId,
+          promptMessageId,
+        });
+
+        logScrollDebug("retry:dispatched", {
+          threadId,
+          promptMessageId,
+          accepted: result.accepted,
+          reason: result.reason,
+        });
+
+        if (result.accepted || result.reason === "already_pending") {
+          keepFadedUntilFreshAssistant = true;
         }
+
+        if (!result.accepted && result.reason !== "already_pending") {
+          setAwaitingAssistantThreadId(null);
+          awaitingAssistantBaselineKeyRef.current = null;
+          keepAttachedUntilFreshAssistantRef.current = false;
+          setRetryFadingMessageKey((current) => (current === targetMessageId ? null : current));
+          setIsRetryWaitingCursor(false);
+        }
+      } catch (error) {
+        setAwaitingAssistantThreadId(null);
+        awaitingAssistantBaselineKeyRef.current = null;
+        keepAttachedUntilFreshAssistantRef.current = false;
+        setRetryFadingMessageKey((current) => (current === targetMessageId ? null : current));
+        setIsRetryWaitingCursor(false);
+        logScrollDebug("retry:error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      } finally {
+        setIsSubmitting(false);
+        if (!keepFadedUntilFreshAssistant) {
+          setRetryFadingMessageKey((current) => (current === targetMessageId ? null : current));
+          setIsRetryWaitingCursor(false);
+        }
+        logScrollDebug("retry:finally", {
+          isSubmitting: false,
+          keepFadedUntilFreshAssistant,
+          isRetryWaitingCursor,
+        });
       }
     },
-    [visibleMessages, handleSend],
+    [
+      activeThreadIdForMessages,
+      clearVariantSwapTimers,
+      getCurrentScrollPosition,
+      isSubmitting,
+      latestTurnAssistantMessage,
+      setLatestResponseVariantSwapPhase,
+      latestTurnAssistantVariants,
+      latestTurnUserMessageId,
+      isRetryWaitingCursor,
+      logScrollDebug,
+      retryPrompt,
+      scrollToPageBottom,
+    ],
   );
 
   return (
@@ -2894,17 +3381,68 @@ function AuthenticatedChat() {
               </>
             ) : (
               <>
-                {visibleMessages.map((message) => (
-                  <Message
-                    key={message.key}
-                    message={message}
-                    onCopy={() => {
-                      navigator.clipboard.writeText(message.text ?? "");
-                    }}
-                    onRetry={() => handleRetry(message)}
-                  />
-                ))}
-                {isWaitingForAssistantMessage && (
+                {renderedMessages.map((message) => {
+                  const messageId = getMessageIdentity(message);
+                  const isSelectedLatestVariant =
+                    message.role === "assistant"
+                    && selectedLatestResponseVariantId !== null
+                    && messageId === selectedLatestResponseVariantId;
+                  const showInlinePendingCursor =
+                    isSelectedLatestVariant
+                    && isRetryWaitingCursor
+                    && retryFadingMessageKey === messageId;
+
+                  const renderKey = messageId;
+
+                  const canRetryMessage =
+                    isSelectedLatestVariant
+                    && !isOutputting
+                    && !isFadingOut
+                    && !isThreadSwitchTransitionRef.current;
+
+                  const isVariantSwapInProgress =
+                    isSelectedLatestVariant
+                    && latestResponseVariantSwapPhase !== null;
+
+                  const variantControls =
+                    isSelectedLatestVariant
+                    && latestTurnAssistantVariants.length > 1
+                    && selectedLatestResponseVariantListIndex >= 0
+                      ? {
+                        current: selectedLatestResponseVariantListIndex + 1,
+                        total: latestTurnAssistantVariants.length,
+                        canPrev: selectedLatestResponseVariantListIndex > 0 && !isVariantSwapInProgress,
+                        canNext: selectedLatestResponseVariantListIndex < latestTurnAssistantVariants.length - 1 && !isVariantSwapInProgress,
+                        onPrev: () => {
+                          startLatestResponseVariantSwap(selectedLatestResponseVariantListIndex - 1);
+                        },
+                        onNext: () => {
+                          startLatestResponseVariantSwap(selectedLatestResponseVariantListIndex + 1);
+                        },
+                      }
+                      : undefined;
+
+                  return (
+                    <Message
+                      key={renderKey}
+                      message={message}
+                      onCopy={() => {
+                        navigator.clipboard.writeText(message.text ?? "");
+                      }}
+                      onRetry={isSelectedLatestVariant ? () => {
+                        void handleRetry(message);
+                      } : undefined}
+                      hideActions={isOutputting}
+                      showInlinePendingCursor={showInlinePendingCursor}
+                      canRetry={canRetryMessage}
+                      variantControls={variantControls}
+                      isRetryFading={retryFadingMessageKey === messageId}
+                      animateReasoningSummaryOut={isSelectedLatestVariant && animateReasoningSummaryOut}
+                      variantSwapPhase={isSelectedLatestVariant ? latestResponseVariantSwapPhase : null}
+                    />
+                  );
+                })}
+                {isWaitingForAssistantMessage && retryFadingMessageKey === null && (
                   <div className="message ai pending-assistant">
                     <div className="response-container">
                       <div className="message-meta">Aura Response</div>

@@ -1,7 +1,7 @@
 import { convexTest } from "convex-test";
 import { register as registerAgentComponent } from "@convex-dev/agent/test";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { api, internal } from "./_generated/api";
+import { api, components, internal } from "./_generated/api";
 import schema from "./schema";
 import { modules } from "./test.setup";
 import { buildSystemPrompt, validateAssistantEnvelope } from "./chat";
@@ -270,6 +270,98 @@ describe("chat intake flow", () => {
 
     expect(pending).toBeNull();
     expect(["Thanks, got it. I will continue the research now.", "I ran into a model error. Please try again in a moment."]).toContain(thread?.preview);
+  });
+
+  test("retryPrompt regenerates latest response without adding another user message", async () => {
+    vi.useFakeTimers();
+    const testConvex = convexTest(schema, modules);
+    registerAgentComponent(testConvex);
+    const t = testConvex.withIdentity(AUTH_IDENTITY);
+
+    const created = await t.mutation(api.chat.createThread, {});
+    const sent = await t.mutation(api.chat.sendPrompt, {
+      threadId: created.threadId,
+      prompt: "nice",
+    });
+
+    await t.finishAllScheduledFunctions(() => {
+      vi.runAllTimers();
+    });
+
+    const beforePage = await t.query(components.agent.messages.listMessagesByThreadId, {
+      threadId: created.threadId,
+      order: "asc",
+      paginationOpts: {
+        cursor: null,
+        numItems: 200,
+      },
+    });
+    const before = beforePage.page;
+    const promptOrder = before.find((message) => message._id === sent.promptMessageId)?.order;
+    expect(typeof promptOrder).toBe("number");
+
+    const retry = await t.mutation(api.chat.retryPrompt, {
+      threadId: created.threadId,
+      promptMessageId: sent.promptMessageId,
+    });
+
+    expect(retry.accepted).toBe(true);
+    expect(retry.reason).toBe("scheduled");
+
+    await t.finishAllScheduledFunctions(() => {
+      vi.runAllTimers();
+    });
+
+    const afterPage = await t.query(components.agent.messages.listMessagesByThreadId, {
+      threadId: created.threadId,
+      order: "asc",
+      paginationOpts: {
+        cursor: null,
+        numItems: 200,
+      },
+    });
+    const after = afterPage.page;
+    const userMessages = after.filter((message) => message.message?.role === "user");
+    const assistantMessagesForPromptOrder = after.filter((message) => {
+      return message.message?.role === "assistant" && message.order === promptOrder && message.status === "success";
+    });
+
+    expect(userMessages).toHaveLength(1);
+    expect(userMessages[0]?._id).toBe(sent.promptMessageId);
+    expect(assistantMessagesForPromptOrder.length).toBeGreaterThanOrEqual(2);
+  });
+
+  test("retryPrompt rejects non-latest user prompts", async () => {
+    vi.useFakeTimers();
+    const testConvex = convexTest(schema, modules);
+    registerAgentComponent(testConvex);
+    const t = testConvex.withIdentity(AUTH_IDENTITY);
+
+    const created = await t.mutation(api.chat.createThread, {});
+    const first = await t.mutation(api.chat.sendPrompt, {
+      threadId: created.threadId,
+      prompt: "First request",
+    });
+
+    await t.finishAllScheduledFunctions(() => {
+      vi.runAllTimers();
+    });
+
+    await t.mutation(api.chat.sendPrompt, {
+      threadId: created.threadId,
+      prompt: "Second request",
+    });
+
+    await t.finishAllScheduledFunctions(() => {
+      vi.runAllTimers();
+    });
+
+    await expect(
+      t.mutation(api.chat.retryPrompt, {
+        threadId: created.threadId,
+        promptMessageId: first.promptMessageId,
+      }),
+    ).rejects.toThrow("Only the latest user prompt can be retried.");
   });
 
   test("validateAssistantEnvelope accepts tool-only output when tools are present", () => {

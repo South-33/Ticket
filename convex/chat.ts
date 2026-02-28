@@ -5,6 +5,7 @@ import {
   syncStreams,
   vStreamArgs,
 } from "@convex-dev/agent";
+import type { ModelMessage } from "ai";
 import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 import { z } from "zod";
@@ -804,6 +805,112 @@ async function findOwnedThreadState(ctx: QueryCtx | MutationCtx, threadId: strin
   return state;
 }
 
+function getMessageRole(messageDoc: { message?: unknown }) {
+  if (!isRecord(messageDoc.message)) {
+    return null;
+  }
+  const role = messageDoc.message.role;
+  return typeof role === "string" ? role : null;
+}
+
+function extractUserPromptText(messageDoc: { text?: string; message?: unknown }) {
+  const directText = typeof messageDoc.text === "string" ? messageDoc.text.trim() : "";
+  if (directText.length > 0) {
+    return directText;
+  }
+
+  if (!isRecord(messageDoc.message) || messageDoc.message.role !== "user") {
+    return "";
+  }
+
+  const content = messageDoc.message.content;
+  if (typeof content === "string") {
+    return content.trim();
+  }
+  if (!Array.isArray(content)) {
+    return "";
+  }
+
+  const textParts = content
+    .map((part) => {
+      if (!isRecord(part) || part.type !== "text" || typeof part.text !== "string") {
+        return "";
+      }
+      return part.text.trim();
+    })
+    .filter((value) => value.length > 0);
+
+  return textParts.join("\n").trim();
+}
+
+async function getLatestUserPromptMessage(ctx: MutationCtx, threadId: string) {
+  let cursor: string | null = null;
+
+  for (let pageCount = 0; pageCount < 10; pageCount += 1) {
+    const page: {
+      page: Array<{ _id: string; order: number; message?: unknown; text?: string }>;
+      isDone: boolean;
+      continueCursor: string;
+    } = await ctx.runQuery(components.agent.messages.listMessagesByThreadId, {
+      threadId,
+      order: "desc",
+      excludeToolMessages: true,
+      paginationOpts: {
+        cursor,
+        numItems: 64,
+      },
+    });
+
+    for (const message of page.page) {
+      if (getMessageRole(message) !== "user") {
+        continue;
+      }
+
+      return {
+        id: message._id,
+        order: message.order,
+        text: extractUserPromptText(message),
+      };
+    }
+
+    if (page.isDone) {
+      break;
+    }
+    cursor = page.continueCursor;
+  }
+
+  return null;
+}
+
+async function hasPendingAssistantForOrder(ctx: MutationCtx, args: { threadId: string; order: number }) {
+  const page: {
+    page: Array<{ order: number; status: "pending" | "success" | "failed"; message?: unknown }>;
+  } = await ctx.runQuery(components.agent.messages.listMessagesByThreadId, {
+    threadId: args.threadId,
+    order: "desc",
+    paginationOpts: {
+      cursor: null,
+      numItems: 120,
+    },
+  });
+
+  for (const message of page.page) {
+    if (message.order < args.order) {
+      break;
+    }
+
+    if (message.order !== args.order) {
+      continue;
+    }
+
+    if (getMessageRole(message) === "assistant" && message.status === "pending") {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 async function listActiveThreadSkillPacks(
   ctx: QueryCtx | MutationCtx,
   args: { threadId: string; userId: string },
@@ -942,6 +1049,62 @@ export const listMessages = query({
     return {
       ...page,
       streams,
+    };
+  },
+});
+
+export const retryPrompt = mutation({
+  args: {
+    threadId: v.string(),
+    promptMessageId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    await getOwnedThreadState(ctx, args.threadId, userId);
+
+    const [promptMessage] = await ctx.runQuery(components.agent.messages.getMessagesByIds, {
+      messageIds: [args.promptMessageId],
+    });
+
+    if (!promptMessage || promptMessage.threadId !== args.threadId || getMessageRole(promptMessage) !== "user") {
+      throw new ConvexError("Prompt message not found for this thread.");
+    }
+
+    const latestUserPrompt = await getLatestUserPromptMessage(ctx, args.threadId);
+    if (!latestUserPrompt || latestUserPrompt.id !== args.promptMessageId) {
+      throw new ConvexError("Only the latest user prompt can be retried.");
+    }
+
+    const prompt = extractUserPromptText(promptMessage);
+    if (!prompt) {
+      throw new ConvexError("Latest user prompt has no text content to retry.");
+    }
+
+    const hasPendingAssistant = await hasPendingAssistantForOrder(ctx, {
+      threadId: args.threadId,
+      order: latestUserPrompt.order,
+    });
+    if (hasPendingAssistant) {
+      return {
+        accepted: false,
+        reason: "already_pending",
+        promptMessageId: args.promptMessageId,
+        researchJobId: null,
+      };
+    }
+
+    await ctx.scheduler.runAfter(0, internal.chat.generateReplyInternal, {
+      threadId: args.threadId,
+      promptMessageId: args.promptMessageId,
+      prompt,
+      regenerate: true,
+    });
+
+    return {
+      accepted: true,
+      reason: "scheduled",
+      promptMessageId: args.promptMessageId,
+      researchJobId: null,
     };
   },
 });
@@ -1322,6 +1485,7 @@ export const generateReplyInternal = internalAction({
     threadId: v.string(),
     promptMessageId: v.string(),
     prompt: v.string(),
+    regenerate: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const threadState = await ctx.runQuery(internal.chat.getThreadStateInternal, {
@@ -1451,6 +1615,22 @@ export const generateReplyInternal = internalAction({
       };
 
       const runModelPass = async (systemPrompt: string, logTagSuffix: string) => {
+        const contextHandler = args.regenerate
+          ? (_ctx: unknown, {
+            search,
+            recent,
+            inputMessages,
+            inputPrompt,
+          }: {
+            search: ModelMessage[];
+            recent: ModelMessage[];
+            inputMessages: ModelMessage[];
+            inputPrompt: ModelMessage[];
+          }) => {
+            return [...search, ...recent, ...inputMessages, ...inputPrompt];
+          }
+          : undefined;
+
         const result = await thread.streamText(
           {
             promptMessageId: args.promptMessageId,
@@ -1467,6 +1647,7 @@ export const generateReplyInternal = internalAction({
           },
           {
             saveStreamDeltas: false,
+            contextHandler,
           },
         );
 

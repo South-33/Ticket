@@ -14,6 +14,7 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - `flights_grey_tactics` consent defaults to thread scope; only persist beyond a thread on explicit user request.
 - Chat only starts research when model emits valid `ResearchOps.start` (required criteria + at least one selected skill).
 - Tool-only turns are allowed; runtime auto-continues same turn to fetch a direct user-facing reply.
+- Retry uses `api.chat.retryPrompt` (latest user prompt only) and `generateReplyInternal` drops same-turn `existingResponses` during regeneration to avoid continuation-style outputs.
 - CI quirk: placeholder Clerk publishable keys (e.g. `pk_test_ci_placeholder`) can break Next.js prerender for auth-wrapped layouts.
 - Memory snapshots are deduped by markdown and capped to latest 40 per user.
 - Styling is split by concern via `src/app/globals.css` imports (`styles/base.css`, `styles/chat.css`, `styles/knowledge-admin.css`, `styles/clerk.css`); keep chat/admin/clerk edits in those files instead of re-growing one monolithic stylesheet, and avoid over-fragmenting beyond this set unless a file becomes genuinely hard to navigate.
