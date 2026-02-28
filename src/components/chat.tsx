@@ -2264,6 +2264,79 @@ function AuthenticatedChat() {
   }, [logScrollDebug]);
 
   useEffect(() => {
+    const syncAutoFollowOnReturn = (source: "visibility" | "focus" | "pageshow") => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+
+      const stickyActive = isAutoFollowStickyActive();
+      const threadSwitchLockActive = isThreadSwitchBottomLockActive();
+      const outputActive = shouldAutoFollowRef.current;
+      const shouldMaintainFollow = autoFollowEnabledRef.current || stickyActive || threadSwitchLockActive || outputActive;
+
+      if (!shouldMaintainFollow) {
+        return;
+      }
+
+      const bottomDistance = getBottomDistance();
+      lastScrollPositionRef.current = getCurrentScrollPosition();
+
+      logScrollDebug("visibility:resume-sync", {
+        source,
+        stickyActive,
+        threadSwitchLockActive,
+        outputActive,
+        shouldMaintainFollow,
+        bottomDistance: Number(bottomDistance.toFixed(1)),
+      });
+
+      if (bottomDistance <= AUTO_FOLLOW_MIN_BOTTOM_DISTANCE_PX) {
+        return;
+      }
+
+      autoFollowEnabledRef.current = true;
+      scheduleAutoFollow(`resume-${source}`, { immediate: true });
+
+      if (bottomDistance > AUTO_FOLLOW_ATTACH_THRESHOLD_PX * 3) {
+        scheduleThreadSwitchSettleFollow(`resume-${source}-settle`);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      syncAutoFollowOnReturn("visibility");
+    };
+
+    const handleFocus = () => {
+      syncAutoFollowOnReturn("focus");
+    };
+
+    const handlePageShow = () => {
+      syncAutoFollowOnReturn("pageshow");
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("focus", handleFocus);
+    window.addEventListener("pageshow", handlePageShow);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("focus", handleFocus);
+      window.removeEventListener("pageshow", handlePageShow);
+    };
+  }, [
+    getBottomDistance,
+    getCurrentScrollPosition,
+    isAutoFollowStickyActive,
+    isThreadSwitchBottomLockActive,
+    logScrollDebug,
+    scheduleAutoFollow,
+    scheduleThreadSwitchSettleFollow,
+  ]);
+
+  useEffect(() => {
     const markFeedScrolling = () => {
       setIsFeedScrolling((current) => (current ? current : true));
       if (scrollIdleTimerRef.current !== null) {
