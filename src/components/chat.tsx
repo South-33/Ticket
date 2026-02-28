@@ -759,6 +759,8 @@ const AUTO_FOLLOW_ATTACH_THRESHOLD_PX = 96;
 const AUTO_FOLLOW_DETACH_THRESHOLD_PX = 160;
 const AUTO_FOLLOW_ANCHOR_MARGIN_PX = 24;
 const AUTO_FOLLOW_RESUME_THRESHOLD_PX = 140;
+const AUTO_FOLLOW_USER_INTENT_WINDOW_MS = 480;
+const AUTO_FOLLOW_PROGRAMMATIC_GUARD_MS = 280;
 const AUTO_FOLLOW_SMOOTH_DURATION_S = 0.32;
 const AUTO_FOLLOW_SEND_DURATION_S = 0.48;
 const AUTO_FOLLOW_STREAM_DURATION_S = 0.28;
@@ -789,7 +791,7 @@ type CachedSidebarThread = {
 };
 
 const subscribeNoop = () => {
-  return () => {};
+  return () => { };
 };
 
 function getSidebarHistoryCacheKey(userId: string | undefined) {
@@ -1381,19 +1383,19 @@ function Message({ message }: { message: UIMessage }) {
               Reasoning Process
             </button>
             <div className={clsx("reasoning-points-shell", !isReasoningExpanded && "visible")}>
-                  {collapsedReasoningPoints.length > 0 && (
-                    <ul className="reasoning-points">
-                      {collapsedReasoningPoints.map((point, index) => (
-                        <li key={`${point}-${index}`}>
-                          <MarkdownRenderer content={point} />
-                        </li>
-                      ))}
-                    </ul>
-                  )}
+              {collapsedReasoningPoints.length > 0 && (
+                <ul className="reasoning-points">
+                  {collapsedReasoningPoints.map((point, index) => (
+                    <li key={`${point}-${index}`}>
+                      <MarkdownRenderer content={point} />
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
             <div className={clsx("reasoning-accordion", isReasoningExpanded && "open")}>
               <div className="reasoning-content-wrapper">
-                <div className={clsx("message-content reasoning-content", isReasoningTypewriterActive && "is-streaming") }>
+                <div className={clsx("message-content reasoning-content", isReasoningTypewriterActive && "is-streaming")}>
                   {(displayReasoning || isReasoningTypewriterActive) && (
                     <>
                       <MarkdownRenderer content={displayReasoning} isStreaming={isReasoningTypewriterActive} />
@@ -1486,11 +1488,16 @@ function AuthenticatedChat() {
   const dataWaitTimerRef = useRef<number | null>(null);
   const threadSwitchRevealTimerRef = useRef<number | null>(null);
   const waitingForDataRef = useRef(false);
+  const awaitingAssistantBaselineKeyRef = useRef<string | null>(null);
+  const keepAttachedUntilFreshAssistantRef = useRef(false);
   const threadSwitchTokenRef = useRef(0);
   const hasCompletedFirstThreadSwitchRef = useRef(false);
   const isThreadSwitchTransitionRef = useRef(false);
   const isFeedEndVisibleRef = useRef(true);
   const wasAtBottomOnHiddenRef = useRef(true);
+  const autoFollowLastUserIntentRef = useRef(0);
+  const autoFollowProgrammaticUntilRef = useRef(0);
+  const touchLastYRef = useRef<number | null>(null);
   const scrollDebugCounterRef = useRef(0);
   const activeThreadIdDebugRef = useRef<string | null>(null);
   const isFadingOutDebugRef = useRef(false);
@@ -1591,6 +1598,8 @@ function AuthenticatedChat() {
       lenisLimitBefore,
       lenisActualBefore,
     });
+
+    autoFollowProgrammaticUntilRef.current = Date.now() + AUTO_FOLLOW_PROGRAMMATIC_GUARD_MS;
 
     if (lenis) {
       const target = Math.max(0, lenis.limit - bottomOffsetPx);
@@ -1736,6 +1745,9 @@ function AuthenticatedChat() {
         composingNew,
       });
       setAwaitingAssistantThreadId(null);
+      awaitingAssistantBaselineKeyRef.current = null;
+      keepAttachedUntilFreshAssistantRef.current = false;
+      autoFollowLastUserIntentRef.current = 0;
       setIsFadingOut(true);
       setIsThreadSwitchRevealing(false);
       waitingForDataRef.current = false;
@@ -1818,12 +1830,12 @@ function AuthenticatedChat() {
     api.research.listStageEventsByJob,
     latestResearchJob
       ? {
-          researchJobId: latestResearchJob.researchJobId,
-          paginationOpts: {
-            numItems: 8,
-            cursor: null,
-          },
-        }
+        researchJobId: latestResearchJob.researchJobId,
+        paginationOpts: {
+          numItems: 8,
+          cursor: null,
+        },
+      }
       : "skip",
   );
   const stageEvents = stageEventsPage?.page ?? [];
@@ -1864,16 +1876,28 @@ function AuthenticatedChat() {
   const isStreaming = visibleMessages.some(
     (message) => message.role === "assistant" && message.status === "streaming",
   );
+  const hasFreshAssistantForAwaitedTurn = useMemo(() => {
+    if (!latestTurnAssistantMessage) {
+      return false;
+    }
+    return latestTurnAssistantMessage.key !== awaitingAssistantBaselineKeyRef.current;
+  }, [latestTurnAssistantMessage]);
+
+  const hasFreshAssistantStarted = useMemo(() => {
+    if (!latestTurnAssistantMessage || !hasFreshAssistantForAwaitedTurn) {
+      return false;
+    }
+    return latestTurnAssistantMessage.status === "streaming" || latestTurnAssistantIsRenderable;
+  }, [hasFreshAssistantForAwaitedTurn, latestTurnAssistantIsRenderable, latestTurnAssistantMessage]);
+
   const isAwaitingAssistant =
     awaitingAssistantThreadId !== null
     && activeThreadIdForMessages === awaitingAssistantThreadId
-    && (!latestTurnAssistantMessage
-      || latestTurnAssistantMessage.status === "streaming"
-      || !latestTurnAssistantIsRenderable);
+    && !hasFreshAssistantStarted;
   const isWaitingForAssistantMessage =
     awaitingAssistantThreadId !== null
     && activeThreadIdForMessages === awaitingAssistantThreadId
-    && !latestTurnAssistantIsRenderable;
+    && !hasFreshAssistantStarted;
   const isOutputting = isSubmitting || isAwaitingAssistant || isStreaming;
   const shouldAutoFollow = isOutputting;
   const showIntro = visibleMessages.length === 0 && !isStreaming;
@@ -1884,19 +1908,45 @@ function AuthenticatedChat() {
       return;
     }
 
+    const latestAssistantKey = latestTurnAssistantMessage?.key ?? null;
+    const latestAssistantStatus = latestTurnAssistantMessage?.status ?? null;
+
     if (
-      latestTurnAssistantMessage
-      && latestTurnAssistantMessage.status !== "streaming"
+      hasFreshAssistantForAwaitedTurn
+      && latestAssistantKey
+      && latestAssistantStatus !== "streaming"
       && latestTurnAssistantIsRenderable
     ) {
+      logScrollDebug("awaiting:cleared", {
+        reason: "fresh-assistant-renderable",
+        threadId: awaitingAssistantThreadId,
+        baselineKey: awaitingAssistantBaselineKeyRef.current,
+        latestAssistantKey,
+      });
       setAwaitingAssistantThreadId(null);
+      awaitingAssistantBaselineKeyRef.current = null;
+      keepAttachedUntilFreshAssistantRef.current = false;
     }
   }, [
     activeThreadIdForMessages,
     awaitingAssistantThreadId,
+    hasFreshAssistantForAwaitedTurn,
+    hasFreshAssistantStarted,
     latestTurnAssistantIsRenderable,
     latestTurnAssistantMessage,
+    logScrollDebug,
   ]);
+
+  useEffect(() => {
+    if (!keepAttachedUntilFreshAssistantRef.current || !hasFreshAssistantStarted) {
+      return;
+    }
+    keepAttachedUntilFreshAssistantRef.current = false;
+    logScrollDebug("awaiting:fresh-started", {
+      baselineKey: awaitingAssistantBaselineKeyRef.current,
+      latestAssistantKey: latestTurnAssistantMessage?.key ?? null,
+    });
+  }, [hasFreshAssistantStarted, latestTurnAssistantMessage, logScrollDebug]);
 
   useEffect(() => {
     document.body.classList.toggle("chat-switching", isFadingOut);
@@ -2091,11 +2141,13 @@ function AuthenticatedChat() {
       || !autoFollowEnabledRef.current
       || isFadingOut
       || isThreadSwitchTransitionRef.current
-      || isFeedEndVisibleRef.current
     ) {
       return;
     }
     window.requestAnimationFrame(() => {
+      if (lenis) {
+        lenis.resize();
+      }
       scrollToPageBottom({
         force: true,
         duration: AUTO_FOLLOW_STREAM_DURATION_S,
@@ -2104,9 +2156,88 @@ function AuthenticatedChat() {
     });
   }, [
     isFadingOut,
+    lenis,
     scrollToPageBottom,
     shouldAutoFollow,
     streamingUpdateKey,
+    visibleMessages.length,
+  ]);
+
+  // Content-growth auto-follow via ResizeObserver.
+  // Catches smooth-text typewriter growth AFTER the backend stream has ended
+  // (when shouldAutoFollow is already false but content is still expanding).
+  useEffect(() => {
+    const feed = feedRef.current;
+    if (!feed || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    let prevHeight = 0;
+
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+
+      const h = entry.contentRect.height;
+      const grew = h > prevHeight + 2;
+      prevHeight = h;
+
+      if (!grew) return;
+      if (!autoFollowEnabledRef.current) return;
+      if (isThreadSwitchTransitionRef.current) return;
+
+      requestAnimationFrame(() => {
+        if (!autoFollowEnabledRef.current) return;
+        if (isThreadSwitchTransitionRef.current) return;
+
+        if (lenis) {
+          lenis.resize();
+        }
+        scrollToPageBottom({
+          force: true,
+          duration: AUTO_FOLLOW_STREAM_DURATION_S,
+          reason: "content-growth-follow",
+        });
+      });
+    });
+
+    ro.observe(feed);
+    return () => ro.disconnect();
+  }, [lenis, scrollToPageBottom]);
+
+  useEffect(() => {
+    if (!keepAttachedUntilFreshAssistantRef.current) {
+      return;
+    }
+    if (!awaitingAssistantThreadId || activeThreadIdForMessages !== awaitingAssistantThreadId) {
+      return;
+    }
+    if (isThreadSwitchTransitionRef.current || isFadingOut) {
+      return;
+    }
+
+    autoFollowEnabledRef.current = true;
+    if (!isFeedEndVisibleRef.current) {
+      logScrollDebug("awaiting:follow-reconcile", {
+        threadId: awaitingAssistantThreadId,
+      });
+      window.requestAnimationFrame(() => {
+        if (lenis) {
+          lenis.resize();
+        }
+        scrollToPageBottom({
+          force: true,
+          duration: AUTO_FOLLOW_STREAM_DURATION_S,
+          reason: "awaiting-follow",
+        });
+      });
+    }
+  }, [
+    activeThreadIdForMessages,
+    awaitingAssistantThreadId,
+    isFadingOut,
+    logScrollDebug,
+    scrollToPageBottom,
     visibleMessages.length,
   ]);
 
@@ -2166,6 +2297,78 @@ function AuthenticatedChat() {
   }, [showIntro, sessionVersion]);
 
   useEffect(() => {
+    const markUserUpIntent = (source: string, details?: Record<string, unknown>) => {
+      autoFollowLastUserIntentRef.current = Date.now();
+      logScrollDebug("follow:user-up-intent", {
+        source,
+        ...(details ?? {}),
+      });
+    };
+
+    const handleWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) {
+        markUserUpIntent("wheel", {
+          deltaY: event.deltaY,
+        });
+      }
+    };
+
+    const handleKeydown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) {
+        return;
+      }
+      if (
+        event.key === "ArrowUp"
+        || event.key === "PageUp"
+        || event.key === "Home"
+        || (event.key === " " && event.shiftKey)
+      ) {
+        markUserUpIntent("keyboard", {
+          key: event.key,
+        });
+      }
+    };
+
+    const handleTouchStart = (event: TouchEvent) => {
+      touchLastYRef.current = event.touches[0]?.clientY ?? null;
+    };
+
+    const handleTouchMove = (event: TouchEvent) => {
+      const currentY = event.touches[0]?.clientY;
+      if (typeof currentY !== "number") {
+        return;
+      }
+      const previousY = touchLastYRef.current;
+      if (typeof previousY === "number" && currentY - previousY > 2) {
+        markUserUpIntent("touch", {
+          deltaY: currentY - previousY,
+        });
+      }
+      touchLastYRef.current = currentY;
+    };
+
+    const clearTouchTrack = () => {
+      touchLastYRef.current = null;
+    };
+
+    window.addEventListener("wheel", handleWheel, { passive: true });
+    window.addEventListener("keydown", handleKeydown);
+    window.addEventListener("touchstart", handleTouchStart, { passive: true });
+    window.addEventListener("touchmove", handleTouchMove, { passive: true });
+    window.addEventListener("touchend", clearTouchTrack, { passive: true });
+    window.addEventListener("touchcancel", clearTouchTrack, { passive: true });
+
+    return () => {
+      window.removeEventListener("wheel", handleWheel);
+      window.removeEventListener("keydown", handleKeydown);
+      window.removeEventListener("touchstart", handleTouchStart);
+      window.removeEventListener("touchmove", handleTouchMove);
+      window.removeEventListener("touchend", clearTouchTrack);
+      window.removeEventListener("touchcancel", clearTouchTrack);
+    };
+  }, [logScrollDebug]);
+
+  useEffect(() => {
     const markFeedScrolling = () => {
       setIsFeedScrolling((current) => (current ? current : true));
       if (scrollIdleTimerRef.current !== null) {
@@ -2186,10 +2389,12 @@ function AuthenticatedChat() {
       const wasAttached = autoFollowEnabledRef.current;
       const bottomDistance = getBottomDistance();
       const movedUp = current < lastScrollPositionRef.current - 1;
+      const hasRecentUserUpIntent = Date.now() - autoFollowLastUserIntentRef.current <= AUTO_FOLLOW_USER_INTENT_WINDOW_MS;
+      const isProgrammaticWindow = Date.now() <= autoFollowProgrammaticUntilRef.current;
       autoFollowEnabledRef.current = getNextAutoFollowEnabled({
         wasEnabled: autoFollowEnabledRef.current,
         isOutputting: shouldAutoFollow,
-        movedUp,
+        movedUp: movedUp && hasRecentUserUpIntent && !isProgrammaticWindow,
         bottomDistance,
         attachThresholdPx: AUTO_FOLLOW_ATTACH_THRESHOLD_PX,
         detachThresholdPx: AUTO_FOLLOW_DETACH_THRESHOLD_PX,
@@ -2200,6 +2405,8 @@ function AuthenticatedChat() {
           wasAttached,
           isAttached: autoFollowEnabledRef.current,
           movedUp,
+          hasRecentUserUpIntent,
+          isProgrammaticWindow,
           bottomDistance: Number(bottomDistance.toFixed(1)),
           shouldAutoFollow,
         });
@@ -2212,7 +2419,9 @@ function AuthenticatedChat() {
     const syncCurrentWithoutMarking = () => {
       const current = getCurrentScrollPosition();
       lastScrollPositionRef.current = current;
-      autoFollowEnabledRef.current = isNearBottom(AUTO_FOLLOW_ATTACH_THRESHOLD_PX);
+      if (isNearBottom(AUTO_FOLLOW_ATTACH_THRESHOLD_PX)) {
+        autoFollowEnabledRef.current = true;
+      }
     };
 
     syncCurrentWithoutMarking();
@@ -2379,6 +2588,7 @@ function AuthenticatedChat() {
       if (dataWaitTimerRef.current !== null) window.clearTimeout(dataWaitTimerRef.current);
       if (threadSwitchRevealTimerRef.current !== null) window.clearTimeout(threadSwitchRevealTimerRef.current);
       isThreadSwitchTransitionRef.current = false;
+      keepAttachedUntilFreshAssistantRef.current = false;
     };
   }, []);
 
@@ -2400,6 +2610,8 @@ function AuthenticatedChat() {
 
     setDraft("");
     autoFollowEnabledRef.current = true;
+    autoFollowLastUserIntentRef.current = 0;
+    keepAttachedUntilFreshAssistantRef.current = true;
     logScrollDebug("send:start", {
       promptLength: prompt.length,
       activeThreadIdForMessages,
@@ -2441,6 +2653,7 @@ function AuthenticatedChat() {
           setIsThreadSwitchRevealing(false);
           setIsFadingOut(false);
           isThreadSwitchTransitionRef.current = false;
+          keepAttachedUntilFreshAssistantRef.current = false;
           dataWaitTimerRef.current = null;
           logScrollDebug("send:create-thread-failsafe", {
             threadId,
@@ -2454,7 +2667,12 @@ function AuthenticatedChat() {
         return;
       }
 
+      awaitingAssistantBaselineKeyRef.current = latestTurnAssistantMessage?.key ?? null;
       setAwaitingAssistantThreadId(threadId);
+      logScrollDebug("awaiting:set", {
+        threadId,
+        baselineKey: awaitingAssistantBaselineKeyRef.current,
+      });
       logScrollDebug("send:dispatch", {
         threadId,
       });
@@ -2464,6 +2682,8 @@ function AuthenticatedChat() {
       });
     } catch (error) {
       setAwaitingAssistantThreadId(null);
+      awaitingAssistantBaselineKeyRef.current = null;
+      keepAttachedUntilFreshAssistantRef.current = false;
       logScrollDebug("send:error", {
         error: error instanceof Error ? error.message : String(error),
       });
