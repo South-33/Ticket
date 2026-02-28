@@ -1197,10 +1197,6 @@ export const sendPrompt = mutation({
       prompt,
     });
 
-    await ctx.scheduler.runAfter(0, internal.memory.generateUserMemorySnapshotInternal, {
-      userId,
-    });
-
     return { promptMessageId: messageId, researchJobId: null };
   },
 });
@@ -1631,12 +1627,6 @@ export const generateReplyInternal = internalAction({
           result: memoryApplyResult,
           note: envelope.memoryNote,
         });
-
-        if (memoryApplyResult.applied > 0) {
-          await ctx.runMutation(internal.memory.generateUserMemorySnapshotInternal, {
-            userId: threadState.userId,
-          });
-        }
       }
 
       if (envelope.titleOps.action === "rename" && "title" in envelope.titleOps) {

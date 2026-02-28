@@ -231,4 +231,74 @@ describe("memory guards", () => {
     expect(audit[0]?.threadId).toBe("thread-audit-1");
     expect(audit[0]?.promptMessageId).toBe("prompt-audit-1");
   });
+
+  test("deduplicates memory snapshots when markdown is unchanged", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+
+    const first = await t.mutation(api.memory.generateUserMemorySnapshot, {});
+    const second = await t.mutation(api.memory.generateUserMemorySnapshot, {});
+
+    const snapshots = await t.run(async (ctx) => {
+      return await ctx.db
+        .query("userMemorySnapshots")
+        .withIndex("by_user_createdAt", (q) => q.eq("userId", DEMO_USER_ID))
+        .order("desc")
+        .take(10);
+    });
+
+    expect(first.version).toBe(second.version);
+    expect(first.markdown).toBe(second.markdown);
+    expect(snapshots).toHaveLength(1);
+  });
+
+  test("prunes memory snapshot history to bounded size", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+
+    for (let index = 1; index <= 55; index += 1) {
+      await t.mutation(api.memory.upsertUserPreferenceNote, {
+        key: "snapshot_counter",
+        value: `value-${index}`,
+      });
+    }
+
+    const snapshots = await t.run(async (ctx) => {
+      return await ctx.db
+        .query("userMemorySnapshots")
+        .withIndex("by_user_createdAt", (q) => q.eq("userId", DEMO_USER_ID))
+        .order("desc")
+        .take(200);
+    });
+
+    expect(snapshots.length).toBeLessThanOrEqual(40);
+    expect(snapshots[0]?.version).toBe(55);
+  });
+
+  test("manual snapshot maintenance trims existing overflow", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+
+    await t.run(async (ctx) => {
+      for (let index = 1; index <= 65; index += 1) {
+        await ctx.db.insert("userMemorySnapshots", {
+          userId: DEMO_USER_ID,
+          version: index,
+          markdown: `snapshot ${index}`,
+          createdAt: index,
+        });
+      }
+    });
+
+    const result = await t.mutation(api.memory.pruneUserMemorySnapshots, {});
+    const remaining = await t.run(async (ctx) => {
+      return await ctx.db
+        .query("userMemorySnapshots")
+        .withIndex("by_user_createdAt", (q) => q.eq("userId", DEMO_USER_ID))
+        .order("desc")
+        .take(200);
+    });
+
+    expect(result.removed).toBe(25);
+    expect(result.remaining).toBe(40);
+    expect(remaining).toHaveLength(40);
+    expect(remaining[0]?.version).toBe(65);
+  });
 });

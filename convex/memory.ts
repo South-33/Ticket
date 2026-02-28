@@ -58,6 +58,27 @@ const memoryOperationValidator = v.object({
   sensitive: v.optional(v.boolean()),
 });
 
+const MAX_MEMORY_SNAPSHOT_HISTORY = 40;
+const SNAPSHOT_PRUNE_BATCH_SIZE = 120;
+
+async function pruneSnapshotHistoryForUser(ctx: MutationCtx, userId: string) {
+  const history = await ctx.db
+    .query("userMemorySnapshots")
+    .withIndex("by_user_createdAt", (q) => q.eq("userId", userId))
+    .order("desc")
+    .take(SNAPSHOT_PRUNE_BATCH_SIZE);
+
+  const staleSnapshots = history.slice(MAX_MEMORY_SNAPSHOT_HISTORY);
+  if (staleSnapshots.length > 0) {
+    await Promise.all(staleSnapshots.map((snapshot) => ctx.db.delete(snapshot._id)));
+  }
+
+  return {
+    removed: staleSnapshots.length,
+    remaining: Math.min(history.length, MAX_MEMORY_SNAPSHOT_HISTORY),
+  };
+}
+
 function toMarkdown(args: {
   profile: {
     displayName?: string;
@@ -142,13 +163,22 @@ async function persistSnapshotForUser(ctx: MutationCtx, userId: string) {
     })),
   });
 
-  const version = (snapshots[0]?.version ?? 0) + 1;
+  const latestSnapshot = snapshots[0] ?? null;
+  if (latestSnapshot && latestSnapshot.markdown === markdown) {
+    return {
+      version: latestSnapshot.version,
+      markdown: latestSnapshot.markdown,
+    };
+  }
+
+  const version = (latestSnapshot?.version ?? 0) + 1;
   await ctx.db.insert("userMemorySnapshots", {
     userId,
     version,
     markdown,
     createdAt: Date.now(),
   });
+  await pruneSnapshotHistoryForUser(ctx, userId);
 
   return {
     version,
@@ -340,6 +370,7 @@ export const upsertUserProfile = mutation({
         createdAt: now,
         updatedAt: now,
       });
+      await persistSnapshotForUser(ctx, userId);
       return null;
     }
 
@@ -355,6 +386,7 @@ export const upsertUserProfile = mutation({
       loyaltyPrograms: args.loyaltyPrograms ?? existing.loyaltyPrograms,
       updatedAt: now,
     });
+    await persistSnapshotForUser(ctx, userId);
     return null;
   },
 });
@@ -395,6 +427,7 @@ export const upsertUserMemoryFact = mutation({
         createdAt: now,
         updatedAt: now,
       });
+      await persistSnapshotForUser(ctx, userId);
       return null;
     }
 
@@ -406,6 +439,7 @@ export const upsertUserMemoryFact = mutation({
       isSensitive: args.isSensitive,
       updatedAt: now,
     });
+    await persistSnapshotForUser(ctx, userId);
     return null;
   },
 });
@@ -436,6 +470,8 @@ export const confirmSensitiveFact = mutation({
       updatedAt: Date.now(),
     });
 
+    await persistSnapshotForUser(ctx, userId);
+
     return null;
   },
 });
@@ -453,6 +489,10 @@ export const removeUserMemoryFact = mutation({
       .withIndex("by_user_key", (q) => q.eq("userId", userId).eq("key", args.key))
       .take(50);
 
+    if (facts.length === 0) {
+      return null;
+    }
+
     await Promise.all(
       facts.map((fact) =>
         ctx.db.patch(fact._id, {
@@ -461,6 +501,8 @@ export const removeUserMemoryFact = mutation({
         }),
       ),
     );
+
+    await persistSnapshotForUser(ctx, userId);
 
     return null;
   },
@@ -494,6 +536,7 @@ export const upsertUserPreferenceNote = mutation({
         createdAt: now,
         updatedAt: now,
       });
+      await persistSnapshotForUser(ctx, userId);
       return null;
     }
 
@@ -501,6 +544,8 @@ export const upsertUserPreferenceNote = mutation({
       value,
       updatedAt: now,
     });
+
+    await persistSnapshotForUser(ctx, userId);
 
     return null;
   },
@@ -528,6 +573,7 @@ export const removeUserPreferenceNote = mutation({
     }
 
     await ctx.db.delete(existing._id);
+    await persistSnapshotForUser(ctx, userId);
     return null;
   },
 });
@@ -541,6 +587,18 @@ export const generateUserMemorySnapshot = mutation({
   handler: async (ctx) => {
     const userId = await getAuthUserIdOrThrow(ctx);
     return await persistSnapshotForUser(ctx, userId);
+  },
+});
+
+export const pruneUserMemorySnapshots = mutation({
+  args: {},
+  returns: v.object({
+    removed: v.number(),
+    remaining: v.number(),
+  }),
+  handler: async (ctx) => {
+    const userId = await getAuthUserIdOrThrow(ctx);
+    return await pruneSnapshotHistoryForUser(ctx, userId);
   },
 });
 
@@ -1066,8 +1124,13 @@ export const applyMemoryOpsInternal = internalMutation({
       });
     }
 
+    const applied = added + updated + deleted;
+    if (applied > 0) {
+      await persistSnapshotForUser(ctx, args.userId);
+    }
+
     return {
-      applied: added + updated + deleted,
+      applied,
       added,
       updated,
       deleted,

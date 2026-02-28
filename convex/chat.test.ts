@@ -18,7 +18,7 @@ describe("chat intake flow", () => {
     vi.useRealTimers();
   });
 
-  test("sendPrompt defers research start and still schedules memory snapshot", async () => {
+  test("sendPrompt defers research start without forcing memory snapshot writes", async () => {
     vi.useFakeTimers();
     const testConvex = convexTest(schema, modules);
     registerAgentComponent(testConvex);
@@ -42,8 +42,7 @@ describe("chat intake flow", () => {
 
     expect(sent.researchJobId).toBeNull();
     expect(latest).toBeNull();
-    expect(memory.latestSnapshot).not.toBeNull();
-    expect(memory.latestSnapshot?.markdown).toContain("# user.md");
+    expect(memory.latestSnapshot).toBeNull();
   });
 
   test("sendPrompt does not create research job until ResearchOps.start", async () => {
