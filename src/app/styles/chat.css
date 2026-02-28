@@ -763,6 +763,12 @@
   position: relative;
 }
 
+.chat-feed-end {
+  width: 100%;
+  height: 1px;
+  pointer-events: none;
+}
+
 .chat-feed.with-research-dock {
   padding-top: calc(4rem + var(--research-dock-height) + 1.25rem);
 }
@@ -1196,6 +1202,7 @@
   font-weight: 300;
   line-height: 1.4;
   color: var(--text-primary);
+  overflow-wrap: anywhere;
 }
 
 .message.ai .message-content p {
@@ -1204,27 +1211,6 @@
 
 .message.ai .message-content p:last-child {
   margin-bottom: 0;
-}
-
-.message.ai .message-content.is-streaming > p,
-.message.ai .message-content.is-streaming > ul,
-.message.ai .message-content.is-streaming > ol,
-.message.ai .message-content.is-streaming > pre,
-.message.ai .message-content.is-streaming > blockquote,
-.message.ai .message-content.is-streaming > h1,
-.message.ai .message-content.is-streaming > h2,
-.message.ai .message-content.is-streaming > h3,
-.message.ai .message-content.is-streaming > h4,
-.message.ai .message-content.is-streaming > h5,
-.message.ai .message-content.is-streaming > h6 {
-  display: inline;
-  margin: 0;
-}
-
-.message.ai .message-content.is-streaming > ul,
-.message.ai .message-content.is-streaming > ol {
-  padding-left: 0;
-  list-style: none;
 }
 
 .message.ai .message-content code {
@@ -1242,6 +1228,8 @@
   color: var(--bg-color);
   padding: 1.5rem;
   overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
   margin: 2rem 0;
   line-height: 1.5;
 }
@@ -1261,6 +1249,27 @@
 
 .message.ai .message-content li {
   margin: 0.35rem 0;
+}
+
+.message.ai .message-content .markdown-img,
+.message.ai .message-content.reasoning-content .markdown-img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1rem 0;
+}
+
+.message.ai .message-content .markdown-pre,
+.message.ai .message-content.reasoning-content .markdown-pre {
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  tab-size: 2;
+}
+
+.message.ai .message-content .markdown-code,
+.message.ai .message-content.reasoning-content .markdown-code {
+  white-space: break-spaces;
 }
 
 .reasoning-block {
@@ -1428,21 +1437,6 @@
   font-family: var(--font-mono) !important;
   font-size: 0.75rem !important;
   line-height: 1.5 !important;
-}
-
-.reasoning-content.is-streaming > p,
-.reasoning-content.is-streaming > ul,
-.reasoning-content.is-streaming > ol,
-.reasoning-content.is-streaming > pre,
-.reasoning-content.is-streaming > blockquote,
-.reasoning-content.is-streaming > h1,
-.reasoning-content.is-streaming > h2,
-.reasoning-content.is-streaming > h3,
-.reasoning-content.is-streaming > h4,
-.reasoning-content.is-streaming > h5,
-.reasoning-content.is-streaming > h6 {
-  display: inline;
-  margin: 0;
 }
 
 .message.ai .message-content.reasoning-content ul,
