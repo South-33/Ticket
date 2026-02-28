@@ -756,6 +756,16 @@ const TYPEWRITER_PUNCTUATION_PAUSE_MS = 25;
 const THREAD_SWITCH_FADE_MS = 500;
 const THREAD_SWITCH_REVEAL_DELAY_MS = 120;
 const THREAD_SWITCH_FAILSAFE_MS = 5000;
+const THREAD_SWITCH_REVEAL_PHASE_TIMEOUT_MS = 900;
+const THREAD_SWITCH_LAYOUT_SETTLE_INTERVAL_MS = 34;
+const THREAD_SWITCH_LAYOUT_SETTLE_MAX_MS = 850;
+const THREAD_SWITCH_LAYOUT_STABLE_FRAME_COUNT = 2;
+const THREAD_SWITCH_LAYOUT_STABLE_DELTA_PX = 2;
+const THREAD_SWITCH_REVEAL_MICRO_SCROLL_RATIO = 0.1;
+const THREAD_SWITCH_REVEAL_MICRO_SCROLL_MIN_PX = 72;
+const THREAD_SWITCH_REVEAL_MICRO_SCROLL_MAX_PX = 140;
+const THREAD_SWITCH_REVEAL_MICRO_SCROLL_DURATION_S = 0.4;
+const THREAD_SWITCH_REVEAL_POST_SETTLE_MS = 220;
 const AUTO_FOLLOW_ATTACH_THRESHOLD_PX = 56;
 const AUTO_FOLLOW_DETACH_THRESHOLD_PX = 120;
 const AUTO_FOLLOW_SMOOTH_DURATION_S = 0.32;
@@ -773,11 +783,10 @@ const AUTO_FOLLOW_SEND_FINALIZE_DELAY_MS = 420;
 const AUTO_FOLLOW_MIN_BOTTOM_DISTANCE_PX = 1;
 const AUTO_FOLLOW_PENDING_TIMEOUT_MS = 12_000;
 const AUTO_FOLLOW_STICKY_SEND_MS = 12_000;
-const AUTO_FOLLOW_STICKY_THREAD_SWITCH_MS = 4_000;
 const AUTO_FOLLOW_STICKY_OBSERVER_EXTEND_MS = 1_800;
-const THREAD_SWITCH_BOTTOM_LOCK_MS = 1_200;
+const THREAD_SWITCH_BOTTOM_LOCK_MS = 1_800;
 const THREAD_SWITCH_LOCK_OBSERVER_MIN_GAP_MS = 300;
-const THREAD_SWITCH_SETTLE_DELAYS_MS = [120, 320, 640, 980] as const;
+const THREAD_SWITCH_SETTLE_DELAYS_MS = [120, 280, 520] as const;
 const AUTO_FOLLOW_PROGRAMMATIC_GUARD_MS = 240;
 const AUTO_FOLLOW_USER_INTENT_WINDOW_MS = 420;
 const SCROLL_DEBUG_ENABLED = process.env.NEXT_PUBLIC_SCROLL_DEBUG === "1";
@@ -799,6 +808,8 @@ type CachedSidebarThread = {
   threadId: string;
   title: string;
 };
+
+type ThreadSwitchPhase = "idle" | "fadingOut" | "loadingHidden" | "revealing";
 
 const subscribeNoop = () => {
   return () => {};
@@ -1454,8 +1465,9 @@ function isEditableTarget(target: EventTarget | null) {
 }
 
 function AuthenticatedChat() {
+  const { isAuthenticated } = useConvexAuth();
   const { user } = useUser();
-  const threads = useQuery(api.chat.listThreads);
+  const threads = useQuery(api.chat.listThreads, isAuthenticated ? {} : "skip");
   const createThread = useMutation(api.chat.createThread);
   const deleteThread = useMutation(api.chat.deleteThread);
   const requestLiveRecheck = useMutation(api.research.requestLiveRecheck);
@@ -1473,6 +1485,7 @@ function AuthenticatedChat() {
   const [isIntroTyping, setIsIntroTyping] = useState(false);
   const [isFeedScrolling, setIsFeedScrolling] = useState(false);
   const [isFadingOut, setIsFadingOut] = useState(false);
+  const [isThreadSwitchRevealing, setIsThreadSwitchRevealing] = useState(false);
   const [sessionVersion, setSessionVersion] = useState(0);
   const [lastKnownUserId, setLastKnownUserId] = useState<string | null>(() => {
     if (typeof window === "undefined") {
@@ -1513,6 +1526,8 @@ function AuthenticatedChat() {
   const isFeedEndVisibleRef = useRef(true);
   const touchLastYRef = useRef<number | null>(null);
   const waitingForDataRef = useRef(false);
+  const threadSwitchPhaseRef = useRef<ThreadSwitchPhase>("idle");
+  const threadSwitchEpochRef = useRef(0);
   const autoFollowEnabledRef = useRef(true);
   const shouldAutoFollowRef = useRef(false);
   const lastScrollPositionRef = useRef(0);
@@ -1577,8 +1592,18 @@ function AuthenticatedChat() {
     lenis,
   ]);
 
+  const isScrollDebugEnabled = useCallback(() => {
+    if (SCROLL_DEBUG_ENABLED) {
+      return true;
+    }
+    if (typeof window === "undefined") {
+      return false;
+    }
+    return Boolean((window as Window & { __SCROLL_DEBUG__?: boolean }).__SCROLL_DEBUG__);
+  }, []);
+
   const logScrollDebug = useCallback((event: string, details?: Record<string, unknown>) => {
-    if (!SCROLL_DEBUG_ENABLED) {
+    if (!isScrollDebugEnabled()) {
       return;
     }
 
@@ -1590,14 +1615,14 @@ function AuthenticatedChat() {
       ...getScrollDebugSnapshot(),
       ...(details ?? {}),
     });
-  }, [getScrollDebugSnapshot]);
+  }, [getScrollDebugSnapshot, isScrollDebugEnabled]);
 
   useEffect(() => {
-    if (!SCROLL_DEBUG_ENABLED) {
+    if (!isScrollDebugEnabled()) {
       return;
     }
     console.info("[scroll-debug] diagnostics enabled");
-  }, []);
+  }, [isScrollDebugEnabled]);
 
   useEffect(() => {
     const target = feedEndRef.current;
@@ -1644,6 +1669,29 @@ function AuthenticatedChat() {
     return Date.now() <= threadSwitchBottomLockUntilRef.current;
   }, []);
 
+  const isThreadSwitchTransitionActive = useCallback(() => {
+    return threadSwitchPhaseRef.current !== "idle";
+  }, []);
+
+  const setThreadSwitchPhase = useCallback((phase: ThreadSwitchPhase, details?: Record<string, unknown>) => {
+    threadSwitchPhaseRef.current = phase;
+    logScrollDebug("thread-switch:phase", {
+      phase,
+      ...(details ?? {}),
+    });
+  }, [logScrollDebug]);
+
+  const getThreadSwitchRevealOffsetPx = useCallback(() => {
+    if (typeof window === "undefined") {
+      return THREAD_SWITCH_REVEAL_MICRO_SCROLL_MIN_PX;
+    }
+    const desired = window.innerHeight * THREAD_SWITCH_REVEAL_MICRO_SCROLL_RATIO;
+    return Math.max(
+      THREAD_SWITCH_REVEAL_MICRO_SCROLL_MIN_PX,
+      Math.min(THREAD_SWITCH_REVEAL_MICRO_SCROLL_MAX_PX, desired),
+    );
+  }, []);
+
   const armAutoFollowSticky = useCallback((durationMs: number, reason: string) => {
     const now = Date.now();
     const until = now + durationMs;
@@ -1684,28 +1732,38 @@ function AuthenticatedChat() {
     immediate?: boolean;
     force?: boolean;
     duration?: number;
+    lock?: boolean;
+    bottomOffsetPx?: number;
     reason?: string;
+    onComplete?: () => void;
   }) => {
     const immediate = options?.immediate ?? false;
     const force = options?.force ?? true;
+    const lock = options?.lock ?? false;
     const duration = options?.duration ?? AUTO_FOLLOW_SMOOTH_DURATION_S;
+    const bottomOffsetPx = Math.max(0, options?.bottomOffsetPx ?? 0);
     const reason = options?.reason ?? "unknown";
+    const onComplete = options?.onComplete;
 
     logScrollDebug("scrollToBottom:request", {
       reason,
       immediate,
       force,
+      lock,
       duration,
+      bottomOffsetPx,
     });
 
     autoFollowProgrammaticUntilRef.current = Date.now() + AUTO_FOLLOW_PROGRAMMATIC_GUARD_MS;
     if (lenis) {
-      const target = feedEndRef.current ?? Math.max(0, lenis.limit);
+      const target = Math.max(0, lenis.limit - bottomOffsetPx);
       lenis.scrollTo(target, {
         duration,
         immediate,
         force,
+        lock,
         easing: AUTO_FOLLOW_EASING,
+        onComplete,
       });
       window.requestAnimationFrame(() => {
         logScrollDebug("scrollToBottom:applied", {
@@ -1715,7 +1773,7 @@ function AuthenticatedChat() {
       });
       return;
     }
-    if (feedEndRef.current) {
+    if (feedEndRef.current && bottomOffsetPx <= 0) {
       feedEndRef.current.scrollIntoView({ block: "end", behavior: immediate ? "auto" : "smooth" });
       window.requestAnimationFrame(() => {
         logScrollDebug("scrollToBottom:applied", {
@@ -1723,9 +1781,16 @@ function AuthenticatedChat() {
           transport: "dom-anchor",
         });
       });
+      if (onComplete) {
+        if (immediate) {
+          onComplete();
+        } else {
+          window.setTimeout(onComplete, Math.max(80, Math.ceil(duration * 1000)));
+        }
+      }
       return;
     }
-    const target = document.documentElement.scrollHeight;
+    const target = Math.max(0, document.documentElement.scrollHeight - window.innerHeight - bottomOffsetPx);
     window.scrollTo({ top: target, behavior: immediate ? "auto" : "smooth" });
     window.requestAnimationFrame(() => {
       logScrollDebug("scrollToBottom:applied", {
@@ -1733,9 +1798,20 @@ function AuthenticatedChat() {
         transport: "window-scroll",
       });
     });
+    if (onComplete) {
+      if (immediate) {
+        onComplete();
+      } else {
+        window.setTimeout(onComplete, Math.max(80, Math.ceil(duration * 1000)));
+      }
+    }
   }, [lenis, logScrollDebug]);
 
   const flushScheduledAutoFollow = useCallback((reason: string) => {
+    if (isThreadSwitchTransitionActive()) {
+      return;
+    }
+
     const stickyActive = isAutoFollowStickyActive();
     if (!autoFollowEnabledRef.current && !stickyActive) {
       return;
@@ -1755,7 +1831,7 @@ function AuthenticatedChat() {
       duration: getAutoFollowDuration(bottomDistance),
       reason,
     });
-  }, [getAutoFollowDuration, getBottomDistance, isAutoFollowStickyActive, scrollToPageBottom]);
+  }, [getAutoFollowDuration, getBottomDistance, isAutoFollowStickyActive, isThreadSwitchTransitionActive, scrollToPageBottom]);
 
   const scheduleAutoFollow = useCallback((reason: string, options?: { immediate?: boolean }) => {
     const immediate = options?.immediate ?? false;
@@ -1801,11 +1877,140 @@ function AuthenticatedChat() {
         if (bottomDistance <= AUTO_FOLLOW_ATTACH_THRESHOLD_PX) {
           return;
         }
-        scheduleAutoFollow(`${reasonPrefix}:${delay}ms`);
+        scrollToPageBottom({
+          reason: `${reasonPrefix}:${delay}ms`,
+          immediate: true,
+          duration: 0,
+          force: true,
+        });
+        lastScrollPositionRef.current = getCurrentScrollPosition();
       }, delay);
       threadSwitchSettleTimersRef.current.push(timer);
     }
-  }, [getBottomDistance, scheduleAutoFollow]);
+  }, [getBottomDistance, getCurrentScrollPosition, scrollToPageBottom]);
+
+  const settleThreadSwitchBeforeReveal = useCallback((reasonPrefix: string, epoch: number) => {
+    for (const timer of threadSwitchSettleTimersRef.current) {
+      window.clearTimeout(timer);
+    }
+    threadSwitchSettleTimersRef.current = [];
+
+    const startedAt = performance.now();
+    const revealOffsetPx = getThreadSwitchRevealOffsetPx();
+    let completed = false;
+    let stableFrameCount = 0;
+    let lastFeedHeight = feedRef.current?.scrollHeight ?? 0;
+
+    const finishReveal = (source: "onComplete" | "timeout") => {
+      if (completed || threadSwitchEpochRef.current !== epoch) {
+        return;
+      }
+      completed = true;
+      for (const timer of threadSwitchSettleTimersRef.current) {
+        window.clearTimeout(timer);
+      }
+      threadSwitchSettleTimersRef.current = [];
+
+      const finalizeTimer = window.setTimeout(() => {
+        if (threadSwitchEpochRef.current !== epoch) {
+          return;
+        }
+        scrollToPageBottom({
+          reason: `${reasonPrefix}:reveal-final`,
+          immediate: true,
+          duration: 0,
+          force: true,
+          bottomOffsetPx: 0,
+        });
+        lastScrollPositionRef.current = getCurrentScrollPosition();
+        setIsThreadSwitchRevealing(false);
+        setThreadSwitchPhase("idle", {
+          source,
+          reason: reasonPrefix,
+        });
+      }, THREAD_SWITCH_REVEAL_POST_SETTLE_MS);
+      threadSwitchSettleTimersRef.current.push(finalizeTimer);
+    };
+
+    const startReveal = () => {
+      if (completed || threadSwitchEpochRef.current !== epoch) {
+        return;
+      }
+      setThreadSwitchPhase("revealing", {
+        reason: reasonPrefix,
+      });
+      setIsFadingOut(false);
+      setIsThreadSwitchRevealing(true);
+
+      const revealTimer = window.setTimeout(() => {
+        finishReveal("timeout");
+      }, THREAD_SWITCH_REVEAL_PHASE_TIMEOUT_MS);
+      threadSwitchSettleTimersRef.current.push(revealTimer);
+
+      window.requestAnimationFrame(() => {
+        if (completed || threadSwitchEpochRef.current !== epoch) {
+          return;
+        }
+        scrollToPageBottom({
+          reason: `${reasonPrefix}:micro-scroll`,
+          force: true,
+          lock: true,
+          duration: THREAD_SWITCH_REVEAL_MICRO_SCROLL_DURATION_S,
+          bottomOffsetPx: 0,
+          onComplete: () => {
+            finishReveal("onComplete");
+          },
+        });
+      });
+
+      logScrollDebug("thread-switch:reveal", {
+        reason: reasonPrefix,
+        elapsedMs: Number((performance.now() - startedAt).toFixed(1)),
+        revealOffsetPx: Number(revealOffsetPx.toFixed(1)),
+      });
+    };
+
+    const runSettleStep = () => {
+      if (completed || threadSwitchEpochRef.current !== epoch) {
+        return;
+      }
+
+      const feedHeight = feedRef.current?.scrollHeight ?? 0;
+      if (Math.abs(feedHeight - lastFeedHeight) <= THREAD_SWITCH_LAYOUT_STABLE_DELTA_PX) {
+        stableFrameCount += 1;
+      } else {
+        stableFrameCount = 0;
+      }
+      lastFeedHeight = feedHeight;
+
+      scrollToPageBottom({
+        reason: `${reasonPrefix}:hidden-settle`,
+        immediate: true,
+        duration: 0,
+        force: true,
+        bottomOffsetPx: revealOffsetPx,
+      });
+      lastScrollPositionRef.current = getCurrentScrollPosition();
+
+      const elapsedMs = performance.now() - startedAt;
+      const settleReady = stableFrameCount >= THREAD_SWITCH_LAYOUT_STABLE_FRAME_COUNT;
+      if ((settleReady && elapsedMs >= THREAD_SWITCH_REVEAL_DELAY_MS) || elapsedMs >= THREAD_SWITCH_LAYOUT_SETTLE_MAX_MS) {
+        startReveal();
+        return;
+      }
+
+      const timer = window.setTimeout(runSettleStep, THREAD_SWITCH_LAYOUT_SETTLE_INTERVAL_MS);
+      threadSwitchSettleTimersRef.current.push(timer);
+    };
+
+    runSettleStep();
+  }, [
+    getCurrentScrollPosition,
+    getThreadSwitchRevealOffsetPx,
+    logScrollDebug,
+    scrollToPageBottom,
+    setThreadSwitchPhase,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1840,14 +2045,30 @@ function AuthenticatedChat() {
 
   const switchThread = useCallback(
     (newThreadId: string | null, composingNew: boolean) => {
-      if (isFadingOut) return;
+      if (isFadingOut || isThreadSwitchRevealing) return;
       if (!composingNew && newThreadId === activeThreadId && !isComposingNew) return;
+
+      threadSwitchEpochRef.current += 1;
+      const switchEpoch = threadSwitchEpochRef.current;
       setAwaitingAssistantThreadId(null);
+      setIsThreadSwitchRevealing(false);
+      setThreadSwitchPhase("fadingOut", {
+        epoch: switchEpoch,
+        threadId: newThreadId,
+        composingNew,
+      });
       setIsFadingOut(true);
       waitingForDataRef.current = false;
       if (fadingTimerRef.current !== null) window.clearTimeout(fadingTimerRef.current);
       if (dataWaitTimerRef.current !== null) window.clearTimeout(dataWaitTimerRef.current);
+      for (const timer of threadSwitchSettleTimersRef.current) {
+        window.clearTimeout(timer);
+      }
+      threadSwitchSettleTimersRef.current = [];
       fadingTimerRef.current = window.setTimeout(() => {
+        if (threadSwitchEpochRef.current !== switchEpoch) {
+          return;
+        }
         setIsComposingNew(composingNew);
         setActiveThreadId(newThreadId);
         if (composingNew) {
@@ -1855,14 +2076,30 @@ function AuthenticatedChat() {
         }
         if (composingNew) {
           // New session: fade out first, then fade straight back in
+          setThreadSwitchPhase("idle", {
+            epoch: switchEpoch,
+            reason: "new-composition",
+          });
           setIsFadingOut(false);
         } else {
           // Existing thread: stay invisible until target messages are ready.
+          setThreadSwitchPhase("loadingHidden", {
+            epoch: switchEpoch,
+            threadId: newThreadId,
+          });
           armThreadSwitchBottomLock("thread-switch:start");
           waitingForDataRef.current = true;
           // Failsafe: avoid staying hidden forever if something goes wrong.
           dataWaitTimerRef.current = window.setTimeout(() => {
+            if (threadSwitchEpochRef.current !== switchEpoch) {
+              return;
+            }
             waitingForDataRef.current = false;
+            setIsThreadSwitchRevealing(false);
+            setThreadSwitchPhase("idle", {
+              epoch: switchEpoch,
+              reason: "failsafe",
+            });
             setIsFadingOut(false);
           }, THREAD_SWITCH_FAILSAFE_MS);
         }
@@ -1873,9 +2110,11 @@ function AuthenticatedChat() {
       armThreadSwitchBottomLock,
       isComposingNew,
       isFadingOut,
+      isThreadSwitchRevealing,
       setSessionVersion,
       setActiveThreadId,
       setIsComposingNew,
+      setThreadSwitchPhase,
     ],
   );
 
@@ -1883,7 +2122,7 @@ function AuthenticatedChat() {
     switchThread(null, true);
   }, [switchThread]);
 
-  const activeThreadIdForMessages = activeThreadId;
+  const activeThreadIdForMessages = isAuthenticated ? activeThreadId : null;
 
   const messageFeed = useUIMessages(
     api.chat.listMessages,
@@ -2042,38 +2281,18 @@ function AuthenticatedChat() {
       window.requestAnimationFrame(() => {
         autoFollowEnabledRef.current = true;
         armThreadSwitchBottomLock("thread-switch:data-ready");
-        armAutoFollowSticky(AUTO_FOLLOW_STICKY_THREAD_SWITCH_MS, "thread-switch-reveal");
-        scrollToPageBottom({
-          reason: "thread-switch-reveal-initial",
-          immediate: true,
-          duration: 0,
-        });
-        scheduleAutoFollow("thread-switch-reveal-scheduled");
-        scheduleThreadSwitchSettleFollow("thread-switch-settle");
-        lastScrollPositionRef.current = getCurrentScrollPosition();
-        window.requestAnimationFrame(() => {
-          dataWaitTimerRef.current = window.setTimeout(() => {
-            setIsFadingOut(false);
-            scheduleAutoFollow("thread-switch-post-reveal");
-            scheduleThreadSwitchSettleFollow("thread-switch-post-reveal-settle");
-            dataWaitTimerRef.current = null;
-          }, THREAD_SWITCH_REVEAL_DELAY_MS);
-        });
+        settleThreadSwitchBeforeReveal("thread-switch-pre-reveal-settle", threadSwitchEpochRef.current);
       });
     }
   }, [
-    armAutoFollowSticky,
     armThreadSwitchBottomLock,
-    getCurrentScrollPosition,
-    scheduleAutoFollow,
-    scheduleThreadSwitchSettleFollow,
-    scrollToPageBottom,
+    settleThreadSwitchBeforeReveal,
     visibleMessages.length,
   ]);
 
   useEffect(() => {
     const feed = feedRef.current;
-    if (!feed || isFadingOut) {
+    if (!feed || isFadingOut || isThreadSwitchRevealing) {
       return;
     }
 
@@ -2089,8 +2308,12 @@ function AuthenticatedChat() {
       scheduled = true;
       window.requestAnimationFrame(() => {
         scheduled = false;
+        if (isThreadSwitchTransitionActive()) {
+          return;
+        }
         const stickyActive = isAutoFollowStickyActive();
         const threadSwitchLockActive = isThreadSwitchBottomLockActive();
+        const outputActive = shouldAutoFollowRef.current;
         if (!autoFollowEnabledRef.current && !stickyActive && !threadSwitchLockActive) {
           return;
         }
@@ -2130,11 +2353,13 @@ function AuthenticatedChat() {
         autoFollowLastObserverRunRef.current = now;
         autoFollowLastObserverDistanceRef.current = bottomDistance;
 
-        const outputActive = shouldAutoFollowRef.current;
-        if (stickyActive || outputActive || threadSwitchLockActive) {
+        if (stickyActive || outputActive) {
           armAutoFollowSticky(AUTO_FOLLOW_STICKY_OBSERVER_EXTEND_MS, "observer-growth");
         }
 
+        if (threadSwitchLockActive && !outputActive) {
+          return;
+        }
         scheduleAutoFollow("observer-follow");
         logScrollDebug("observer:follow-triggered", {
           source,
@@ -2185,11 +2410,15 @@ function AuthenticatedChat() {
   }, [
     armAutoFollowSticky,
     getBottomDistance,
+    getCurrentScrollPosition,
     isAutoFollowStickyActive,
     isThreadSwitchBottomLockActive,
+    isThreadSwitchTransitionActive,
     isFadingOut,
+    isThreadSwitchRevealing,
     logScrollDebug,
     scheduleAutoFollow,
+    scrollToPageBottom,
   ]);
 
   useEffect(() => {
@@ -2324,10 +2553,20 @@ function AuthenticatedChat() {
         return;
       }
 
+      if (!activeThreadIdForMessages) {
+        return;
+      }
+
+      if (isThreadSwitchTransitionActive()) {
+        return;
+      }
+
       const stickyActive = isAutoFollowStickyActive();
       const threadSwitchLockActive = isThreadSwitchBottomLockActive();
       const outputActive = shouldAutoFollowRef.current;
-      const shouldMaintainFollow = autoFollowEnabledRef.current || stickyActive || threadSwitchLockActive || outputActive;
+      const attachedAndNearBottom = autoFollowEnabledRef.current
+        && isNearBottom(AUTO_FOLLOW_DETACH_THRESHOLD_PX);
+      const shouldMaintainFollow = attachedAndNearBottom || threadSwitchLockActive || outputActive;
 
       if (!shouldMaintainFollow) {
         return;
@@ -2386,10 +2625,13 @@ function AuthenticatedChat() {
       window.removeEventListener("pageshow", handlePageShow);
     };
   }, [
+    activeThreadIdForMessages,
     getBottomDistance,
     getCurrentScrollPosition,
     isAutoFollowStickyActive,
+    isNearBottom,
     isThreadSwitchBottomLockActive,
+    isThreadSwitchTransitionActive,
     logScrollDebug,
     scheduleAutoFollow,
     scheduleThreadSwitchSettleFollow,
@@ -2408,6 +2650,12 @@ function AuthenticatedChat() {
 
     const syncFollowFromCurrentPosition = () => {
       const current = getCurrentScrollPosition();
+      if (isThreadSwitchTransitionActive()) {
+        lastScrollPositionRef.current = current;
+        scrollDebugLastPositionRef.current = current;
+        scrollDebugLastPositionTsRef.current = performance.now();
+        return;
+      }
       const bottomDistance = getBottomDistance();
       const effectiveBottomDistance = isFeedEndVisibleRef.current ? 0 : bottomDistance;
       const movedUp = current < lastScrollPositionRef.current - 1;
@@ -2418,14 +2666,18 @@ function AuthenticatedChat() {
       const isProgrammaticWindow = now <= autoFollowProgrammaticUntilRef.current;
       const wasAttached = autoFollowEnabledRef.current;
 
-      autoFollowEnabledRef.current = getNextAutoFollowEnabled({
-        wasEnabled: autoFollowEnabledRef.current,
-        isOutputting: shouldAutoFollow || stickyActive || threadSwitchLockActive,
-        movedUp: movedUp && hasRecentUserUpIntent && !isProgrammaticWindow && !threadSwitchLockActive,
-        bottomDistance: effectiveBottomDistance,
-        attachThresholdPx: AUTO_FOLLOW_ATTACH_THRESHOLD_PX,
-        detachThresholdPx: AUTO_FOLLOW_DETACH_THRESHOLD_PX,
-      });
+      if (!shouldAutoFollow && !stickyActive && !threadSwitchLockActive) {
+        autoFollowEnabledRef.current = effectiveBottomDistance <= AUTO_FOLLOW_ATTACH_THRESHOLD_PX;
+      } else {
+        autoFollowEnabledRef.current = getNextAutoFollowEnabled({
+          wasEnabled: autoFollowEnabledRef.current,
+          isOutputting: shouldAutoFollow || stickyActive || threadSwitchLockActive,
+          movedUp: movedUp && hasRecentUserUpIntent && !isProgrammaticWindow && !threadSwitchLockActive,
+          bottomDistance: effectiveBottomDistance,
+          attachThresholdPx: AUTO_FOLLOW_ATTACH_THRESHOLD_PX,
+          detachThresholdPx: AUTO_FOLLOW_DETACH_THRESHOLD_PX,
+        });
+      }
 
       const nowPerf = performance.now();
       const dt = scrollDebugLastPositionTsRef.current > 0 ? nowPerf - scrollDebugLastPositionTsRef.current : 0;
@@ -2478,6 +2730,9 @@ function AuthenticatedChat() {
       lastScrollPositionRef.current = current;
       scrollDebugLastPositionRef.current = current;
       scrollDebugLastPositionTsRef.current = performance.now();
+      if (isThreadSwitchTransitionActive()) {
+        return;
+      }
       const stickyActive = isAutoFollowStickyActive();
       const threadSwitchLockActive = isThreadSwitchBottomLockActive();
       if (!shouldAutoFollow && !stickyActive && !threadSwitchLockActive) {
@@ -2495,6 +2750,9 @@ function AuthenticatedChat() {
     }
 
     const handleResize = () => {
+      if (isThreadSwitchTransitionActive()) {
+        return;
+      }
       const threadSwitchLockActive = isThreadSwitchBottomLockActive();
       if (isNearBottom(AUTO_FOLLOW_ATTACH_THRESHOLD_PX)) {
         autoFollowEnabledRef.current = true;
@@ -2529,6 +2787,7 @@ function AuthenticatedChat() {
     getCurrentScrollPosition,
     isAutoFollowStickyActive,
     isThreadSwitchBottomLockActive,
+    isThreadSwitchTransitionActive,
     isNearBottom,
     lenis,
     logScrollDebug,
@@ -2819,7 +3078,12 @@ function AuthenticatedChat() {
           )}
 
           <div
-            className={clsx("chat-feed", isFadingOut && "fading-out", latestResearchJob && "with-research-dock")}
+            className={clsx(
+              "chat-feed",
+              isFadingOut && "fading-out",
+              isThreadSwitchRevealing && "revealing",
+              latestResearchJob && "with-research-dock",
+            )}
             id="chatFeed"
             ref={feedRef}
             onScroll={handleFeedScroll}
