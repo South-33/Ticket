@@ -3,10 +3,10 @@
 import { useEffect, useRef } from "react";
 
 const DENSITY = "Ñ@#W$9876543210?!abc;:+=-,._                                                                                                   ";
-const TARGET_FPS = 28;
+const TARGET_FPS = 60;
 const FRAME_INTERVAL_MS = 1000 / TARGET_FPS;
 const CELL_SIZE = 14;
-const CANVAS_SCALE = 1.2;
+const CANVAS_SCALE = 1;
 
 type ChatCanvasProps = {
   pause?: boolean;
@@ -28,6 +28,9 @@ export function ChatCanvas({ pause = false }: ChatCanvasProps) {
 
     let width = 0;
     let height = 0;
+    let cols = 0;
+    let rows = 0;
+    let textColor = "";
     let time = 0;
     let rafId = 0;
     let lastFrameTs = 0;
@@ -35,6 +38,11 @@ export function ChatCanvas({ pause = false }: ChatCanvasProps) {
     const resize = () => {
       width = canvas.width = window.innerWidth * CANVAS_SCALE;
       height = canvas.height = window.innerHeight * CANVAS_SCALE;
+      cols = Math.floor(width / CELL_SIZE);
+      rows = Math.floor(height / CELL_SIZE);
+      textColor = getComputedStyle(document.documentElement)
+        .getPropertyValue("--text-secondary")
+        .trim();
     };
 
     const draw = (ts: number) => {
@@ -50,13 +58,8 @@ export function ChatCanvas({ pause = false }: ChatCanvasProps) {
       lastFrameTs = ts;
 
       ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = getComputedStyle(document.documentElement)
-        .getPropertyValue("--text-secondary")
-        .trim();
+      ctx.fillStyle = textColor;
       ctx.font = '14px "JetBrains Mono", monospace';
-
-      const cols = Math.floor(width / CELL_SIZE);
-      const rows = Math.floor(height / CELL_SIZE);
 
       for (let i = 0; i < cols; i++) {
         for (let j = 0; j < rows; j++) {

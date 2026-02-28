@@ -41,6 +41,19 @@ describe("getNextAutoFollowEnabled", () => {
     expect(enabled).toBe(true);
   });
 
+  it("stays attached when user nudges up but remains near bottom", () => {
+    const enabled = getNextAutoFollowEnabled({
+      wasEnabled: true,
+      isOutputting: true,
+      movedUp: true,
+      bottomDistance: 88,
+      attachThresholdPx: 56,
+      detachThresholdPx: 120,
+    });
+
+    expect(enabled).toBe(true);
+  });
+
   it("stays attached when not outputting until user detaches", () => {
     const enabled = getNextAutoFollowEnabled({
       wasEnabled: true,
@@ -52,5 +65,18 @@ describe("getNextAutoFollowEnabled", () => {
     });
 
     expect(enabled).toBe(true);
+  });
+
+  it("detaches when user scrolls up far while idle", () => {
+    const enabled = getNextAutoFollowEnabled({
+      wasEnabled: true,
+      isOutputting: false,
+      movedUp: true,
+      bottomDistance: 220,
+      attachThresholdPx: 56,
+      detachThresholdPx: 120,
+    });
+
+    expect(enabled).toBe(false);
   });
 });
