@@ -20,6 +20,7 @@ import { ArrowClockwise, Check, CopySimple } from "@phosphor-icons/react";
 import { MarkdownRenderer } from "@/components/markdown-renderer";
 import { getNextAutoFollowEnabled } from "@/lib/chat-scroll";
 import { hasConfiguredClerk } from "@/lib/clerk-env";
+import { buildLatestTurnSnapshot, getMessageIdentity, resolveSelectedVariantId } from "@/lib/latest-turn";
 
 function MemoryNavIcon() {
   return (
@@ -1325,10 +1326,6 @@ function getReasoningKeyPoints(reasoning: string) {
   return points;
 }
 
-function getMessageIdentity(message: UIMessage) {
-  return message.id ?? message.key;
-}
-
 function hasMessageReasoningPanelContent(message: UIMessage) {
   const reasoning = getReasoningText(message);
   if (reasoning.trim().length > 0) {
@@ -1336,24 +1333,6 @@ function hasMessageReasoningPanelContent(message: UIMessage) {
   }
   const payload = parseAssistantOutput(message.text ?? "");
   return payload.eventNotes.length > 0;
-}
-
-function hasMessageRenderableContent(message: UIMessage) {
-  const payload = parseAssistantOutput(message.text ?? "");
-  if (payload.response.trim().length > 0 || payload.eventNotes.length > 0) {
-    return true;
-  }
-  return getReasoningText(message).trim().length > 0;
-}
-
-function isAssistantVariantSelectable(message: UIMessage, allowTransient: boolean) {
-  if (message.status === "failed") {
-    return true;
-  }
-  if (allowTransient && (message.status === "pending" || message.status === "streaming")) {
-    return true;
-  }
-  return hasMessageRenderableContent(message);
 }
 
 type ResponseVariantControls = {
@@ -1626,7 +1605,7 @@ function AuthenticatedChat() {
   const [draft, setDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [awaitingAssistantThreadId, setAwaitingAssistantThreadId] = useState<string | null>(null);
-  const [latestResponseVariantIndex, setLatestResponseVariantIndex] = useState(0);
+  const [selectedLatestVariantId, setSelectedLatestVariantId] = useState<string | null>(null);
   const [latestResponseVariantSwapPhase, setLatestResponseVariantSwapPhase] = useState<"out" | "in" | null>(null);
   const [animateReasoningSummaryOut, setAnimateReasoningSummaryOut] = useState(false);
   const [retryFadingMessageKey, setRetryFadingMessageKey] = useState<string | null>(null);
@@ -1671,7 +1650,7 @@ function AuthenticatedChat() {
   const autoFollowProgrammaticUntilRef = useRef(0);
   const touchLastYRef = useRef<number | null>(null);
   const scrollDebugCounterRef = useRef(0);
-  const latestResponseVariantCountRef = useRef(0);
+  const latestPersistedVariantCountRef = useRef(0);
   const latestResponseVariantSwapOutTimerRef = useRef<number | null>(null);
   const latestResponseVariantSwapInTimerRef = useRef<number | null>(null);
   const activeThreadIdDebugRef = useRef<string | null>(null);
@@ -1938,7 +1917,7 @@ function AuthenticatedChat() {
       clearVariantSwapTimers();
       setLatestResponseVariantSwapPhase(null);
       setAnimateReasoningSummaryOut(false);
-      setLatestResponseVariantIndex(0);
+      setSelectedLatestVariantId(null);
       autoFollowLastUserIntentRef.current = 0;
       setIsFadingOut(true);
       setIsThreadSwitchRevealing(false);
@@ -2094,115 +2073,93 @@ function AuthenticatedChat() {
     [activeThreadIdForMessages, isComposingNew, messageFeed.results],
   );
 
-  const latestUserMessageIndex = useMemo(() => {
-    for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
-      if (visibleMessages[i].role === "user") {
-        return i;
-      }
-    }
-    return -1;
-  }, [visibleMessages]);
-
-  const latestTurnUserMessage = latestUserMessageIndex >= 0 ? visibleMessages[latestUserMessageIndex] : null;
+  const latestTurnSnapshot = useMemo(
+    () => buildLatestTurnSnapshot(visibleMessages),
+    [visibleMessages],
+  );
+  const latestTurnUserMessage = latestTurnSnapshot.latestUserMessage;
   const latestTurnUserMessageId = latestTurnUserMessage?.id;
   const includeTransientAssistantVariants =
     awaitingAssistantThreadId !== null
     && activeThreadIdForMessages === awaitingAssistantThreadId;
-
-  const latestTurnAssistantVariants = useMemo(() => {
-    if (latestUserMessageIndex < 0) {
-      return [] as UIMessage[];
-    }
-
-    const variants: UIMessage[] = [];
-    for (let i = latestUserMessageIndex + 1; i < visibleMessages.length; i += 1) {
-      const message = visibleMessages[i];
-      if (message.role === "user") {
-        break;
-      }
-      if (
-        message.role === "assistant"
-        && isAssistantVariantSelectable(message, includeTransientAssistantVariants)
-      ) {
-        variants.push(message);
-      }
-    }
-
-    return variants;
-  }, [includeTransientAssistantVariants, latestUserMessageIndex, visibleMessages]);
+  const latestTurnPersistedVariants = latestTurnSnapshot.persistedVariants;
+  const latestTurnTransientVariant = includeTransientAssistantVariants
+    ? latestTurnSnapshot.latestTransientVariant
+    : null;
 
   useEffect(() => {
-    const variantCount = latestTurnAssistantVariants.length;
-    const previousCount = latestResponseVariantCountRef.current;
-    latestResponseVariantCountRef.current = variantCount;
+    const variantCount = latestTurnPersistedVariants.length;
+    const previousCount = latestPersistedVariantCountRef.current;
+    latestPersistedVariantCountRef.current = variantCount;
 
     if (variantCount === 0) {
       clearVariantSwapTimers();
       setLatestResponseVariantSwapPhase(null);
       setAnimateReasoningSummaryOut(false);
       setIsRetryWaitingCursor(false);
-      setLatestResponseVariantIndex(0);
+      setSelectedLatestVariantId(null);
       return;
     }
 
-    setLatestResponseVariantIndex((current) => {
-      if (variantCount > previousCount) {
-        if (retryFadingMessageKey !== null) {
-          return current;
-        }
-        return variantCount - 1;
-      }
-      if (current < 0 || current >= variantCount) {
-        return variantCount - 1;
-      }
-      return current;
+    setSelectedLatestVariantId((current) => {
+      return resolveSelectedVariantId({
+        previousSelectedVariantId: current,
+        persistedVariants: latestTurnPersistedVariants,
+        freezeAutoLatest: retryFadingMessageKey !== null,
+        previousVariantCount: previousCount,
+      });
     });
-  }, [clearVariantSwapTimers, latestTurnAssistantVariants.length, retryFadingMessageKey]);
+  }, [clearVariantSwapTimers, latestTurnPersistedVariants, retryFadingMessageKey]);
 
   const selectedLatestResponseVariant = useMemo(() => {
-    if (latestTurnAssistantVariants.length === 0) {
+    if (latestTurnPersistedVariants.length === 0) {
       return null;
     }
-    const clampedIndex = Math.max(0, Math.min(latestResponseVariantIndex, latestTurnAssistantVariants.length - 1));
-    return latestTurnAssistantVariants[clampedIndex] ?? null;
-  }, [latestResponseVariantIndex, latestTurnAssistantVariants]);
+    if (selectedLatestVariantId) {
+      const selected = latestTurnPersistedVariants.find((variant) => variant.id === selectedLatestVariantId);
+      if (selected) {
+        return selected;
+      }
+    }
+    return latestTurnPersistedVariants.at(-1) ?? null;
+  }, [latestTurnPersistedVariants, selectedLatestVariantId]);
 
   const selectedLatestResponseVariantId = selectedLatestResponseVariant
-    ? getMessageIdentity(selectedLatestResponseVariant)
+    ? selectedLatestResponseVariant.id
     : null;
 
   const selectedLatestResponseVariantListIndex = useMemo(() => {
     if (!selectedLatestResponseVariantId) {
       return -1;
     }
-    return latestTurnAssistantVariants.findIndex((variant) => getMessageIdentity(variant) === selectedLatestResponseVariantId);
-  }, [latestTurnAssistantVariants, selectedLatestResponseVariantId]);
+    return latestTurnPersistedVariants.findIndex((variant) => variant.id === selectedLatestResponseVariantId);
+  }, [latestTurnPersistedVariants, selectedLatestResponseVariantId]);
 
   const startLatestResponseVariantSwap = useCallback((targetIndex: number) => {
     if (latestResponseVariantSwapPhase !== null) {
       return;
     }
-    if (targetIndex === latestResponseVariantIndex) {
+    if (targetIndex === selectedLatestResponseVariantListIndex) {
       return;
     }
-    if (targetIndex < 0 || targetIndex >= latestTurnAssistantVariants.length) {
+    if (targetIndex < 0 || targetIndex >= latestTurnPersistedVariants.length) {
       return;
     }
 
-    const currentVariant = latestTurnAssistantVariants[latestResponseVariantIndex] ?? null;
-    const targetVariant = latestTurnAssistantVariants[targetIndex] ?? null;
+    const currentVariant = selectedLatestResponseVariant;
+    const targetVariant = latestTurnPersistedVariants[targetIndex] ?? null;
     const shouldAnimateReasoningOut = Boolean(
       currentVariant
       && targetVariant
-      && hasMessageReasoningPanelContent(currentVariant)
-      && !hasMessageReasoningPanelContent(targetVariant),
+      && hasMessageReasoningPanelContent(currentVariant.message)
+      && !hasMessageReasoningPanelContent(targetVariant.message),
     );
 
     clearVariantSwapTimers();
     setAnimateReasoningSummaryOut(shouldAnimateReasoningOut);
     setLatestResponseVariantSwapPhase("out");
     latestResponseVariantSwapOutTimerRef.current = window.setTimeout(() => {
-      setLatestResponseVariantIndex(targetIndex);
+      setSelectedLatestVariantId(targetVariant?.id ?? null);
       setLatestResponseVariantSwapPhase("in");
       latestResponseVariantSwapOutTimerRef.current = null;
       latestResponseVariantSwapInTimerRef.current = window.setTimeout(() => {
@@ -2213,41 +2170,42 @@ function AuthenticatedChat() {
     }, RESPONSE_VARIANT_SWAP_OUT_MS);
   }, [
     clearVariantSwapTimers,
-    latestResponseVariantIndex,
     latestResponseVariantSwapPhase,
-    latestTurnAssistantVariants,
+    latestTurnPersistedVariants,
+    selectedLatestResponseVariant,
+    selectedLatestResponseVariantListIndex,
+  ]);
+
+  const displayLatestAssistantMessage = useMemo(() => {
+    if (!latestTurnUserMessage) {
+      return null;
+    }
+    if (isRetryWaitingCursor) {
+      return selectedLatestResponseVariant?.message ?? latestTurnSnapshot.latestPersistedVariant?.message ?? null;
+    }
+    if (latestTurnTransientVariant) {
+      return latestTurnTransientVariant.message;
+    }
+    return selectedLatestResponseVariant?.message ?? latestTurnSnapshot.latestPersistedVariant?.message ?? null;
+  }, [
+    isRetryWaitingCursor,
+    latestTurnSnapshot.latestPersistedVariant,
+    latestTurnTransientVariant,
+    latestTurnUserMessage,
+    selectedLatestResponseVariant,
   ]);
 
   const renderedMessages = useMemo(() => {
-    if (!selectedLatestResponseVariant || latestTurnAssistantVariants.length <= 1) {
+    if (!latestTurnUserMessage) {
       return visibleMessages;
     }
-
-    const hiddenVariantKeys = new Set(
-      latestTurnAssistantVariants
-        .map((variant) => getMessageIdentity(variant))
-        .filter((identity) => identity !== getMessageIdentity(selectedLatestResponseVariant)),
-    );
-
-    if (hiddenVariantKeys.size === 0) {
-      return visibleMessages;
+    if (!displayLatestAssistantMessage) {
+      return latestTurnSnapshot.historyMessages;
     }
+    return [...latestTurnSnapshot.historyMessages, displayLatestAssistantMessage];
+  }, [displayLatestAssistantMessage, latestTurnSnapshot.historyMessages, latestTurnUserMessage, visibleMessages]);
 
-    return visibleMessages.filter((message) => !hiddenVariantKeys.has(getMessageIdentity(message)));
-  }, [latestTurnAssistantVariants, selectedLatestResponseVariant, visibleMessages]);
-
-  const latestTurnAssistantMessage = useMemo(() => {
-    for (let i = visibleMessages.length - 1; i >= 0; i -= 1) {
-      const message = visibleMessages[i];
-      if (message.role === "assistant") {
-        return message;
-      }
-      if (message.role === "user") {
-        return null;
-      }
-    }
-    return null;
-  }, [visibleMessages]);
+  const latestTurnAssistantMessage = displayLatestAssistantMessage;
 
   const latestTurnAssistantIsRenderable = useMemo(() => {
     if (!latestTurnAssistantMessage) {
@@ -2337,7 +2295,7 @@ function AuthenticatedChat() {
     }
     keepAttachedUntilFreshAssistantRef.current = false;
     if (retryFadingMessageKey !== null) {
-      setLatestResponseVariantIndex(Math.max(0, latestTurnAssistantVariants.length - 1));
+      setSelectedLatestVariantId(latestTurnSnapshot.latestPersistedVariant?.id ?? null);
     }
     setRetryFadingMessageKey(null);
     setIsRetryWaitingCursor(false);
@@ -2348,7 +2306,8 @@ function AuthenticatedChat() {
   }, [
     hasFreshAssistantStarted,
     latestTurnAssistantMessage,
-    latestTurnAssistantVariants.length,
+    latestTurnPersistedVariants.length,
+    latestTurnSnapshot.latestPersistedVariant,
     logScrollDebug,
     retryFadingMessageKey,
   ]);
@@ -3162,8 +3121,8 @@ function AuthenticatedChat() {
       const threadId = activeThreadIdForMessages;
       const promptMessageId = latestTurnUserMessageId;
       const targetMessageId = getMessageIdentity(targetMessage);
-      const isLatestTurnVariant = latestTurnAssistantVariants.some(
-        (variant) => getMessageIdentity(variant) === targetMessageId,
+      const isLatestTurnVariant = latestTurnPersistedVariants.some(
+        (variant) => variant.id === targetMessageId,
       );
 
       if (!threadId || typeof promptMessageId !== "string" || !isLatestTurnVariant) {
@@ -3269,7 +3228,7 @@ function AuthenticatedChat() {
       isSubmitting,
       latestTurnAssistantMessage,
       setLatestResponseVariantSwapPhase,
-      latestTurnAssistantVariants,
+      latestTurnPersistedVariants,
       latestTurnUserMessageId,
       isRetryWaitingCursor,
       logScrollDebug,
@@ -3406,13 +3365,13 @@ function AuthenticatedChat() {
 
                   const variantControls =
                     isSelectedLatestVariant
-                    && latestTurnAssistantVariants.length > 1
+                    && latestTurnPersistedVariants.length > 1
                     && selectedLatestResponseVariantListIndex >= 0
                       ? {
                         current: selectedLatestResponseVariantListIndex + 1,
-                        total: latestTurnAssistantVariants.length,
+                        total: latestTurnPersistedVariants.length,
                         canPrev: selectedLatestResponseVariantListIndex > 0 && !isVariantSwapInProgress,
-                        canNext: selectedLatestResponseVariantListIndex < latestTurnAssistantVariants.length - 1 && !isVariantSwapInProgress,
+                        canNext: selectedLatestResponseVariantListIndex < latestTurnPersistedVariants.length - 1 && !isVariantSwapInProgress,
                         onPrev: () => {
                           startLatestResponseVariantSwap(selectedLatestResponseVariantListIndex - 1);
                         },
@@ -3442,7 +3401,11 @@ function AuthenticatedChat() {
                     />
                   );
                 })}
-                {isWaitingForAssistantMessage && retryFadingMessageKey === null && (
+                {isWaitingForAssistantMessage
+                  && !isRetryWaitingCursor
+                  && retryFadingMessageKey === null
+                  && selectedLatestResponseVariantId === null
+                  && (
                   <div className="message ai pending-assistant">
                     <div className="response-container">
                       <div className="message-meta">Aura Response</div>
