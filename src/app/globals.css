@@ -1,11 +1,14 @@
 /*
   Stylesheet load order:
-  1) base tokens/reset/global behaviors
-  2) app feature styles (chat/admin)
-  3) third-party overrides (Clerk)
+  1) Font imports
+  2) Tailwind + Streamdown source
+  3) Base tokens / reset / global behaviors
+  4) App feature styles (chat/admin)
+  5) Third-party overrides (Clerk)
 */
 @import url("https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,600;1,400&family=JetBrains+Mono:wght@100;300;400;700&display=swap");
 @import "tailwindcss";
+@source "../node_modules/streamdown/dist/*.js";
 @import "./styles/base.css";
 @import "./styles/chat.css";
 @import "./styles/knowledge-admin.css";

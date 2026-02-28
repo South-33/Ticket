@@ -15,6 +15,7 @@ import Image from "next/image";
 import { useLenis } from "lenis/react";
 import { api } from "@convex/_generated/api";
 import { ChatCanvas } from "@/components/chat-canvas";
+import { ArrowClockwise, Check, CopySimple } from "@phosphor-icons/react";
 import { MarkdownRenderer } from "@/components/markdown-renderer";
 import { getNextAutoFollowEnabled } from "@/lib/chat-scroll";
 import { hasConfiguredClerk } from "@/lib/clerk-env";
@@ -1320,7 +1321,7 @@ function getReasoningKeyPoints(reasoning: string) {
   return points;
 }
 
-function Message({ message }: { message: UIMessage }) {
+function Message({ message, onCopy, onRetry }: { message: UIMessage; onCopy?: () => void; onRetry?: () => void }) {
   const assistantPayload = useMemo(() => parseAssistantOutput(message.text ?? ""), [message.text]);
   const reasoning = getReasoningText(message);
   const [visibleText, smoothTextState] = useSmoothText(assistantPayload.response, {
@@ -1330,6 +1331,8 @@ function Message({ message }: { message: UIMessage }) {
     startStreaming: message.status === "streaming",
   });
   const [isReasoningOpen, setIsReasoningOpen] = useState(false);
+  const [showCopied, setShowCopied] = useState(false);
+
   const isReasoningExpanded = isReasoningOpen;
   const isReasoningTypewriterActive = message.status === "streaming" || smoothReasoningState.isStreaming;
   const displayReasoning = isReasoningTypewriterActive ? visibleReasoning : reasoning;
@@ -1366,6 +1369,12 @@ function Message({ message }: { message: UIMessage }) {
   const displayText = safetyFallback ? "Response blocked by safety policies." : visibleText;
   const isTypewriterActive = message.status === "streaming" || smoothTextState.isStreaming;
 
+  const handleCopy = () => {
+    onCopy?.();
+    setShowCopied(true);
+    setTimeout(() => setShowCopied(false), 2000);
+  };
+
   if (!displayText.trim() && !displayReasoning.trim() && !isTypewriterActive && !isReasoningTypewriterActive) {
     return null;
   }
@@ -1399,7 +1408,6 @@ function Message({ message }: { message: UIMessage }) {
                   {(displayReasoning || isReasoningTypewriterActive) && (
                     <>
                       <MarkdownRenderer content={displayReasoning} isStreaming={isReasoningTypewriterActive} />
-                      {isReasoningTypewriterActive && <span className="typewriter-cursor reasoning-cursor" />}
                     </>
                   )}
                   {eventNotes.length > 0 && (
@@ -1425,7 +1433,32 @@ function Message({ message }: { message: UIMessage }) {
         {(displayText || isTypewriterActive) && (
           <div className={clsx("message-content", isTypewriterActive && "is-streaming")}>
             <MarkdownRenderer content={displayText} isStreaming={isTypewriterActive} />
-            {isTypewriterActive && <span className="typewriter-cursor" />}
+          </div>
+        )}
+
+        {!isTypewriterActive && (
+          <div className="message-actions">
+            <button
+              className="message-action-btn"
+              onClick={handleCopy}
+              title="Copy response"
+            >
+              {showCopied ? (
+                <Check size={13} weight="bold" />
+              ) : (
+                <CopySimple size={13} />
+              )}
+              <span>{showCopied ? "Copied" : "Copy"}</span>
+            </button>
+
+            <button
+              className="message-action-btn"
+              onClick={onRetry}
+              title="Regenerate response"
+            >
+              <ArrowClockwise size={13} />
+              <span>Retry</span>
+            </button>
           </div>
         )}
       </div>
@@ -2601,20 +2634,24 @@ function AuthenticatedChat() {
     textarea.style.height = `${Math.min(textarea.scrollHeight, 150)}px`;
   }, []);
 
-  const handleSend = async (event?: FormEvent) => {
+  const handleSend = async (event?: FormEvent, customPrompt?: string) => {
     event?.preventDefault();
-    const prompt = draft.trim();
+    const isRetry = typeof customPrompt === "string";
+    const prompt = isRetry ? customPrompt.trim() : draft.trim();
     if (!prompt || isSubmitting) {
       return;
     }
 
-    setDraft("");
+    if (!isRetry) {
+      setDraft("");
+    }
     autoFollowEnabledRef.current = true;
     autoFollowLastUserIntentRef.current = 0;
     keepAttachedUntilFreshAssistantRef.current = true;
     logScrollDebug("send:start", {
       promptLength: prompt.length,
       activeThreadIdForMessages,
+      isRetry,
     });
     window.requestAnimationFrame(() => {
       scrollToPageBottom({
@@ -2624,7 +2661,7 @@ function AuthenticatedChat() {
       });
       lastScrollPositionRef.current = getCurrentScrollPosition();
     });
-    if (textareaRef.current) {
+    if (!isRetry && textareaRef.current) {
       textareaRef.current.style.height = "28px";
     }
     setIsSubmitting(true);
@@ -2739,6 +2776,21 @@ function AuthenticatedChat() {
     />
   ) : null;
 
+  const handleRetry = useCallback(
+    (targetMessage: UIMessage) => {
+      const idx = visibleMessages.findIndex((m) => m.key === targetMessage.key);
+      if (idx === -1) return;
+      for (let i = idx - 1; i >= 0; i -= 1) {
+        if (visibleMessages[i].role === "user") {
+          const prompt = visibleMessages[i].text ?? "";
+          void handleSend(undefined, prompt);
+          break;
+        }
+      }
+    },
+    [visibleMessages, handleSend],
+  );
+
   return (
     <div className="oracle-shell">
       <div className="noise-overlay" />
@@ -2843,7 +2895,14 @@ function AuthenticatedChat() {
             ) : (
               <>
                 {visibleMessages.map((message) => (
-                  <Message key={message.key} message={message} />
+                  <Message
+                    key={message.key}
+                    message={message}
+                    onCopy={() => {
+                      navigator.clipboard.writeText(message.text ?? "");
+                    }}
+                    onRetry={() => handleRetry(message)}
+                  />
                 ))}
                 {isWaitingForAssistantMessage && (
                   <div className="message ai pending-assistant">

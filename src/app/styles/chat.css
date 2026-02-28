@@ -1214,71 +1214,312 @@
   overflow-wrap: anywhere;
 }
 
-.message.ai .message-content p {
+.message.ai .message-content p,
+.message.ai .message-content .ai-p {
   margin-bottom: 1.5rem;
 }
 
-.message.ai .message-content p:last-child {
+.message.ai .message-content p:last-child,
+.message.ai .message-content .ai-p:last-child {
   margin-bottom: 0;
 }
 
-.message.ai .message-content code {
+
+.message-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px dashed var(--border-color);
+  opacity: 0;
+  transform: translateY(5px);
+  animation: actionsFadeIn 0.4s var(--transition-fast) forwards;
+}
+
+@keyframes actionsFadeIn {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message-action-btn {
+  appearance: none;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  transition: var(--transition-fast);
+}
+
+.message-action-btn:hover {
+  border-color: var(--text-primary);
+  color: var(--text-primary);
+  background: rgba(0, 0, 0, 0.02);
+}
+
+.message-action-btn:active {
+  transform: translateY(1px);
+}
+
+.message-action-btn svg {
+  opacity: 0.7;
+}
+
+.message-action-btn:hover svg {
+  opacity: 1;
+}
+
+
+/* Headings — font-family needs !important to beat Streamdown's Tailwind classes */
+.message.ai .message-content [data-streamdown="heading-1"] {
+  font-size: 1.9rem;
+  font-weight: 400;
+  font-family: var(--font-serif) !important;
+  margin: 1.5rem 0 0.75rem;
+  line-height: 1.2;
+}
+
+.message.ai .message-content [data-streamdown="heading-2"] {
+  font-size: 1.6rem;
+  font-weight: 400;
+  font-family: var(--font-serif) !important;
+  margin: 1.5rem 0 0.75rem;
+  line-height: 1.2;
+}
+
+.message.ai .message-content [data-streamdown="heading-3"] {
+  font-size: 1.35rem;
+  font-weight: 600;
+  font-family: var(--font-serif) !important;
+  margin: 1.5rem 0 0.75rem;
+  line-height: 1.2;
+}
+
+.message.ai .message-content [data-streamdown="heading-4"] {
+  font-size: 1.1rem;
+  font-weight: 600;
+  font-family: var(--font-serif) !important;
+  margin: 1.5rem 0 0.75rem;
+  line-height: 1.2;
+}
+
+.message.ai .message-content [data-streamdown="heading-5"] {
+  font-size: 0.95rem;
+  font-weight: 600;
+  font-family: var(--font-serif) !important;
+  margin: 1.5rem 0 0.75rem;
+  line-height: 1.2;
+}
+
+.message.ai .message-content [data-streamdown="heading-6"] {
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-family: var(--font-serif) !important;
+  margin: 1.5rem 0 0.75rem;
+  line-height: 1.2;
+  opacity: 0.75;
+}
+
+/* Lists */
+.message.ai .message-content [data-streamdown="unordered-list"] {
+  list-style: disc;
+  margin: 1rem 0 1.5rem;
+  padding-left: 1.8rem;
+}
+
+.message.ai .message-content [data-streamdown="ordered-list"] {
+  list-style: decimal;
+  margin: 1rem 0 1.5rem;
+  padding-left: 1.8rem;
+}
+
+.message.ai .message-content [data-streamdown="list-item"] {
+  margin: 0.45rem 0;
+  padding-left: 0.25rem;
+}
+
+/* Inline code */
+.message.ai .message-content [data-streamdown="inline-code"] {
   font-family: var(--font-mono);
   font-size: 0.85rem;
   background: rgba(0, 0, 0, 0.05);
   padding: 0.2rem 0.4rem;
   border: 1px solid var(--border-color);
+  border-radius: 0;
 }
 
-.message.ai .message-content pre {
+/* Code block ---------------------------------------------------------------- */
+
+/* Outer wrapper rendered by Streamdown around our custom CodeBlock */
+.message.ai .message-content [data-streamdown="code-block"] {
+  margin: 2rem 0;
+  width: 100%;
+}
+
+/* Our custom CodeBlock container */
+.message.ai .message-content .code-block {
+  width: 100%;
+  overflow: hidden;
   font-family: var(--font-mono);
   font-size: 0.8rem;
-  background: var(--text-primary);
-  color: var(--bg-color);
-  padding: 1.5rem;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  margin: 2rem 0;
-  line-height: 1.5;
 }
 
-.message.ai .message-content pre code {
+/* Header bar */
+.message.ai .message-content .code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 1rem;
+  background: #141414;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Language badge */
+.message.ai .message-content .code-block-lang {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* Action buttons row */
+.message.ai .message-content .code-block-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+/* Individual action button */
+.message.ai .message-content .code-block-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.5rem;
   background: transparent;
-  border: 0;
-  padding: 0;
-  font-size: inherit;
+  border: none;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.4);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  transition: color 0.15s ease;
+  border-radius: 3px;
 }
 
-.message.ai .message-content ul,
-.message.ai .message-content ol {
-  margin: 1rem 0;
-  padding-left: 1.6rem;
+.message.ai .message-content .code-block-btn:hover {
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(255, 255, 255, 0.06);
 }
 
-.message.ai .message-content li {
-  margin: 0.35rem 0;
-}
-
-.message.ai .message-content .markdown-img,
-.message.ai .message-content.reasoning-content .markdown-img {
-  max-width: 100%;
-  height: auto;
-  display: block;
-  margin: 1rem 0;
-}
-
-.message.ai .message-content .markdown-pre,
-.message.ai .message-content.reasoning-content .markdown-pre {
-  overflow-x: auto;
+/* Plain unlanguaged code block — no custom component, fallback to dark pre */
+.message.ai .message-content [data-streamdown="code-block"]>pre {
+  background: #1e1e2e !important;
+  color: #d4d4d4 !important;
+  padding: 1.25rem 1.5rem;
   white-space: pre-wrap;
   word-break: break-word;
-  tab-size: 2;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.6;
+  margin: 0;
 }
 
-.message.ai .message-content .markdown-code,
-.message.ai .message-content.reasoning-content .markdown-code {
-  white-space: break-spaces;
+/* Ensure react-syntax-highlighter pre has no border-radius */
+.message.ai .message-content .code-block pre {
+  border-radius: 0 !important;
+  margin: 0 !important;
+}
+
+
+/* Blockquote */
+.message.ai .message-content [data-streamdown="blockquote"] {
+  border-left: 2px solid var(--text-primary);
+  margin: 1.5rem 0;
+  padding: 0.5rem 0 0.5rem 1.25rem;
+  opacity: 0.7;
+  font-style: italic;
+  background: transparent;
+  border-radius: 0;
+}
+
+/* Horizontal rule */
+.message.ai .message-content [data-streamdown="horizontal-rule"] {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: 2rem 0;
+}
+
+/* Links */
+.message.ai .message-content [data-streamdown="link"] {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--text-secondary);
+  text-underline-offset: 3px;
+  transition: text-decoration-color var(--transition-fast);
+}
+
+.message.ai .message-content [data-streamdown="link"]:hover {
+  text-decoration-color: var(--text-primary);
+}
+
+/* Strong / Em — must be explicit: Tailwind preflight's `bolder` is relative  */
+/* and from font-weight: 300 only steps to ~400, which looks identical to body */
+.message.ai .message-content strong,
+.message.ai .message-content [data-streamdown="strong"] {
+  font-weight: 600;
+  opacity: 0.82;
+}
+
+.message.ai .message-content em {
+  font-style: italic;
+}
+
+/* Tables */
+.message.ai .message-content [data-streamdown="table-wrapper"] {
+  overflow-x: auto;
+  margin: 1.5rem 0;
+}
+
+.message.ai .message-content [data-streamdown="table"] {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  border-radius: 0;
+}
+
+.message.ai .message-content [data-streamdown="table-header-cell"],
+.message.ai .message-content [data-streamdown="table-cell"] {
+  padding: 0.6rem 0.9rem;
+  border: 1px solid var(--border-color);
+  text-align: left;
+  vertical-align: top;
+  background: var(--bg-color);
+}
+
+.message.ai .message-content [data-streamdown="table-header"] {
+  background: var(--bg-color);
+}
+
+.message.ai .message-content [data-streamdown="table-header-cell"] {
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.message.ai .message-content [data-streamdown="table-row"]:nth-child(even) [data-streamdown="table-cell"] {
+  background: rgba(17, 17, 17, 0.02);
 }
 
 .reasoning-block {
@@ -1466,19 +1707,17 @@
 .typewriter-cursor {
   display: inline-block;
   width: 8px;
-  height: 1.2em;
+  height: 1.1em;
   background-color: var(--text-primary);
-  vertical-align: baseline;
-  position: relative;
-  top: 0.05em;
-  margin-left: 4px;
+  vertical-align: text-bottom;
+  margin-left: 2px;
   animation: blink 1s step-end infinite;
 }
 
 .reasoning-cursor {
   width: 6px;
-  height: 1.1em;
-  margin-left: 3px;
+  height: 0.95em;
+  margin-left: 2px;
 }
 
 @keyframes blink {
