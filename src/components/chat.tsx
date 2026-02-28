@@ -16,7 +16,6 @@ import { useLenis } from "lenis/react";
 import { api } from "@convex/_generated/api";
 import { ChatCanvas } from "@/components/chat-canvas";
 import { MarkdownRenderer } from "@/components/markdown-renderer";
-import { getNextAutoFollowEnabled } from "@/lib/chat-scroll";
 import { hasConfiguredClerk } from "@/lib/clerk-env";
 
 function MemoryNavIcon() {
@@ -754,44 +753,11 @@ const TYPEWRITER_MIN_DELAY_MS = 0;
 const TYPEWRITER_VARIANCE_MS = 2;
 const TYPEWRITER_PUNCTUATION_PAUSE_MS = 25;
 const THREAD_SWITCH_FADE_MS = 500;
-const THREAD_SWITCH_REVEAL_DELAY_MS = 120;
 const THREAD_SWITCH_FAILSAFE_MS = 5000;
-const THREAD_SWITCH_REVEAL_PHASE_TIMEOUT_MS = 900;
-const THREAD_SWITCH_LAYOUT_SETTLE_INTERVAL_MS = 34;
-const THREAD_SWITCH_LAYOUT_SETTLE_MAX_MS = 850;
-const THREAD_SWITCH_LAYOUT_STABLE_FRAME_COUNT = 2;
-const THREAD_SWITCH_LAYOUT_STABLE_DELTA_PX = 2;
-const THREAD_SWITCH_REVEAL_MICRO_SCROLL_RATIO = 0.1;
-const THREAD_SWITCH_REVEAL_MICRO_SCROLL_MIN_PX = 72;
-const THREAD_SWITCH_REVEAL_MICRO_SCROLL_MAX_PX = 140;
-const THREAD_SWITCH_REVEAL_MICRO_SCROLL_DURATION_S = 0.4;
-const THREAD_SWITCH_REVEAL_POST_SETTLE_MS = 220;
-const AUTO_FOLLOW_ATTACH_THRESHOLD_PX = 56;
-const AUTO_FOLLOW_DETACH_THRESHOLD_PX = 120;
+const AUTO_FOLLOW_ATTACH_THRESHOLD_PX = 96;
 const AUTO_FOLLOW_SMOOTH_DURATION_S = 0.32;
-const AUTO_FOLLOW_SEND_MIN_DURATION_S = 0.45;
-const AUTO_FOLLOW_SEND_MAX_DURATION_S = 0.72;
-const AUTO_FOLLOW_SEND_DISTANCE_CAP_PX = 3200;
-const AUTO_FOLLOW_OBSERVER_MIN_GAP_MS = 220;
-const AUTO_FOLLOW_OBSERVER_REISSUE_DELTA_PX = 72;
-const AUTO_FOLLOW_SCHEDULE_DELAY_MS = 140;
-const AUTO_FOLLOW_DYNAMIC_MIN_DURATION_S = 0.24;
-const AUTO_FOLLOW_DYNAMIC_MAX_DURATION_S = 0.42;
-const AUTO_FOLLOW_DYNAMIC_DISTANCE_CAP_PX = 1800;
-const AUTO_FOLLOW_SEND_SETTLE_DELAY_MS = 180;
-const AUTO_FOLLOW_SEND_FINALIZE_DELAY_MS = 420;
-const AUTO_FOLLOW_MIN_BOTTOM_DISTANCE_PX = 1;
-const AUTO_FOLLOW_PENDING_TIMEOUT_MS = 12_000;
-const AUTO_FOLLOW_STICKY_SEND_MS = 12_000;
-const AUTO_FOLLOW_STICKY_OBSERVER_EXTEND_MS = 1_800;
-const THREAD_SWITCH_BOTTOM_LOCK_MS = 1_800;
-const THREAD_SWITCH_LOCK_OBSERVER_MIN_GAP_MS = 300;
-const THREAD_SWITCH_SETTLE_DELAYS_MS = [120, 280, 520] as const;
-const AUTO_FOLLOW_PROGRAMMATIC_GUARD_MS = 240;
-const AUTO_FOLLOW_USER_INTENT_WINDOW_MS = 420;
-const SCROLL_DEBUG_ENABLED = process.env.NEXT_PUBLIC_SCROLL_DEBUG === "1";
-const SCROLL_DEBUG_SCROLL_LOG_INTERVAL_MS = 120;
-const AUTO_FOLLOW_ANCHOR_MARGIN_PX = 24;
+const AUTO_FOLLOW_SEND_DURATION_S = 0.48;
+const AUTO_FOLLOW_STREAM_DURATION_S = 0.28;
 
 const AUTO_FOLLOW_EASING = (t: number) => {
   return t < 0.5 ? 4 * t ** 3 : 1 - ((-2 * t + 2) ** 3) / 2;
@@ -808,8 +774,6 @@ type CachedSidebarThread = {
   threadId: string;
   title: string;
 };
-
-type ThreadSwitchPhase = "idle" | "fadingOut" | "loadingHidden" | "revealing";
 
 const subscribeNoop = () => {
   return () => {};
@@ -1479,13 +1443,11 @@ function AuthenticatedChat() {
   const [isComposingNew, setIsComposingNew] = useState(true);
   const [draft, setDraft] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [autoFollowPendingAttach, setAutoFollowPendingAttach] = useState(false);
   const [awaitingAssistantThreadId, setAwaitingAssistantThreadId] = useState<string | null>(null);
   const [introHtml, setIntroHtml] = useState("");
   const [isIntroTyping, setIsIntroTyping] = useState(false);
   const [isFeedScrolling, setIsFeedScrolling] = useState(false);
   const [isFadingOut, setIsFadingOut] = useState(false);
-  const [isThreadSwitchRevealing, setIsThreadSwitchRevealing] = useState(false);
   const [sessionVersion, setSessionVersion] = useState(0);
   const [lastKnownUserId, setLastKnownUserId] = useState<string | null>(() => {
     if (typeof window === "undefined") {
@@ -1508,28 +1470,8 @@ function AuthenticatedChat() {
   const scrollIdleTimerRef = useRef<number | null>(null);
   const fadingTimerRef = useRef<number | null>(null);
   const dataWaitTimerRef = useRef<number | null>(null);
-  const autoFollowPendingTimerRef = useRef<number | null>(null);
-  const autoFollowScheduleTimerRef = useRef<number | null>(null);
-  const autoFollowScheduledReasonRef = useRef<string | null>(null);
-  const threadSwitchSettleTimersRef = useRef<number[]>([]);
-  const autoFollowStickyUntilRef = useRef(0);
-  const threadSwitchBottomLockUntilRef = useRef(0);
-  const autoFollowProgrammaticUntilRef = useRef(0);
-  const autoFollowLastUserIntentRef = useRef(0);
-  const autoFollowLastObserverRunRef = useRef(0);
-  const autoFollowLastObserverDistanceRef = useRef(0);
-  const scrollDebugCounterRef = useRef(0);
-  const scrollDebugLastScrollLogTsRef = useRef(0);
-  const scrollDebugLastIntentLogTsRef = useRef(0);
-  const scrollDebugLastPositionRef = useRef(0);
-  const scrollDebugLastPositionTsRef = useRef(0);
-  const isFeedEndVisibleRef = useRef(true);
-  const touchLastYRef = useRef<number | null>(null);
   const waitingForDataRef = useRef(false);
-  const threadSwitchPhaseRef = useRef<ThreadSwitchPhase>("idle");
-  const threadSwitchEpochRef = useRef(0);
   const autoFollowEnabledRef = useRef(true);
-  const shouldAutoFollowRef = useRef(false);
   const lastScrollPositionRef = useRef(0);
   const lenis = useLenis();
   const effectiveUserId = user?.id ?? lastKnownUserId ?? undefined;
@@ -1551,466 +1493,36 @@ function AuthenticatedChat() {
 
   const isNearBottom = useCallback(
     (threshold = AUTO_FOLLOW_ATTACH_THRESHOLD_PX) => {
-      if (isFeedEndVisibleRef.current) {
-        return true;
-      }
       return getBottomDistance() <= threshold;
     },
     [getBottomDistance],
   );
 
-  const getScrollDebugSnapshot = useCallback(() => {
-    const viewportHeight = typeof window === "undefined" ? 0 : window.innerHeight;
-    const documentHeight = typeof document === "undefined" ? 0 : document.documentElement.scrollHeight;
-    const bottomDistance = getBottomDistance();
-    const lenisTargetRaw = lenis ? (lenis as unknown as { targetScroll?: number }).targetScroll : undefined;
-    const lenisAnimatedRaw = lenis ? (lenis as unknown as { animatedScroll?: number }).animatedScroll : undefined;
-
-    return {
-      attached: autoFollowEnabledRef.current,
-      stickyActive: Date.now() <= autoFollowStickyUntilRef.current,
-      stickyRemainingMs: Math.max(0, autoFollowStickyUntilRef.current - Date.now()),
-      threadSwitchLockActive: Date.now() <= threadSwitchBottomLockUntilRef.current,
-      threadSwitchLockRemainingMs: Math.max(0, threadSwitchBottomLockUntilRef.current - Date.now()),
-      anchorVisible: isFeedEndVisibleRef.current,
-      currentScrollY: getCurrentScrollPosition(),
-      bottomDistance,
-      bottomDistanceVh: viewportHeight > 0 ? Number((bottomDistance / viewportHeight).toFixed(3)) : null,
-      viewportHeight,
-      documentHeight,
-      feedScrollHeight: feedRef.current?.scrollHeight ?? null,
-      feedClientHeight: feedRef.current?.clientHeight ?? null,
-      feedEndTop: feedEndRef.current ? Number(feedEndRef.current.getBoundingClientRect().top.toFixed(1)) : null,
-      lenisLimit: lenis ? Number(lenis.limit.toFixed(1)) : null,
-      lenisActual: lenis ? Number(lenis.actualScroll.toFixed(1)) : null,
-      lenisTarget: typeof lenisTargetRaw === "number" ? Number(lenisTargetRaw.toFixed(1)) : null,
-      lenisAnimated: typeof lenisAnimatedRaw === "number" ? Number(lenisAnimatedRaw.toFixed(1)) : null,
-    };
-  }, [
-    getBottomDistance,
-    getCurrentScrollPosition,
-    lenis,
-  ]);
-
-  const isScrollDebugEnabled = useCallback(() => {
-    if (SCROLL_DEBUG_ENABLED) {
-      return true;
-    }
-    if (typeof window === "undefined") {
-      return false;
-    }
-    return Boolean((window as Window & { __SCROLL_DEBUG__?: boolean }).__SCROLL_DEBUG__);
-  }, []);
-
-  const logScrollDebug = useCallback((event: string, details?: Record<string, unknown>) => {
-    if (!isScrollDebugEnabled()) {
-      return;
-    }
-
-    scrollDebugCounterRef.current += 1;
-    const seq = scrollDebugCounterRef.current;
-    const stamp = Number(performance.now().toFixed(1));
-    console.log(`[scroll-debug #${seq}] ${event}`, {
-      t: stamp,
-      ...getScrollDebugSnapshot(),
-      ...(details ?? {}),
-    });
-  }, [getScrollDebugSnapshot, isScrollDebugEnabled]);
-
-  useEffect(() => {
-    if (!isScrollDebugEnabled()) {
-      return;
-    }
-    console.info("[scroll-debug] diagnostics enabled");
-  }, [isScrollDebugEnabled]);
-
-  useEffect(() => {
-    const target = feedEndRef.current;
-    if (!target || typeof IntersectionObserver === "undefined") {
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const entry = entries[0];
-        if (!entry) {
-          return;
-        }
-
-        const visible = entry.isIntersecting;
-        isFeedEndVisibleRef.current = visible;
-
-        if (visible && !autoFollowEnabledRef.current) {
-          autoFollowEnabledRef.current = true;
-          logScrollDebug("anchor:reattach", {
-            reason: "feed-end-visible",
-          });
-        }
-      },
-      {
-        root: null,
-        threshold: 0,
-        rootMargin: `0px 0px -${AUTO_FOLLOW_ANCHOR_MARGIN_PX}px 0px`,
-      },
-    );
-
-    observer.observe(target);
-
-    return () => {
-      observer.disconnect();
-    };
-  }, [logScrollDebug]);
-
-  const isAutoFollowStickyActive = useCallback(() => {
-    return Date.now() <= autoFollowStickyUntilRef.current;
-  }, []);
-
-  const isThreadSwitchBottomLockActive = useCallback(() => {
-    return Date.now() <= threadSwitchBottomLockUntilRef.current;
-  }, []);
-
-  const isThreadSwitchTransitionActive = useCallback(() => {
-    return threadSwitchPhaseRef.current !== "idle";
-  }, []);
-
-  const setThreadSwitchPhase = useCallback((phase: ThreadSwitchPhase, details?: Record<string, unknown>) => {
-    threadSwitchPhaseRef.current = phase;
-    logScrollDebug("thread-switch:phase", {
-      phase,
-      ...(details ?? {}),
-    });
-  }, [logScrollDebug]);
-
-  const getThreadSwitchRevealOffsetPx = useCallback(() => {
-    if (typeof window === "undefined") {
-      return THREAD_SWITCH_REVEAL_MICRO_SCROLL_MIN_PX;
-    }
-    const desired = window.innerHeight * THREAD_SWITCH_REVEAL_MICRO_SCROLL_RATIO;
-    return Math.max(
-      THREAD_SWITCH_REVEAL_MICRO_SCROLL_MIN_PX,
-      Math.min(THREAD_SWITCH_REVEAL_MICRO_SCROLL_MAX_PX, desired),
-    );
-  }, []);
-
-  const armAutoFollowSticky = useCallback((durationMs: number, reason: string) => {
-    const now = Date.now();
-    const until = now + durationMs;
-    if (until <= autoFollowStickyUntilRef.current) {
-      return;
-    }
-    autoFollowStickyUntilRef.current = until;
-    logScrollDebug("follow:sticky-armed", {
-      reason,
-      durationMs,
-      stickyUntil: until,
-    });
-  }, [logScrollDebug]);
-
-  const armThreadSwitchBottomLock = useCallback((reason: string) => {
-    const until = Date.now() + THREAD_SWITCH_BOTTOM_LOCK_MS;
-    threadSwitchBottomLockUntilRef.current = until;
-    logScrollDebug("thread-switch:bottom-lock-armed", {
-      reason,
-      lockUntil: until,
-    });
-  }, [logScrollDebug]);
-
-  const getSendFollowDuration = useCallback(() => {
-    const distance = getBottomDistance();
-    const progress = Math.min(1, distance / AUTO_FOLLOW_SEND_DISTANCE_CAP_PX);
-    return AUTO_FOLLOW_SEND_MIN_DURATION_S
-      + (AUTO_FOLLOW_SEND_MAX_DURATION_S - AUTO_FOLLOW_SEND_MIN_DURATION_S) * progress;
-  }, [getBottomDistance]);
-
-  const getAutoFollowDuration = useCallback((bottomDistance: number) => {
-    const progress = Math.min(1, bottomDistance / AUTO_FOLLOW_DYNAMIC_DISTANCE_CAP_PX);
-    return AUTO_FOLLOW_DYNAMIC_MIN_DURATION_S
-      + (AUTO_FOLLOW_DYNAMIC_MAX_DURATION_S - AUTO_FOLLOW_DYNAMIC_MIN_DURATION_S) * progress;
-  }, []);
-
   const scrollToPageBottom = useCallback((options?: {
     immediate?: boolean;
     force?: boolean;
     duration?: number;
-    lock?: boolean;
-    bottomOffsetPx?: number;
-    reason?: string;
-    onComplete?: () => void;
   }) => {
     const immediate = options?.immediate ?? false;
     const force = options?.force ?? true;
-    const lock = options?.lock ?? false;
     const duration = options?.duration ?? AUTO_FOLLOW_SMOOTH_DURATION_S;
-    const bottomOffsetPx = Math.max(0, options?.bottomOffsetPx ?? 0);
-    const reason = options?.reason ?? "unknown";
-    const onComplete = options?.onComplete;
-
-    logScrollDebug("scrollToBottom:request", {
-      reason,
-      immediate,
-      force,
-      lock,
-      duration,
-      bottomOffsetPx,
-    });
-
-    autoFollowProgrammaticUntilRef.current = Date.now() + AUTO_FOLLOW_PROGRAMMATIC_GUARD_MS;
     if (lenis) {
-      const target = Math.max(0, lenis.limit - bottomOffsetPx);
+      const target = feedEndRef.current ?? Math.max(0, lenis.limit);
       lenis.scrollTo(target, {
         duration,
         immediate,
         force,
-        lock,
         easing: AUTO_FOLLOW_EASING,
-        onComplete,
-      });
-      window.requestAnimationFrame(() => {
-        logScrollDebug("scrollToBottom:applied", {
-          reason,
-          transport: "lenis",
-        });
       });
       return;
     }
-    if (feedEndRef.current && bottomOffsetPx <= 0) {
+    if (feedEndRef.current) {
       feedEndRef.current.scrollIntoView({ block: "end", behavior: immediate ? "auto" : "smooth" });
-      window.requestAnimationFrame(() => {
-        logScrollDebug("scrollToBottom:applied", {
-          reason,
-          transport: "dom-anchor",
-        });
-      });
-      if (onComplete) {
-        if (immediate) {
-          onComplete();
-        } else {
-          window.setTimeout(onComplete, Math.max(80, Math.ceil(duration * 1000)));
-        }
-      }
       return;
     }
-    const target = Math.max(0, document.documentElement.scrollHeight - window.innerHeight - bottomOffsetPx);
+    const target = document.documentElement.scrollHeight;
     window.scrollTo({ top: target, behavior: immediate ? "auto" : "smooth" });
-    window.requestAnimationFrame(() => {
-      logScrollDebug("scrollToBottom:applied", {
-        reason,
-        transport: "window-scroll",
-      });
-    });
-    if (onComplete) {
-      if (immediate) {
-        onComplete();
-      } else {
-        window.setTimeout(onComplete, Math.max(80, Math.ceil(duration * 1000)));
-      }
-    }
-  }, [lenis, logScrollDebug]);
-
-  const flushScheduledAutoFollow = useCallback((reason: string) => {
-    if (isThreadSwitchTransitionActive()) {
-      return;
-    }
-
-    const stickyActive = isAutoFollowStickyActive();
-    if (!autoFollowEnabledRef.current && !stickyActive) {
-      return;
-    }
-
-    if (isFeedEndVisibleRef.current) {
-      return;
-    }
-
-    const bottomDistance = getBottomDistance();
-    if (bottomDistance <= AUTO_FOLLOW_MIN_BOTTOM_DISTANCE_PX) {
-      return;
-    }
-
-    scrollToPageBottom({
-      force: false,
-      duration: getAutoFollowDuration(bottomDistance),
-      reason,
-    });
-  }, [getAutoFollowDuration, getBottomDistance, isAutoFollowStickyActive, isThreadSwitchTransitionActive, scrollToPageBottom]);
-
-  const scheduleAutoFollow = useCallback((reason: string, options?: { immediate?: boolean }) => {
-    const immediate = options?.immediate ?? false;
-
-    if (autoFollowScheduleTimerRef.current !== null) {
-      autoFollowScheduledReasonRef.current = reason;
-      if (immediate) {
-        window.clearTimeout(autoFollowScheduleTimerRef.current);
-        autoFollowScheduleTimerRef.current = null;
-      } else {
-        return;
-      }
-    }
-
-    if (immediate) {
-      window.requestAnimationFrame(() => {
-        flushScheduledAutoFollow(reason);
-      });
-      return;
-    }
-
-    autoFollowScheduledReasonRef.current = reason;
-    autoFollowScheduleTimerRef.current = window.setTimeout(() => {
-      autoFollowScheduleTimerRef.current = null;
-      const scheduledReason = autoFollowScheduledReasonRef.current ?? reason;
-      autoFollowScheduledReasonRef.current = null;
-      flushScheduledAutoFollow(scheduledReason);
-    }, AUTO_FOLLOW_SCHEDULE_DELAY_MS);
-  }, [flushScheduledAutoFollow]);
-
-  const scheduleThreadSwitchSettleFollow = useCallback((reasonPrefix: string) => {
-    for (const timer of threadSwitchSettleTimersRef.current) {
-      window.clearTimeout(timer);
-    }
-    threadSwitchSettleTimersRef.current = [];
-
-    for (const delay of THREAD_SWITCH_SETTLE_DELAYS_MS) {
-      const timer = window.setTimeout(() => {
-        if (isFeedEndVisibleRef.current) {
-          return;
-        }
-        const bottomDistance = getBottomDistance();
-        if (bottomDistance <= AUTO_FOLLOW_ATTACH_THRESHOLD_PX) {
-          return;
-        }
-        scrollToPageBottom({
-          reason: `${reasonPrefix}:${delay}ms`,
-          immediate: true,
-          duration: 0,
-          force: true,
-        });
-        lastScrollPositionRef.current = getCurrentScrollPosition();
-      }, delay);
-      threadSwitchSettleTimersRef.current.push(timer);
-    }
-  }, [getBottomDistance, getCurrentScrollPosition, scrollToPageBottom]);
-
-  const settleThreadSwitchBeforeReveal = useCallback((reasonPrefix: string, epoch: number) => {
-    for (const timer of threadSwitchSettleTimersRef.current) {
-      window.clearTimeout(timer);
-    }
-    threadSwitchSettleTimersRef.current = [];
-
-    const startedAt = performance.now();
-    const revealOffsetPx = getThreadSwitchRevealOffsetPx();
-    let completed = false;
-    let stableFrameCount = 0;
-    let lastFeedHeight = feedRef.current?.scrollHeight ?? 0;
-
-    const finishReveal = (source: "onComplete" | "timeout") => {
-      if (completed || threadSwitchEpochRef.current !== epoch) {
-        return;
-      }
-      completed = true;
-      for (const timer of threadSwitchSettleTimersRef.current) {
-        window.clearTimeout(timer);
-      }
-      threadSwitchSettleTimersRef.current = [];
-
-      const finalizeTimer = window.setTimeout(() => {
-        if (threadSwitchEpochRef.current !== epoch) {
-          return;
-        }
-        scrollToPageBottom({
-          reason: `${reasonPrefix}:reveal-final`,
-          immediate: true,
-          duration: 0,
-          force: true,
-          bottomOffsetPx: 0,
-        });
-        lastScrollPositionRef.current = getCurrentScrollPosition();
-        setIsThreadSwitchRevealing(false);
-        setThreadSwitchPhase("idle", {
-          source,
-          reason: reasonPrefix,
-        });
-      }, THREAD_SWITCH_REVEAL_POST_SETTLE_MS);
-      threadSwitchSettleTimersRef.current.push(finalizeTimer);
-    };
-
-    const startReveal = () => {
-      if (completed || threadSwitchEpochRef.current !== epoch) {
-        return;
-      }
-      setThreadSwitchPhase("revealing", {
-        reason: reasonPrefix,
-      });
-      setIsFadingOut(false);
-      setIsThreadSwitchRevealing(true);
-
-      const revealTimer = window.setTimeout(() => {
-        finishReveal("timeout");
-      }, THREAD_SWITCH_REVEAL_PHASE_TIMEOUT_MS);
-      threadSwitchSettleTimersRef.current.push(revealTimer);
-
-      window.requestAnimationFrame(() => {
-        if (completed || threadSwitchEpochRef.current !== epoch) {
-          return;
-        }
-        scrollToPageBottom({
-          reason: `${reasonPrefix}:micro-scroll`,
-          force: true,
-          lock: true,
-          duration: THREAD_SWITCH_REVEAL_MICRO_SCROLL_DURATION_S,
-          bottomOffsetPx: 0,
-          onComplete: () => {
-            finishReveal("onComplete");
-          },
-        });
-      });
-
-      logScrollDebug("thread-switch:reveal", {
-        reason: reasonPrefix,
-        elapsedMs: Number((performance.now() - startedAt).toFixed(1)),
-        revealOffsetPx: Number(revealOffsetPx.toFixed(1)),
-      });
-    };
-
-    const runSettleStep = () => {
-      if (completed || threadSwitchEpochRef.current !== epoch) {
-        return;
-      }
-
-      const feedHeight = feedRef.current?.scrollHeight ?? 0;
-      if (Math.abs(feedHeight - lastFeedHeight) <= THREAD_SWITCH_LAYOUT_STABLE_DELTA_PX) {
-        stableFrameCount += 1;
-      } else {
-        stableFrameCount = 0;
-      }
-      lastFeedHeight = feedHeight;
-
-      scrollToPageBottom({
-        reason: `${reasonPrefix}:hidden-settle`,
-        immediate: true,
-        duration: 0,
-        force: true,
-        bottomOffsetPx: revealOffsetPx,
-      });
-      lastScrollPositionRef.current = getCurrentScrollPosition();
-
-      const elapsedMs = performance.now() - startedAt;
-      const settleReady = stableFrameCount >= THREAD_SWITCH_LAYOUT_STABLE_FRAME_COUNT;
-      if ((settleReady && elapsedMs >= THREAD_SWITCH_REVEAL_DELAY_MS) || elapsedMs >= THREAD_SWITCH_LAYOUT_SETTLE_MAX_MS) {
-        startReveal();
-        return;
-      }
-
-      const timer = window.setTimeout(runSettleStep, THREAD_SWITCH_LAYOUT_SETTLE_INTERVAL_MS);
-      threadSwitchSettleTimersRef.current.push(timer);
-    };
-
-    runSettleStep();
-  }, [
-    getCurrentScrollPosition,
-    getThreadSwitchRevealOffsetPx,
-    logScrollDebug,
-    scrollToPageBottom,
-    setThreadSwitchPhase,
-  ]);
+  }, [lenis]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2045,76 +1557,37 @@ function AuthenticatedChat() {
 
   const switchThread = useCallback(
     (newThreadId: string | null, composingNew: boolean) => {
-      if (isFadingOut || isThreadSwitchRevealing) return;
+      if (isFadingOut) return;
       if (!composingNew && newThreadId === activeThreadId && !isComposingNew) return;
 
-      threadSwitchEpochRef.current += 1;
-      const switchEpoch = threadSwitchEpochRef.current;
       setAwaitingAssistantThreadId(null);
-      setIsThreadSwitchRevealing(false);
-      setThreadSwitchPhase("fadingOut", {
-        epoch: switchEpoch,
-        threadId: newThreadId,
-        composingNew,
-      });
       setIsFadingOut(true);
       waitingForDataRef.current = false;
       if (fadingTimerRef.current !== null) window.clearTimeout(fadingTimerRef.current);
       if (dataWaitTimerRef.current !== null) window.clearTimeout(dataWaitTimerRef.current);
-      for (const timer of threadSwitchSettleTimersRef.current) {
-        window.clearTimeout(timer);
-      }
-      threadSwitchSettleTimersRef.current = [];
       fadingTimerRef.current = window.setTimeout(() => {
-        if (threadSwitchEpochRef.current !== switchEpoch) {
-          return;
-        }
         setIsComposingNew(composingNew);
         setActiveThreadId(newThreadId);
         if (composingNew) {
           setSessionVersion((v) => v + 1);
-        }
-        if (composingNew) {
-          // New session: fade out first, then fade straight back in
-          setThreadSwitchPhase("idle", {
-            epoch: switchEpoch,
-            reason: "new-composition",
-          });
           setIsFadingOut(false);
-        } else {
-          // Existing thread: stay invisible until target messages are ready.
-          setThreadSwitchPhase("loadingHidden", {
-            epoch: switchEpoch,
-            threadId: newThreadId,
-          });
-          armThreadSwitchBottomLock("thread-switch:start");
-          waitingForDataRef.current = true;
-          // Failsafe: avoid staying hidden forever if something goes wrong.
-          dataWaitTimerRef.current = window.setTimeout(() => {
-            if (threadSwitchEpochRef.current !== switchEpoch) {
-              return;
-            }
-            waitingForDataRef.current = false;
-            setIsThreadSwitchRevealing(false);
-            setThreadSwitchPhase("idle", {
-              epoch: switchEpoch,
-              reason: "failsafe",
-            });
-            setIsFadingOut(false);
-          }, THREAD_SWITCH_FAILSAFE_MS);
+          return;
         }
+
+        waitingForDataRef.current = true;
+        dataWaitTimerRef.current = window.setTimeout(() => {
+          waitingForDataRef.current = false;
+          setIsFadingOut(false);
+        }, THREAD_SWITCH_FAILSAFE_MS);
       }, THREAD_SWITCH_FADE_MS);
     },
     [
       activeThreadId,
-      armThreadSwitchBottomLock,
       isComposingNew,
       isFadingOut,
-      isThreadSwitchRevealing,
       setSessionVersion,
       setActiveThreadId,
       setIsComposingNew,
-      setThreadSwitchPhase,
     ],
   );
 
@@ -2194,41 +1667,9 @@ function AuthenticatedChat() {
     && activeThreadIdForMessages === awaitingAssistantThreadId
     && !latestTurnAssistantIsRenderable;
   const isOutputting = isSubmitting || isAwaitingAssistant || isStreaming;
-  const shouldAutoFollow = isOutputting || autoFollowPendingAttach;
+  const shouldAutoFollow = isOutputting;
   const showIntro = visibleMessages.length === 0 && !isStreaming;
   const isResearchActive = !!latestResearchJob && !TERMINAL_RESEARCH_STATUSES.has(latestResearchJob.status);
-
-  useEffect(() => {
-    shouldAutoFollowRef.current = shouldAutoFollow;
-  }, [shouldAutoFollow]);
-
-  useEffect(() => {
-    logScrollDebug("state:auto-follow", {
-      shouldAutoFollow,
-      stickyActive: isAutoFollowStickyActive(),
-      threadSwitchLockActive: isThreadSwitchBottomLockActive(),
-      attached: autoFollowEnabledRef.current,
-      autoFollowPendingAttach,
-      isOutputting,
-      isSubmitting,
-      isAwaitingAssistant,
-      isStreaming,
-      visibleMessageCount: visibleMessages.length,
-      latestAssistantStatus: latestTurnAssistantMessage?.status ?? null,
-    });
-  }, [
-    autoFollowPendingAttach,
-    isAwaitingAssistant,
-    isOutputting,
-    isStreaming,
-    isSubmitting,
-    isAutoFollowStickyActive,
-    isThreadSwitchBottomLockActive,
-    latestTurnAssistantMessage?.status,
-    logScrollDebug,
-    shouldAutoFollow,
-    visibleMessages.length,
-  ]);
 
   useEffect(() => {
     if (!awaitingAssistantThreadId || activeThreadIdForMessages !== awaitingAssistantThreadId) {
@@ -2250,27 +1691,12 @@ function AuthenticatedChat() {
   ]);
 
   useEffect(() => {
-    if (!autoFollowPendingAttach) {
-      return;
-    }
-    if (!(isAwaitingAssistant || isWaitingForAssistantMessage || isStreaming)) {
-      return;
-    }
-    setAutoFollowPendingAttach(false);
-    if (autoFollowPendingTimerRef.current !== null) {
-      window.clearTimeout(autoFollowPendingTimerRef.current);
-      autoFollowPendingTimerRef.current = null;
-    }
-  }, [autoFollowPendingAttach, isAwaitingAssistant, isStreaming, isWaitingForAssistantMessage]);
-
-  useEffect(() => {
     document.body.classList.toggle("chat-switching", isFadingOut);
     return () => {
       document.body.classList.remove("chat-switching");
     };
   }, [isFadingOut]);
 
-  // Fade back in once the target thread's messages have loaded and scroll is settled.
   useEffect(() => {
     if (waitingForDataRef.current && visibleMessages.length > 0) {
       waitingForDataRef.current = false;
@@ -2280,146 +1706,40 @@ function AuthenticatedChat() {
       }
       window.requestAnimationFrame(() => {
         autoFollowEnabledRef.current = true;
-        armThreadSwitchBottomLock("thread-switch:data-ready");
-        settleThreadSwitchBeforeReveal("thread-switch-pre-reveal-settle", threadSwitchEpochRef.current);
+        scrollToPageBottom({
+          immediate: true,
+          duration: 0,
+          force: true,
+        });
+        lastScrollPositionRef.current = getCurrentScrollPosition();
+        setIsFadingOut(false);
       });
     }
   }, [
-    armThreadSwitchBottomLock,
-    settleThreadSwitchBeforeReveal,
+    getCurrentScrollPosition,
+    scrollToPageBottom,
     visibleMessages.length,
   ]);
 
+  const streamingUpdateKey = useMemo(() => {
+    if (!latestTurnAssistantMessage) {
+      return "none";
+    }
+    const length = latestTurnAssistantMessage.text?.length ?? 0;
+    return `${latestTurnAssistantMessage.status}:${length}`;
+  }, [latestTurnAssistantMessage]);
+
   useEffect(() => {
-    const feed = feedRef.current;
-    if (!feed || isFadingOut || isThreadSwitchRevealing) {
+    if (!shouldAutoFollow || !autoFollowEnabledRef.current || isFadingOut) {
       return;
     }
-
-    logScrollDebug("observer:mounted", {
-      observerTarget: "chat-feed",
-    });
-
-    let scheduled = false;
-    const requestFollow = (source: "mutation" | "resize", details?: Record<string, unknown>) => {
-      if (scheduled) {
-        return;
-      }
-      scheduled = true;
-      window.requestAnimationFrame(() => {
-        scheduled = false;
-        if (isThreadSwitchTransitionActive()) {
-          return;
-        }
-        const stickyActive = isAutoFollowStickyActive();
-        const threadSwitchLockActive = isThreadSwitchBottomLockActive();
-        const outputActive = shouldAutoFollowRef.current;
-        if (!autoFollowEnabledRef.current && !stickyActive && !threadSwitchLockActive) {
-          return;
-        }
-
-        if (!autoFollowEnabledRef.current && (stickyActive || threadSwitchLockActive)) {
-          autoFollowEnabledRef.current = true;
-          logScrollDebug("follow:reattach-sticky", {
-            source,
-            threadSwitchLockActive,
-          });
-        }
-
-        const now = performance.now();
-        const bottomDistance = getBottomDistance();
-        if (isFeedEndVisibleRef.current) {
-          return;
-        }
-        if (bottomDistance <= AUTO_FOLLOW_MIN_BOTTOM_DISTANCE_PX) {
-          return;
-        }
-
-        const distanceDelta = bottomDistance - autoFollowLastObserverDistanceRef.current;
-        const elapsed = now - autoFollowLastObserverRunRef.current;
-        const minGap = threadSwitchLockActive
-          ? Math.max(AUTO_FOLLOW_OBSERVER_MIN_GAP_MS, THREAD_SWITCH_LOCK_OBSERVER_MIN_GAP_MS)
-          : AUTO_FOLLOW_OBSERVER_MIN_GAP_MS;
-        const minDelta = threadSwitchLockActive
-          ? AUTO_FOLLOW_OBSERVER_REISSUE_DELTA_PX * 2
-          : AUTO_FOLLOW_OBSERVER_REISSUE_DELTA_PX;
-        if (
-          elapsed < minGap
-          && Math.abs(distanceDelta) <= minDelta
-        ) {
-          return;
-        }
-
-        autoFollowLastObserverRunRef.current = now;
-        autoFollowLastObserverDistanceRef.current = bottomDistance;
-
-        if (stickyActive || outputActive) {
-          armAutoFollowSticky(AUTO_FOLLOW_STICKY_OBSERVER_EXTEND_MS, "observer-growth");
-        }
-
-        if (threadSwitchLockActive && !outputActive) {
-          return;
-        }
-        scheduleAutoFollow("observer-follow");
-        logScrollDebug("observer:follow-triggered", {
-          source,
-          ...(details ?? {}),
-          stickyActive,
-          threadSwitchLockActive,
-          shouldAutoFollow: outputActive,
-          bottomDistance: Number(bottomDistance.toFixed(1)),
-          distanceDelta: Number(distanceDelta.toFixed(1)),
-          elapsedMs: Number(elapsed.toFixed(1)),
-          minGapMs: minGap,
-          minDeltaPx: minDelta,
-        });
-      });
-    };
-
-    const mutationObserver = new MutationObserver((entries) => {
-      requestFollow("mutation", {
-        mutationCount: entries.length,
+    window.requestAnimationFrame(() => {
+      scrollToPageBottom({
+        force: true,
+        duration: AUTO_FOLLOW_STREAM_DURATION_S,
       });
     });
-    mutationObserver.observe(feed, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-    });
-
-    let resizeObserver: ResizeObserver | null = null;
-    if (typeof ResizeObserver !== "undefined") {
-      resizeObserver = new ResizeObserver((entries) => {
-        requestFollow("resize", {
-          resizeCount: entries.length,
-          feedHeight: feed.scrollHeight,
-        });
-      });
-      resizeObserver.observe(feed);
-    }
-
-    return () => {
-      logScrollDebug("observer:unmounted", {
-        observerTarget: "chat-feed",
-      });
-      mutationObserver.disconnect();
-      if (resizeObserver) {
-        resizeObserver.disconnect();
-      }
-    };
-  }, [
-    armAutoFollowSticky,
-    getBottomDistance,
-    getCurrentScrollPosition,
-    isAutoFollowStickyActive,
-    isThreadSwitchBottomLockActive,
-    isThreadSwitchTransitionActive,
-    isFadingOut,
-    isThreadSwitchRevealing,
-    logScrollDebug,
-    scheduleAutoFollow,
-    scrollToPageBottom,
-  ]);
+  }, [isFadingOut, scrollToPageBottom, shouldAutoFollow, streamingUpdateKey, visibleMessages.length]);
 
   useEffect(() => {
     if (!showIntro) {
@@ -2477,167 +1797,6 @@ function AuthenticatedChat() {
   }, [showIntro, sessionVersion]);
 
   useEffect(() => {
-    const markUserUpIntent = (source: string, details?: Record<string, unknown>) => {
-      autoFollowLastUserIntentRef.current = Date.now();
-      const now = performance.now();
-      if (now - scrollDebugLastIntentLogTsRef.current < 120) {
-        return;
-      }
-      scrollDebugLastIntentLogTsRef.current = now;
-      logScrollDebug("user-intent:detach-candidate", {
-        source,
-        ...(details ?? {}),
-      });
-    };
-
-    const handleWheel = (event: WheelEvent) => {
-      if (event.deltaY < 0) {
-        markUserUpIntent("wheel", { deltaY: event.deltaY });
-      }
-    };
-
-    const handleKeydown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) {
-        return;
-      }
-      if (
-        event.key === "ArrowUp"
-        || event.key === "PageUp"
-        || event.key === "Home"
-        || (event.key === " " && event.shiftKey)
-      ) {
-        markUserUpIntent("keyboard", { key: event.key });
-      }
-    };
-
-    const handleTouchStart = (event: TouchEvent) => {
-      touchLastYRef.current = event.touches[0]?.clientY ?? null;
-    };
-
-    const handleTouchMove = (event: TouchEvent) => {
-      const currentY = event.touches[0]?.clientY;
-      if (typeof currentY !== "number") {
-        return;
-      }
-      const previousY = touchLastYRef.current;
-      if (typeof previousY === "number" && currentY - previousY > 2) {
-        markUserUpIntent("touch", { deltaY: currentY - previousY });
-      }
-      touchLastYRef.current = currentY;
-    };
-
-    const clearTouchTrack = () => {
-      touchLastYRef.current = null;
-    };
-
-    window.addEventListener("wheel", handleWheel, { passive: true });
-    window.addEventListener("keydown", handleKeydown);
-    window.addEventListener("touchstart", handleTouchStart, { passive: true });
-    window.addEventListener("touchmove", handleTouchMove, { passive: true });
-    window.addEventListener("touchend", clearTouchTrack, { passive: true });
-    window.addEventListener("touchcancel", clearTouchTrack, { passive: true });
-
-    return () => {
-      window.removeEventListener("wheel", handleWheel);
-      window.removeEventListener("keydown", handleKeydown);
-      window.removeEventListener("touchstart", handleTouchStart);
-      window.removeEventListener("touchmove", handleTouchMove);
-      window.removeEventListener("touchend", clearTouchTrack);
-      window.removeEventListener("touchcancel", clearTouchTrack);
-    };
-  }, [logScrollDebug]);
-
-  useEffect(() => {
-    const syncAutoFollowOnReturn = (source: "visibility" | "focus" | "pageshow") => {
-      if (document.visibilityState === "hidden") {
-        return;
-      }
-
-      if (!activeThreadIdForMessages) {
-        return;
-      }
-
-      if (isThreadSwitchTransitionActive()) {
-        return;
-      }
-
-      const stickyActive = isAutoFollowStickyActive();
-      const threadSwitchLockActive = isThreadSwitchBottomLockActive();
-      const outputActive = shouldAutoFollowRef.current;
-      const attachedAndNearBottom = autoFollowEnabledRef.current
-        && isNearBottom(AUTO_FOLLOW_DETACH_THRESHOLD_PX);
-      const shouldMaintainFollow = attachedAndNearBottom || threadSwitchLockActive || outputActive;
-
-      if (!shouldMaintainFollow) {
-        return;
-      }
-
-      if (isFeedEndVisibleRef.current) {
-        return;
-      }
-
-      const bottomDistance = getBottomDistance();
-      lastScrollPositionRef.current = getCurrentScrollPosition();
-
-      logScrollDebug("visibility:resume-sync", {
-        source,
-        stickyActive,
-        threadSwitchLockActive,
-        outputActive,
-        shouldMaintainFollow,
-        bottomDistance: Number(bottomDistance.toFixed(1)),
-      });
-
-      if (bottomDistance <= AUTO_FOLLOW_MIN_BOTTOM_DISTANCE_PX) {
-        return;
-      }
-
-      autoFollowEnabledRef.current = true;
-      scheduleAutoFollow(`resume-${source}`, { immediate: true });
-
-      if (bottomDistance > AUTO_FOLLOW_ATTACH_THRESHOLD_PX * 3) {
-        scheduleThreadSwitchSettleFollow(`resume-${source}-settle`);
-      }
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState !== "visible") {
-        return;
-      }
-      syncAutoFollowOnReturn("visibility");
-    };
-
-    const handleFocus = () => {
-      syncAutoFollowOnReturn("focus");
-    };
-
-    const handlePageShow = () => {
-      syncAutoFollowOnReturn("pageshow");
-    };
-
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("focus", handleFocus);
-    window.addEventListener("pageshow", handlePageShow);
-
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("focus", handleFocus);
-      window.removeEventListener("pageshow", handlePageShow);
-    };
-  }, [
-    activeThreadIdForMessages,
-    getBottomDistance,
-    getCurrentScrollPosition,
-    isAutoFollowStickyActive,
-    isNearBottom,
-    isThreadSwitchBottomLockActive,
-    isThreadSwitchTransitionActive,
-    logScrollDebug,
-    scheduleAutoFollow,
-    scheduleThreadSwitchSettleFollow,
-  ]);
-
-  useEffect(() => {
     const markFeedScrolling = () => {
       setIsFeedScrolling((current) => (current ? current : true));
       if (scrollIdleTimerRef.current !== null) {
@@ -2650,76 +1809,14 @@ function AuthenticatedChat() {
 
     const syncFollowFromCurrentPosition = () => {
       const current = getCurrentScrollPosition();
-      if (isThreadSwitchTransitionActive()) {
-        lastScrollPositionRef.current = current;
-        scrollDebugLastPositionRef.current = current;
-        scrollDebugLastPositionTsRef.current = performance.now();
-        return;
-      }
       const bottomDistance = getBottomDistance();
-      const effectiveBottomDistance = isFeedEndVisibleRef.current ? 0 : bottomDistance;
       const movedUp = current < lastScrollPositionRef.current - 1;
-      const now = Date.now();
-      const stickyActive = isAutoFollowStickyActive();
-      const threadSwitchLockActive = isThreadSwitchBottomLockActive();
-      const hasRecentUserUpIntent = now - autoFollowLastUserIntentRef.current <= AUTO_FOLLOW_USER_INTENT_WINDOW_MS;
-      const isProgrammaticWindow = now <= autoFollowProgrammaticUntilRef.current;
-      const wasAttached = autoFollowEnabledRef.current;
 
-      if (!shouldAutoFollow && !stickyActive && !threadSwitchLockActive) {
-        autoFollowEnabledRef.current = effectiveBottomDistance <= AUTO_FOLLOW_ATTACH_THRESHOLD_PX;
-      } else {
-        autoFollowEnabledRef.current = getNextAutoFollowEnabled({
-          wasEnabled: autoFollowEnabledRef.current,
-          isOutputting: shouldAutoFollow || stickyActive || threadSwitchLockActive,
-          movedUp: movedUp && hasRecentUserUpIntent && !isProgrammaticWindow && !threadSwitchLockActive,
-          bottomDistance: effectiveBottomDistance,
-          attachThresholdPx: AUTO_FOLLOW_ATTACH_THRESHOLD_PX,
-          detachThresholdPx: AUTO_FOLLOW_DETACH_THRESHOLD_PX,
-        });
+      if (bottomDistance <= AUTO_FOLLOW_ATTACH_THRESHOLD_PX) {
+        autoFollowEnabledRef.current = true;
+      } else if (movedUp) {
+        autoFollowEnabledRef.current = false;
       }
-
-      const nowPerf = performance.now();
-      const dt = scrollDebugLastPositionTsRef.current > 0 ? nowPerf - scrollDebugLastPositionTsRef.current : 0;
-      const delta = current - scrollDebugLastPositionRef.current;
-      const velocityPxPerMs = dt > 0 ? delta / dt : 0;
-
-      if (nowPerf - scrollDebugLastScrollLogTsRef.current >= SCROLL_DEBUG_SCROLL_LOG_INTERVAL_MS) {
-        scrollDebugLastScrollLogTsRef.current = nowPerf;
-        logScrollDebug("scroll:event", {
-          deltaPx: Number(delta.toFixed(2)),
-          dtMs: Number(dt.toFixed(1)),
-          velocityPxPerMs: Number(velocityPxPerMs.toFixed(3)),
-          movedUp,
-          hasRecentUserUpIntent,
-          isProgrammaticWindow,
-          shouldAutoFollow,
-          stickyActive,
-          threadSwitchLockActive,
-          bottomDistance: Number(bottomDistance.toFixed(1)),
-          effectiveBottomDistance: Number(effectiveBottomDistance.toFixed(1)),
-          attachedBefore: wasAttached,
-          attachedAfter: autoFollowEnabledRef.current,
-        });
-      }
-
-      if (wasAttached !== autoFollowEnabledRef.current) {
-        logScrollDebug("follow:attach-changed", {
-          attachedBefore: wasAttached,
-          attachedAfter: autoFollowEnabledRef.current,
-          movedUp,
-          hasRecentUserUpIntent,
-          isProgrammaticWindow,
-          shouldAutoFollow,
-          stickyActive,
-          threadSwitchLockActive,
-          bottomDistance: Number(bottomDistance.toFixed(1)),
-          effectiveBottomDistance: Number(effectiveBottomDistance.toFixed(1)),
-        });
-      }
-
-      scrollDebugLastPositionRef.current = current;
-      scrollDebugLastPositionTsRef.current = nowPerf;
 
       lastScrollPositionRef.current = current;
       markFeedScrolling();
@@ -2728,16 +1825,7 @@ function AuthenticatedChat() {
     const syncCurrentWithoutMarking = () => {
       const current = getCurrentScrollPosition();
       lastScrollPositionRef.current = current;
-      scrollDebugLastPositionRef.current = current;
-      scrollDebugLastPositionTsRef.current = performance.now();
-      if (isThreadSwitchTransitionActive()) {
-        return;
-      }
-      const stickyActive = isAutoFollowStickyActive();
-      const threadSwitchLockActive = isThreadSwitchBottomLockActive();
-      if (!shouldAutoFollow && !stickyActive && !threadSwitchLockActive) {
-        autoFollowEnabledRef.current = isNearBottom(AUTO_FOLLOW_ATTACH_THRESHOLD_PX);
-      }
+      autoFollowEnabledRef.current = isNearBottom(AUTO_FOLLOW_ATTACH_THRESHOLD_PX);
     };
 
     syncCurrentWithoutMarking();
@@ -2750,26 +1838,17 @@ function AuthenticatedChat() {
     }
 
     const handleResize = () => {
-      if (isThreadSwitchTransitionActive()) {
-        return;
-      }
-      const threadSwitchLockActive = isThreadSwitchBottomLockActive();
       if (isNearBottom(AUTO_FOLLOW_ATTACH_THRESHOLD_PX)) {
         autoFollowEnabledRef.current = true;
       }
-
-      if (threadSwitchLockActive || autoFollowEnabledRef.current) {
-        const bottomDistance = getBottomDistance();
-        if (bottomDistance > AUTO_FOLLOW_MIN_BOTTOM_DISTANCE_PX) {
-          scheduleAutoFollow("viewport-resize");
-        }
+      if (autoFollowEnabledRef.current) {
+        scrollToPageBottom({
+          force: true,
+          duration: AUTO_FOLLOW_STREAM_DURATION_S,
+        });
       }
 
       lastScrollPositionRef.current = getCurrentScrollPosition();
-      logScrollDebug("viewport:resize", {
-        attached: autoFollowEnabledRef.current,
-        threadSwitchLockActive,
-      });
     };
 
     window.addEventListener("resize", handleResize);
@@ -2785,13 +1864,9 @@ function AuthenticatedChat() {
   }, [
     getBottomDistance,
     getCurrentScrollPosition,
-    isAutoFollowStickyActive,
-    isThreadSwitchBottomLockActive,
-    isThreadSwitchTransitionActive,
     isNearBottom,
     lenis,
-    logScrollDebug,
-    scheduleAutoFollow,
+    scrollToPageBottom,
     shouldAutoFollow,
   ]);
 
@@ -2841,12 +1916,6 @@ function AuthenticatedChat() {
       if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
       if (fadingTimerRef.current !== null) window.clearTimeout(fadingTimerRef.current);
       if (dataWaitTimerRef.current !== null) window.clearTimeout(dataWaitTimerRef.current);
-      if (autoFollowPendingTimerRef.current !== null) window.clearTimeout(autoFollowPendingTimerRef.current);
-      if (autoFollowScheduleTimerRef.current !== null) window.clearTimeout(autoFollowScheduleTimerRef.current);
-      for (const timer of threadSwitchSettleTimersRef.current) {
-        window.clearTimeout(timer);
-      }
-      threadSwitchSettleTimersRef.current = [];
     };
   }, []);
 
@@ -2866,44 +1935,14 @@ function AuthenticatedChat() {
       return;
     }
 
-    logScrollDebug("send:start", {
-      promptLength: prompt.length,
-      activeThreadId,
-      activeThreadIdForMessages,
-      isSubmitting,
-      shouldAutoFollow,
-    });
-
     setDraft("");
     autoFollowEnabledRef.current = true;
-    armAutoFollowSticky(AUTO_FOLLOW_STICKY_SEND_MS, "send");
-    setAutoFollowPendingAttach(true);
-    if (autoFollowPendingTimerRef.current !== null) {
-      window.clearTimeout(autoFollowPendingTimerRef.current);
-    }
-    autoFollowPendingTimerRef.current = window.setTimeout(() => {
-      setAutoFollowPendingAttach(false);
-      autoFollowPendingTimerRef.current = null;
-    }, AUTO_FOLLOW_PENDING_TIMEOUT_MS);
-
-    const sendScrollDuration = getSendFollowDuration();
     window.requestAnimationFrame(() => {
       scrollToPageBottom({
         force: true,
-        duration: sendScrollDuration,
-        reason: "send-initial",
+        duration: AUTO_FOLLOW_SEND_DURATION_S,
       });
       lastScrollPositionRef.current = getCurrentScrollPosition();
-      window.setTimeout(() => {
-        if (autoFollowEnabledRef.current) {
-          scheduleAutoFollow("send-settle");
-        }
-      }, AUTO_FOLLOW_SEND_SETTLE_DELAY_MS);
-      window.setTimeout(() => {
-        if (autoFollowEnabledRef.current) {
-          scheduleAutoFollow("send-finalize");
-        }
-      }, AUTO_FOLLOW_SEND_FINALIZE_DELAY_MS);
     });
     if (textareaRef.current) {
       textareaRef.current.style.height = "28px";
@@ -2913,9 +1952,6 @@ function AuthenticatedChat() {
     try {
       let threadId = activeThreadIdForMessages;
       if (!threadId) {
-        logScrollDebug("send:create-thread", {
-          reason: "missing-active-thread",
-        });
         const created = await createThread({});
         threadId = created.threadId;
         setIsFadingOut(true);
@@ -2930,9 +1966,6 @@ function AuthenticatedChat() {
         }, THREAD_SWITCH_FAILSAFE_MS);
         setIsComposingNew(false);
         setActiveThreadId(threadId);
-        logScrollDebug("send:create-thread:complete", {
-          createdThreadId: threadId,
-        });
       }
 
       if (!threadId) {
@@ -2940,30 +1973,12 @@ function AuthenticatedChat() {
       }
 
       setAwaitingAssistantThreadId(threadId);
-      logScrollDebug("send:dispatch", {
-        threadId,
-      });
-
       await sendPrompt({ threadId, prompt });
-      logScrollDebug("send:dispatched", {
-        threadId,
-      });
     } catch (error) {
       setAwaitingAssistantThreadId(null);
-      setAutoFollowPendingAttach(false);
-      if (autoFollowPendingTimerRef.current !== null) {
-        window.clearTimeout(autoFollowPendingTimerRef.current);
-        autoFollowPendingTimerRef.current = null;
-      }
-      logScrollDebug("send:error", {
-        error: error instanceof Error ? error.message : String(error),
-      });
       throw error;
     } finally {
       setIsSubmitting(false);
-      logScrollDebug("send:finally", {
-        isSubmitting: false,
-      });
     }
   };
 
@@ -3081,7 +2096,6 @@ function AuthenticatedChat() {
             className={clsx(
               "chat-feed",
               isFadingOut && "fading-out",
-              isThreadSwitchRevealing && "revealing",
               latestResearchJob && "with-research-dock",
             )}
             id="chatFeed"

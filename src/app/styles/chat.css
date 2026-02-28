@@ -1086,13 +1086,6 @@
   pointer-events: none;
 }
 
-.chat-feed.revealing {
-  opacity: 0.12;
-  pointer-events: none;
-}
-
-
-
 .message {
   width: 100%;
   max-width: none;
