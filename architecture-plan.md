@@ -559,6 +559,7 @@ When this section conflicts with older sections, this section wins.
 - [x] Flight scan now quality-gates into clarification when numeric fare evidence remains thin and `flexibilityLevel` is missing.
 - [x] Planner stage now supports an LLM planner contract (structured JSON + repair attempts) with deterministic fallback when model output is unavailable/invalid.
 - [x] Ranking stage now supports LLM prioritization with schema validation/repair and deterministic fallback.
+- [x] Research stage contracts are now split into dedicated modules (`researchContracts`, `researchTypes`, `researchEvidence`, `researchSynthesis`) so orchestration can evolve without duplicating schemas/types.
 - [ ] LLM planner/executor/synthesizer runtime is not complete yet (current execution is still largely deterministic retrieval/scoring).
 - [ ] End-to-end verifier-gated ranking quality checks are not complete yet (LLM ranking exists, but guardrail depth is still expanding).
 - [ ] Researcher-to-chatbot clarification tooling and pause/resume handshake is not complete yet.
@@ -595,8 +596,8 @@ When this section conflicts with older sections, this section wins.
 
 #### A) Contracts and schemas
 
-- [ ] Add stage schemas for planner output, branch findings, synthesis output, and ranking output.
-- [ ] Add strict semantic validators for each stage output.
+- [x] Add stage schemas for planner output, branch findings, synthesis output, and ranking output.
+- [x] Add strict semantic validators for each stage output.
 - [ ] Add bounded repair loops per stage (with structured feedback).
 
 #### B) Dual-actor dialogue bus

@@ -29,7 +29,25 @@ import {
   summarizeConstraints,
   type ResearchDomain,
 } from "./researchIntake";
+import {
+  plannerOutputSchema,
+  rankingOutputSchema,
+  type PlannerOutput,
+} from "./researchContracts";
+import {
+  MAX_PROMOTED_CONTEXT_SOURCES,
+  QUALITY_CONTINUE_THRESHOLD,
+  assessResearchQuality,
+  buildDeterministicBranchAnalysis,
+  buildFollowupSearchQuery,
+  buildSearchQuery,
+  clamp,
+  promoteSourceEvidence,
+  summarizeExtractedContent,
+} from "./researchEvidence";
 import { buildRankedResultsFromCandidates } from "./researchRanking";
+import { buildDeterministicSynthesisOutput } from "./researchSynthesis";
+import type { CandidateDraft, SourceEvidence } from "./researchTypes";
 import { getAuthUserIdOrThrow } from "./auth";
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "expired"]);
@@ -37,45 +55,10 @@ const MAX_PAGE_SIZE = 50;
 const MAX_JOB_ATTEMPTS = 3;
 const RETRY_BACKOFF_MS = [30_000, 120_000, 300_000] as const;
 const JOB_LEASE_DURATION_MS = 9 * 60 * 1000;
-const MAX_RESEARCH_SCAN_ROUNDS = 2;
-const MAX_PROMOTED_CONTEXT_SOURCES = 4;
-const QUALITY_CONTINUE_THRESHOLD = 0.66;
 const MAX_PLANNER_REPAIR_ATTEMPTS = 2;
 const MAX_RANKING_REPAIR_ATTEMPTS = 2;
 const GENERAL_SKILL_SLUG = "general";
 const LEGACY_GENERAL_SKILL_SLUG = "skills";
-
-const plannerEvidenceFocusValues = [
-  "price_total",
-  "duration",
-  "transfers",
-  "baggage",
-  "fare_rules",
-  "freshness",
-  "booking_path",
-] as const;
-
-const plannerOutputSchema = z.object({
-  strategy: z.string().min(12).max(400),
-  primaryQuery: z.string().min(6).max(220),
-  fallbackQuery: z.string().min(6).max(220).optional(),
-  subqueries: z.array(z.string().min(6).max(220)).min(1).max(5),
-  evidenceFocus: z.array(z.enum(plannerEvidenceFocusValues)).min(1).max(6),
-  qualityGate: z.string().min(12).max(300),
-});
-
-const rankingCategorySchema = z.enum(["cheapest", "best_value", "most_convenient"]);
-
-const rankingOutputSchema = z.object({
-  rankings: z.array(
-    z.object({
-      category: rankingCategorySchema,
-      rank: z.number().int().min(1).max(5),
-      score: z.number().int().min(1).max(100),
-      rationale: z.string().min(12).max(280),
-    }),
-  ).min(1).max(3),
-});
 
 function isLlmResearchPipelineEnabled() {
   return process.env.LLM_RESEARCH_PIPELINE_V1 !== "0";
@@ -100,29 +83,6 @@ type ResearchJobStatus =
   | "failed"
   | "cancelled"
   | "expired";
-
-type CandidateCategory = "cheapest" | "best_value" | "most_convenient";
-
-type CandidateDraft = {
-  category: CandidateCategory;
-  title: string;
-  summary: string;
-  confidence: number;
-  verificationStatus: "needs_live_check" | "partially_verified" | "verified";
-  estimatedTotalUsd: number;
-  travelMinutes: number;
-  transferCount: number;
-  flexibilityScore: number;
-  baggageScore: number;
-  bookingEaseScore: number;
-  freshnessScore: number;
-  verifiedAt?: number;
-  recheckAfter: number;
-  primarySourceUrl?: string;
-  sourceUrls: string[];
-};
-
-type PlannerOutput = z.infer<typeof plannerOutputSchema>;
 
 type PlannerPlanResult = {
   plan: PlannerOutput;
@@ -155,11 +115,6 @@ type ResearchErrorCode =
   | "unknown_error";
 
 const SENSITIVE_SLOT_KEYS = new Set(["nationality", "ageBand"]);
-const VERIFICATION_WINDOW_MS = {
-  verified: 6 * 60 * 60 * 1000,
-  partially_verified: 2 * 60 * 60 * 1000,
-  needs_live_check: 0,
-} as const;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -334,592 +289,8 @@ async function getOwnedJobOrThrow(
   return job;
 }
 
-function summarizeExtractedContent(value: string | undefined) {
-  if (!value) {
-    return undefined;
-  }
-  const compact = value.replace(/\s+/g, " ").trim();
-  if (!compact) {
-    return undefined;
-  }
-  return compact.slice(0, 260);
-}
-
-function buildSearchQuery(prompt: string, domain: string) {
-  const base = prompt.trim();
-  if (!base) {
-    return "best travel deals";
-  }
-
-  if (domain === "flight") {
-    return `${base} flight deals promos booking`;
-  }
-  if (domain === "concert") {
-    return `${base} concert tickets presale resale deals`;
-  }
-  if (domain === "train") {
-    return `${base} train tickets passes discounts`;
-  }
-
-  return `${base} deals offers`;
-}
-
-function createSynthesisSummary(sources: { title: string; url: string }[]) {
-  if (sources.length === 0) {
-    return "No reliable source links were captured yet. Kept a placeholder lead so the pipeline can continue; next step is adding fallback providers.";
-  }
-
-  const labels = sources.slice(0, 3).map((source) => source.title);
-  return `Collected ${sources.length} web leads. Strongest early leads: ${labels.join("; ")}. All prices still require live verification before booking.`;
-}
-
 function isSensitiveSlot(key: string) {
   return SENSITIVE_SLOT_KEYS.has(key);
-}
-
-function verificationTimestamps(
-  status: CandidateDraft["verificationStatus"],
-  now: number,
-): Pick<CandidateDraft, "verifiedAt" | "recheckAfter"> {
-  if (status === "needs_live_check") {
-    return {
-      verifiedAt: undefined,
-      recheckAfter: now,
-    };
-  }
-
-  return {
-    verifiedAt: now,
-    recheckAfter: now + VERIFICATION_WINDOW_MS[status],
-  };
-}
-
-function extractBudgetCeiling(text: string) {
-  const budgetMatch = text.match(/(?:budget|max|under|below|<=?)\s*\$?\s*(\d{2,5})/i);
-  if (budgetMatch) {
-    return Number(budgetMatch[1]);
-  }
-
-  const dollarMatch = text.match(/\$\s*(\d{2,5})/);
-  if (dollarMatch) {
-    return Number(dollarMatch[1]);
-  }
-
-  return undefined;
-}
-
-type SourceEvidence = {
-  title: string;
-  url: string;
-  snippet?: string;
-  extractedSummary?: string;
-};
-
-type PromotedSourceEvidence = SourceEvidence & {
-  signalScore: number;
-  signalReasons: string[];
-};
-
-type QualityGapKey = "citation_coverage" | "numeric_evidence" | "source_diversity" | "confidence";
-
-type QualityAssessment = {
-  decision: "finalize" | "continue";
-  score: number;
-  round: number;
-  gaps: QualityGapKey[];
-  reason: string;
-};
-
-type CandidateEvidenceMetrics = {
-  cheapestUsd: number;
-  valueUsd: number;
-  convenientUsd: number;
-  cheapestMinutes: number;
-  valueMinutes: number;
-  convenientMinutes: number;
-  cheapestTransfers: number;
-  valueTransfers: number;
-  convenientTransfers: number;
-  flexibilityScore: number;
-  baggageScore: number;
-  bookingEaseScore: number;
-  freshnessScore: number;
-  confidenceLift: number;
-};
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function parseNumber(value: string) {
-  const normalized = value.replace(/,/g, "").trim();
-  const numeric = Number(normalized);
-  return Number.isFinite(numeric) ? numeric : undefined;
-}
-
-function collectUsdPrices(text: string) {
-  const values: number[] = [];
-  const patterns = [
-    /\$\s?(\d{2,5}(?:[.,]\d{1,2})?)/gi,
-    /\b(?:usd|us\$)\s?(\d{2,5}(?:[.,]\d{1,2})?)/gi,
-    /\bfrom\s+\$?(\d{2,5}(?:[.,]\d{1,2})?)/gi,
-  ];
-
-  for (const pattern of patterns) {
-    for (const match of text.matchAll(pattern)) {
-      const parsed = parseNumber(match[1] ?? "");
-      if (!parsed) {
-        continue;
-      }
-      if (parsed < 20 || parsed > 15000) {
-        continue;
-      }
-      values.push(Math.round(parsed));
-    }
-  }
-
-  return values;
-}
-
-function collectDurationMinutes(text: string) {
-  const values: number[] = [];
-
-  for (const match of text.matchAll(/(\d{1,2})\s*h(?:ours?)?\s*(\d{1,2})?\s*m?/gi)) {
-    const hours = parseNumber(match[1] ?? "0") ?? 0;
-    const minutes = parseNumber(match[2] ?? "0") ?? 0;
-    const total = hours * 60 + minutes;
-    if (total >= 30 && total <= 3000) {
-      values.push(total);
-    }
-  }
-
-  for (const match of text.matchAll(/(\d{2,4})\s*(?:min|mins|minutes)\b/gi)) {
-    const minutes = parseNumber(match[1] ?? "");
-    if (!minutes) {
-      continue;
-    }
-    if (minutes >= 30 && minutes <= 3000) {
-      values.push(minutes);
-    }
-  }
-
-  return values;
-}
-
-function collectTransferCounts(text: string) {
-  const values: number[] = [];
-
-  if (/\b(?:non[-\s]?stop|direct(?:\s+flight)?|no\s+transfers?)\b/i.test(text)) {
-    values.push(0);
-  }
-
-  for (const match of text.matchAll(/(\d)\s*(?:stop|stops|transfer|transfers|layover|layovers)\b/gi)) {
-    const parsed = parseNumber(match[1] ?? "");
-    if (parsed === undefined) {
-      continue;
-    }
-    values.push(clamp(Math.round(parsed), 0, 4));
-  }
-
-  if (/\bone[-\s]?stop\b/i.test(text)) {
-    values.push(1);
-  }
-  if (/\btwo[-\s]?stops\b/i.test(text)) {
-    values.push(2);
-  }
-
-  return values;
-}
-
-function median(values: number[]) {
-  if (values.length === 0) {
-    return undefined;
-  }
-
-  const sorted = values.slice().sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 === 0) {
-    return Math.round((sorted[middle - 1] + sorted[middle]) / 2);
-  }
-  return sorted[middle];
-}
-
-function average(values: number[]) {
-  if (values.length === 0) {
-    return undefined;
-  }
-  const total = values.reduce((sum, value) => sum + value, 0);
-  return total / values.length;
-}
-
-function keywordScore(text: string, positive: RegExp[], negative: RegExp[], baseline: number) {
-  let score = baseline;
-  for (const pattern of positive) {
-    if (pattern.test(text)) {
-      score += 0.06;
-    }
-  }
-  for (const pattern of negative) {
-    if (pattern.test(text)) {
-      score -= 0.08;
-    }
-  }
-  return clamp(score, 0.2, 0.95);
-}
-
-function deriveCandidateEvidenceMetrics(
-  domain: string,
-  baselineBudget: number,
-  topSources: SourceEvidence[],
-): CandidateEvidenceMetrics {
-  const joinedEvidence = topSources
-    .map((source) => `${source.title} ${source.snippet ?? ""} ${source.extractedSummary ?? ""}`)
-    .join("\n");
-
-  const priceSignals = collectUsdPrices(joinedEvidence);
-  const durationSignals = collectDurationMinutes(joinedEvidence);
-  const transferSignals = collectTransferCounts(joinedEvidence);
-
-  const defaultMinutes = domain === "flight" ? { cheap: 680, value: 590, fast: 510 } : { cheap: 320, value: 260, fast: 210 };
-  const defaultTransfers = domain === "flight" ? { cheap: 2, value: 1, fast: 0 } : { cheap: 1, value: 1, fast: 0 };
-
-  const lowestPrice = priceSignals.length > 0 ? Math.min(...priceSignals) : Math.round(baselineBudget * 0.9);
-  const medianPrice = median(priceSignals) ?? Math.round(baselineBudget * 1.02);
-  const convenientPrice = clamp(Math.round(Math.max(medianPrice, lowestPrice) * 1.08), 30, 15000);
-
-  const shortestDuration = durationSignals.length > 0 ? Math.min(...durationSignals) : defaultMinutes.fast;
-  const medianDuration = median(durationSignals) ?? defaultMinutes.value;
-  const slowDuration = clamp(
-    Math.max(medianDuration, Math.round((average(durationSignals) ?? defaultMinutes.cheap) * 1.08)),
-    30,
-    3000,
-  );
-
-  const minTransfers = transferSignals.length > 0 ? Math.min(...transferSignals) : defaultTransfers.fast;
-  const averageTransfers = average(transferSignals);
-  const typicalTransfers = averageTransfers !== undefined ? clamp(Math.round(averageTransfers), 0, 4) : defaultTransfers.value;
-  const higherTransfers = clamp(Math.max(typicalTransfers, minTransfers + 1), 0, 4);
-
-  const extractCoverage = topSources.length > 0
-    ? topSources.filter((source) => !!source.extractedSummary).length / topSources.length
-    : 0;
-  const snippetCoverage = topSources.length > 0
-    ? topSources.filter((source) => !!source.snippet).length / topSources.length
-    : 0;
-
-  const freshnessScore = clamp(0.25 + extractCoverage * 0.5 + snippetCoverage * 0.2, 0.2, 0.98);
-  const confidenceLift = clamp(0.04 + extractCoverage * 0.14 + Math.min(0.08, priceSignals.length * 0.015), 0.04, 0.26);
-
-  const flexibilityScore = keywordScore(
-    joinedEvidence,
-    [/\brefundable\b/i, /\bfree\s+cancell?ation\b/i, /\bflexible\b/i, /\bchange\s+policy\b/i],
-    [/\bnon[-\s]?refundable\b/i, /\bstrict\b/i, /\bno\s+changes\b/i],
-    0.56,
-  );
-
-  const baggageScore = keywordScore(
-    joinedEvidence,
-    [/\bcarry[-\s]?on\s+included\b/i, /\bchecked\s+bag\s+included\b/i, /\bbaggage\s+included\b/i],
-    [/\bbaggage\s+fee\b/i, /\bextra\s+bag(?:gage)?\b/i, /\bno\s+bag(?:gage)?\b/i],
-    0.52,
-  );
-
-  const bookingEaseScore = keywordScore(
-    joinedEvidence,
-    [/\bofficial\s+site\b/i, /\bbook\s+direct\b/i, /\binstant\s+confirmation\b/i],
-    [/\bcoupon\s+code\b/i, /\bpromo\s+code\b/i, /\bcall\s+to\s+book\b/i],
-    0.6,
-  );
-
-  return {
-    cheapestUsd: clamp(lowestPrice, 30, 15000),
-    valueUsd: clamp(medianPrice, 30, 15000),
-    convenientUsd: convenientPrice,
-    cheapestMinutes: slowDuration,
-    valueMinutes: clamp(medianDuration, 30, 3000),
-    convenientMinutes: clamp(shortestDuration, 30, 3000),
-    cheapestTransfers: higherTransfers,
-    valueTransfers: typicalTransfers,
-    convenientTransfers: minTransfers,
-    flexibilityScore,
-    baggageScore,
-    bookingEaseScore,
-    freshnessScore,
-    confidenceLift,
-  };
-}
-
-function sourceTextForSignals(source: SourceEvidence) {
-  return `${source.title} ${source.snippet ?? ""} ${source.extractedSummary ?? ""}`.replace(/\s+/g, " ").trim();
-}
-
-function scoreSourceSignal(source: SourceEvidence): PromotedSourceEvidence {
-  const text = sourceTextForSignals(source);
-  const hasExtractedSummary = !!source.extractedSummary;
-  const hasSnippet = !!source.snippet;
-  const priceSignals = collectUsdPrices(text);
-  const durationSignals = collectDurationMinutes(text);
-  const transferSignals = collectTransferCounts(text);
-  const signalReasons: string[] = [];
-
-  let signalScore = 0.16;
-
-  if (hasExtractedSummary) {
-    signalScore += 0.28;
-    signalReasons.push("extracted_content");
-  }
-  if (hasSnippet) {
-    signalScore += 0.12;
-    signalReasons.push("snippet");
-  }
-  if (priceSignals.length > 0) {
-    signalScore += 0.26;
-    signalReasons.push("price_signal");
-  }
-  if (durationSignals.length > 0) {
-    signalScore += 0.12;
-    signalReasons.push("duration_signal");
-  }
-  if (transferSignals.length > 0) {
-    signalScore += 0.08;
-    signalReasons.push("transfer_signal");
-  }
-
-  if (/official|airline|railway|ticketmaster|carrier|booking/i.test(text)) {
-    signalScore += 0.08;
-    signalReasons.push("official_context");
-  }
-
-  return {
-    ...source,
-    signalScore: clamp(signalScore, 0, 1),
-    signalReasons,
-  };
-}
-
-function promoteSourceEvidence(sources: SourceEvidence[]): PromotedSourceEvidence[] {
-  const scored = sources.map(scoreSourceSignal);
-  scored.sort((a, b) => {
-    if (b.signalScore !== a.signalScore) {
-      return b.signalScore - a.signalScore;
-    }
-    return a.url.localeCompare(b.url);
-  });
-  return scored.slice(0, MAX_PROMOTED_CONTEXT_SOURCES);
-}
-
-function assessResearchQuality(args: {
-  promotedSources: PromotedSourceEvidence[];
-  totalSourceCount: number;
-  round: number;
-}): QualityAssessment {
-  const promoted = args.promotedSources;
-  const promotedText = promoted.map((source) => sourceTextForSignals(source)).join("\n");
-  const numericSignals =
-    collectUsdPrices(promotedText).length
-    + collectDurationMinutes(promotedText).length
-    + collectTransferCounts(promotedText).length;
-  const citationCoverage = args.totalSourceCount > 0 ? promoted.length / args.totalSourceCount : 0;
-  const sourceDiversity = promoted.length / MAX_PROMOTED_CONTEXT_SOURCES;
-  const confidence =
-    promoted.length > 0
-      ? promoted.reduce((sum, source) => sum + source.signalScore, 0) / promoted.length
-      : 0;
-
-  const gaps: QualityGapKey[] = [];
-  if (citationCoverage < 0.45) {
-    gaps.push("citation_coverage");
-  }
-  if (numericSignals < 2) {
-    gaps.push("numeric_evidence");
-  }
-  if (sourceDiversity < 0.5) {
-    gaps.push("source_diversity");
-  }
-  if (confidence < 0.58) {
-    gaps.push("confidence");
-  }
-
-  const score = clamp(
-    citationCoverage * 0.32
-      + Math.min(1, numericSignals / 6) * 0.26
-      + sourceDiversity * 0.18
-      + confidence * 0.24,
-    0,
-    1,
-  );
-
-  const continueAllowed = args.round < MAX_RESEARCH_SCAN_ROUNDS;
-  const decision = score < QUALITY_CONTINUE_THRESHOLD && continueAllowed ? "continue" : "finalize";
-
-  const reason =
-    decision === "continue"
-      ? `Quality score ${(score * 100).toFixed(0)} is below threshold ${(QUALITY_CONTINUE_THRESHOLD * 100).toFixed(0)}; continuing targeted scan for: ${gaps.join(", ") || "coverage"}.`
-      : `Quality score ${(score * 100).toFixed(0)} meets threshold or continuation budget exhausted.`;
-
-  return {
-    decision,
-    score,
-    round: args.round,
-    gaps,
-    reason,
-  };
-}
-
-function buildFollowupSearchQuery(baseQuery: string, quality: QualityAssessment) {
-  const gapHints: string[] = [];
-  if (quality.gaps.includes("numeric_evidence")) {
-    gapHints.push("price duration layover");
-  }
-  if (quality.gaps.includes("citation_coverage") || quality.gaps.includes("source_diversity")) {
-    gapHints.push("official booking fare rules");
-  }
-  if (quality.gaps.includes("confidence")) {
-    gapHints.push("latest verified update");
-  }
-
-  if (gapHints.length === 0) {
-    return `${baseQuery} fare rules official booking`;
-  }
-
-  return `${baseQuery} ${gapHints.join(" ")}`;
-}
-
-function buildCandidateDrafts(
-  goal: { prompt: string; domain: string; constraintSummary?: string },
-  sources: SourceEvidence[],
-): CandidateDraft[] {
-  const now = Date.now();
-  const top = sources.slice(0, 4);
-  const sourceUrls = top.map((source) => source.url);
-  const primary = sourceUrls[0];
-  const routeHint = goal.domain === "flight" ? "route and airport alternatives" : "option alternatives";
-  const budget = extractBudgetCeiling(`${goal.prompt} ${goal.constraintSummary ?? ""}`);
-  const baselineBudget = budget ?? (goal.domain === "flight" ? 780 : 460);
-  const evidenceMetrics = deriveCandidateEvidenceMetrics(goal.domain, baselineBudget, top);
-
-  if (top.length === 0) {
-    const pending = verificationTimestamps("needs_live_check", now);
-    return [
-      {
-        category: "cheapest",
-        title: "Lowest-Cost Lead Pending",
-        summary:
-          "No reliable live source links were captured in this run. Re-run search or broaden query constraints before presenting a bookable cheapest option.",
-        confidence: 0.25,
-        verificationStatus: "needs_live_check",
-        estimatedTotalUsd: Math.round(baselineBudget * 0.96),
-        travelMinutes: goal.domain === "flight" ? 760 : 340,
-        transferCount: 2,
-        flexibilityScore: 0.4,
-        baggageScore: 0.3,
-        bookingEaseScore: 0.35,
-        freshnessScore: 0.2,
-        verifiedAt: pending.verifiedAt,
-        recheckAfter: pending.recheckAfter,
-        sourceUrls: [],
-      },
-      {
-        category: "best_value",
-        title: "Best-Value Lead Pending",
-        summary:
-          "Value recommendation is blocked until at least one credible source is available for comparison across total cost and tradeoffs.",
-        confidence: 0.22,
-        verificationStatus: "needs_live_check",
-        estimatedTotalUsd: Math.round(baselineBudget * 1.06),
-        travelMinutes: goal.domain === "flight" ? 690 : 300,
-        transferCount: 1,
-        flexibilityScore: 0.5,
-        baggageScore: 0.45,
-        bookingEaseScore: 0.45,
-        freshnessScore: 0.2,
-        verifiedAt: pending.verifiedAt,
-        recheckAfter: pending.recheckAfter,
-        sourceUrls: [],
-      },
-      {
-        category: "most_convenient",
-        title: "Convenience Lead Pending",
-        summary:
-          "Convenience recommendation needs validated timing and transfer details from live sources before ranking can be trusted.",
-        confidence: 0.2,
-        verificationStatus: "needs_live_check",
-        estimatedTotalUsd: Math.round(baselineBudget * 1.14),
-        travelMinutes: goal.domain === "flight" ? 540 : 230,
-        transferCount: 0,
-        flexibilityScore: 0.44,
-        baggageScore: 0.5,
-        bookingEaseScore: 0.55,
-        freshnessScore: 0.2,
-        verifiedAt: pending.verifiedAt,
-        recheckAfter: pending.recheckAfter,
-        sourceUrls: [],
-      },
-    ];
-  }
-
-  const cheapestVerification = verificationTimestamps("needs_live_check", now);
-  const valueVerification = verificationTimestamps("partially_verified", now);
-  const convenientVerification = verificationTimestamps("needs_live_check", now);
-
-  return [
-    {
-      category: "cheapest",
-      title: "Cheapest Candidate (Web Lead)",
-      summary:
-        "Prioritize the strongest low-cost source first, then verify total payable amount including fees and baggage before booking.",
-      confidence: clamp(0.56 + evidenceMetrics.confidenceLift * 0.6, 0.3, 0.9),
-        verificationStatus: "needs_live_check",
-      estimatedTotalUsd: evidenceMetrics.cheapestUsd,
-      travelMinutes: evidenceMetrics.cheapestMinutes,
-      transferCount: evidenceMetrics.cheapestTransfers,
-      flexibilityScore: clamp(evidenceMetrics.flexibilityScore - 0.08, 0.2, 0.95),
-      baggageScore: clamp(evidenceMetrics.baggageScore - 0.06, 0.2, 0.95),
-      bookingEaseScore: clamp(evidenceMetrics.bookingEaseScore - 0.08, 0.2, 0.95),
-      freshnessScore: evidenceMetrics.freshnessScore,
-      verifiedAt: cheapestVerification.verifiedAt,
-      recheckAfter: cheapestVerification.recheckAfter,
-      primarySourceUrl: primary,
-      sourceUrls,
-    },
-    {
-      category: "best_value",
-      title: "Best Value Candidate (Balanced)",
-      summary: `Balance total price against ${routeHint}, transfer burden, and policy flexibility using the top ranked source set.`,
-      confidence: clamp(0.6 + evidenceMetrics.confidenceLift, 0.32, 0.94),
-      verificationStatus: "partially_verified",
-      estimatedTotalUsd: evidenceMetrics.valueUsd,
-      travelMinutes: evidenceMetrics.valueMinutes,
-      transferCount: evidenceMetrics.valueTransfers,
-      flexibilityScore: evidenceMetrics.flexibilityScore,
-      baggageScore: evidenceMetrics.baggageScore,
-      bookingEaseScore: evidenceMetrics.bookingEaseScore,
-      freshnessScore: clamp(evidenceMetrics.freshnessScore + 0.05, 0.2, 1),
-      verifiedAt: valueVerification.verifiedAt,
-      recheckAfter: valueVerification.recheckAfter,
-      primarySourceUrl: sourceUrls[1] ?? primary,
-      sourceUrls,
-    },
-    {
-      category: "most_convenient",
-      title: "Most Convenient Candidate",
-      summary:
-        "Favor fewer transfers and simpler booking flow while staying within acceptable budget variance from the low-cost candidate.",
-      confidence: clamp(0.54 + evidenceMetrics.confidenceLift * 0.5, 0.3, 0.9),
-      verificationStatus: "needs_live_check",
-      estimatedTotalUsd: evidenceMetrics.convenientUsd,
-      travelMinutes: evidenceMetrics.convenientMinutes,
-      transferCount: evidenceMetrics.convenientTransfers,
-      flexibilityScore: clamp(evidenceMetrics.flexibilityScore - 0.02, 0.2, 0.95),
-      baggageScore: clamp(evidenceMetrics.baggageScore + 0.04, 0.2, 0.95),
-      bookingEaseScore: clamp(evidenceMetrics.bookingEaseScore + 0.12, 0.2, 0.97),
-      freshnessScore: evidenceMetrics.freshnessScore,
-      verifiedAt: convenientVerification.verifiedAt,
-      recheckAfter: convenientVerification.recheckAfter,
-      primarySourceUrl: sourceUrls[2] ?? primary,
-      sourceUrls,
-    },
-  ];
 }
 
 async function upsertFactFromSlot(
@@ -3604,6 +2975,10 @@ export const runJobInternal = internalAction({
           extractedSummary: summarizeExtractedContent(extractedByUrl.get(source.url)),
         }));
         const promotedEvidence = promoteSourceEvidence(sourceEvidence);
+        const branchAnalysis = buildDeterministicBranchAnalysis({
+          promotedSources: promotedEvidence,
+          quality: finalQuality,
+        });
         const synthesisEvidence: SourceEvidence[] =
           promotedEvidence.length > 0
             ? promotedEvidence.map((source) => ({
@@ -3613,6 +2988,16 @@ export const runJobInternal = internalAction({
                 extractedSummary: source.extractedSummary,
               }))
             : sourceEvidence.slice(0, MAX_PROMOTED_CONTEXT_SOURCES);
+
+        if (branchAnalysis.findings.length > 0) {
+          await ctx.runMutation(internal.research.addDialogueEventInternal, {
+            researchJobId: args.researchJobId,
+            actor: "researcher",
+            kind: "context",
+            message: `Validated ${branchAnalysis.findings.length} citation-bound branch finding(s).`,
+            detail: branchAnalysis.qualitySummary,
+          });
+        }
 
         if (promotedEvidence.length > 0) {
           const reasons = promotedEvidence
@@ -3639,14 +3024,16 @@ export const runJobInternal = internalAction({
           });
         }
 
-        const candidateDrafts = buildCandidateDrafts(
-          {
+        const synthesisOutput = buildDeterministicSynthesisOutput({
+          goal: {
             prompt: goal.prompt,
             domain: goal.domain,
             constraintSummary: goal.constraintSummary,
           },
-          synthesisEvidence,
-        );
+          sources: synthesisEvidence,
+          unresolvedGaps: finalQuality.gaps,
+        });
+        const candidateDrafts = synthesisOutput.candidates;
 
         await ctx.runMutation(internal.research.replaceCandidatesInternal, {
           researchJobId: args.researchJobId,
@@ -3694,9 +3081,7 @@ export const runJobInternal = internalAction({
           researchJobId: args.researchJobId,
           taskKey: "synthesize",
           title: "Early shortlist shell",
-          summary: createSynthesisSummary(
-            synthesisEvidence.map((source) => ({ title: source.title, url: source.url })),
-          ),
+          summary: synthesisOutput.shortlistSummary,
           confidence: synthesisEvidence.length > 0 ? 0.66 : 0.42,
           sourceType: synthesisEvidence.length > 0 ? "web" : "simulated",
         });

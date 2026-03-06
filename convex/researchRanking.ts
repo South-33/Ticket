@@ -1,20 +1,4 @@
-type CandidateForRanking = {
-  category: "cheapest" | "best_value" | "most_convenient";
-  title: string;
-  summary: string;
-  confidence: number;
-  verificationStatus: "needs_live_check" | "partially_verified" | "verified";
-  estimatedTotalUsd: number;
-  travelMinutes: number;
-  transferCount: number;
-  flexibilityScore: number;
-  baggageScore: number;
-  bookingEaseScore: number;
-  freshnessScore: number;
-  verifiedAt?: number;
-  recheckAfter: number;
-  sourceUrls: string[];
-};
+import type { CandidateDraft } from "./researchTypes";
 
 type RankedResultDraft = {
   category: "cheapest" | "best_value" | "most_convenient";
@@ -45,7 +29,7 @@ function inverseNormalized(value: number, band: NumericBand) {
   return clamp01(1 - normalized);
 }
 
-function verificationBonus(status: CandidateForRanking["verificationStatus"]) {
+function verificationBonus(status: CandidateDraft["verificationStatus"]) {
   if (status === "verified") {
     return 0.12;
   }
@@ -61,7 +45,7 @@ function toBand(values: number[]): NumericBand {
   return { min, max };
 }
 
-export function buildRankedResultsFromCandidates(candidates: CandidateForRanking[]): RankedResultDraft[] {
+export function buildRankedResultsFromCandidates(candidates: CandidateDraft[]): RankedResultDraft[] {
   if (candidates.length === 0) {
     return [];
   }
