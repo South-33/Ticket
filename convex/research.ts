@@ -36,7 +36,6 @@ import {
 } from "./researchContracts";
 import {
   MAX_PROMOTED_CONTEXT_SOURCES,
-  QUALITY_CONTINUE_THRESHOLD,
   assessResearchQuality,
   buildDeterministicBranchAnalysis,
   buildFollowupSearchQuery,
@@ -48,6 +47,7 @@ import {
 import { buildRankedResultsFromCandidates } from "./researchRanking";
 import { buildDeterministicSynthesisOutput } from "./researchSynthesis";
 import type { CandidateDraft, SourceEvidence } from "./researchTypes";
+import { verifyShortlist } from "./researchVerification";
 import { getAuthUserIdOrThrow } from "./auth";
 
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "expired"]);
@@ -2734,11 +2734,18 @@ export const runJobInternal = internalAction({
           snippet: result.snippet,
           extractedSummary: summarizeExtractedContent(extractedByUrl.get(result.url)),
         }));
+        const canClarifyFlexibility =
+          goal.domain === "flight"
+          && hasProvidedGoalSlot(goalSlots, "departureDate")
+          && hasProvidedGoalSlot(goalSlots, "destination")
+          && !hasProvidedGoalSlot(goalSlots, "flexibilityLevel");
         const promotedFirstRound = promoteSourceEvidence(firstRoundEvidence);
         const roundOneQuality = assessResearchQuality({
           promotedSources: promotedFirstRound,
           totalSourceCount: webResults.length,
           round: 1,
+          domain: goal.domain,
+          canClarifyFlexibility,
         });
         let finalQuality = roundOneQuality;
 
@@ -2809,6 +2816,9 @@ export const runJobInternal = internalAction({
             promotedSources: promotedSecondRound,
             totalSourceCount: webResults.length,
             round: 2,
+            previousQuality: roundOneQuality,
+            domain: goal.domain,
+            canClarifyFlexibility,
           });
           finalQuality = roundTwoQuality;
 
@@ -2894,16 +2904,7 @@ export const runJobInternal = internalAction({
         });
         activeTaskKey = undefined;
 
-        const shouldRequestFlexibilityClarification =
-          goal.domain === "flight"
-          && webResults.length > 0
-          && finalQuality.score < QUALITY_CONTINUE_THRESHOLD
-          && finalQuality.gaps.includes("numeric_evidence")
-          && hasProvidedGoalSlot(goalSlots, "departureDate")
-          && hasProvidedGoalSlot(goalSlots, "destination")
-          && !hasProvidedGoalSlot(goalSlots, "flexibilityLevel");
-
-        if (shouldRequestFlexibilityClarification) {
+        if (finalQuality.decision === "clarify" && finalQuality.clarificationKeys.includes("flexibilityLevel")) {
           const clarification = await ctx.runMutation(internal.research.requestUserClarificationInternal, {
             researchJobId: args.researchJobId,
             requestedBy: "researcher",
@@ -2922,8 +2923,8 @@ export const runJobInternal = internalAction({
             researchJobId: args.researchJobId,
             actor: "chatbot",
             kind: "decision",
-            message: "Asked user a clarification to improve price coverage before synthesis.",
-            detail: clarification.askedMessage,
+            message: "Quality assessor requested a clarification to improve price coverage before synthesis.",
+            detail: `${finalQuality.reason} ${clarification.askedMessage}`,
           });
 
           try {
@@ -3103,6 +3104,43 @@ export const runJobInternal = internalAction({
           stage: "Verifying freshness",
           progress: 92,
         });
+
+        const verificationResult = verifyShortlist({
+          candidates: candidateDrafts,
+          rankedResults: ranked,
+          sources: sourceDocs.map((source) => ({
+            url: source.url,
+            title: source.title,
+            snippet: source.snippet,
+            provider: source.provider,
+            createdAt: source.createdAt,
+          })),
+          extractedByUrl,
+        });
+
+        await ctx.runMutation(internal.research.replaceCandidatesInternal, {
+          researchJobId: args.researchJobId,
+          candidates: verificationResult.candidates,
+        });
+        await ctx.runMutation(internal.research.replaceRankedResultsInternal, {
+          researchJobId: args.researchJobId,
+          rankedResults: verificationResult.rankedResults,
+        });
+        await ctx.runMutation(internal.research.addFindingInternal, {
+          researchJobId: args.researchJobId,
+          taskKey: "synthesize",
+          title: "Verification sweep completed",
+          summary: verificationResult.summary,
+          confidence: verificationResult.verificationConfidence,
+          sourceType: "api",
+        });
+        await ctx.runMutation(internal.research.addDialogueEventInternal, {
+          researchJobId: args.researchJobId,
+          actor: "researcher",
+          kind: "quality",
+          message: "Verifier checked shortlist citation coverage and freshness.",
+          detail: `citation_coverage=${verificationResult.citationCoverage.toFixed(2)}; blocked=${verificationResult.blockedCategories.join(",") || "none"}`,
+        });
         await sleep(200);
 
         await ctx.runMutation(internal.research.patchJobInternal, {
@@ -3120,7 +3158,7 @@ export const runJobInternal = internalAction({
           actor: "researcher",
           kind: "decision",
           message: "Research run completed and shortlist is ready.",
-          detail: `candidates=${candidateDrafts.length}; ranked=${ranked.length}`,
+          detail: `candidates=${verificationResult.candidates.length}; ranked=${verificationResult.rankedResults.length}`,
         });
 
         return null;

@@ -560,6 +560,8 @@ When this section conflicts with older sections, this section wins.
 - [x] Planner stage now supports an LLM planner contract (structured JSON + repair attempts) with deterministic fallback when model output is unavailable/invalid.
 - [x] Ranking stage now supports LLM prioritization with schema validation/repair and deterministic fallback.
 - [x] Research stage contracts are now split into dedicated modules (`researchContracts`, `researchTypes`, `researchEvidence`, `researchSynthesis`) so orchestration can evolve without duplicating schemas/types.
+- [x] Deterministic quality assessor now scores completeness/depth/reliability/actionability and can `continue`, `clarify`, or `finalize` with diminishing-returns logic as the pre-LLM baseline.
+- [x] Deterministic verifier now rechecks candidate/ranked citation coverage and freshness before completion, downgrading unsupported leads to `needs_live_check`.
 - [ ] LLM planner/executor/synthesizer runtime is not complete yet (current execution is still largely deterministic retrieval/scoring).
 - [ ] End-to-end verifier-gated ranking quality checks are not complete yet (LLM ranking exists, but guardrail depth is still expanding).
 - [ ] Researcher-to-chatbot clarification tooling and pause/resume handshake is not complete yet.

@@ -1,8 +1,8 @@
 import { describe, expect, test } from "vitest";
 import {
+  assessResearchQuality,
   buildDeterministicBranchAnalysis,
   promoteSourceEvidence,
-  assessResearchQuality,
 } from "./researchEvidence";
 import { validateBranchAnalysisOutput, validateSynthesisOutput } from "./researchContracts";
 import { buildDeterministicSynthesisOutput } from "./researchSynthesis";
@@ -128,5 +128,78 @@ describe("research contracts", () => {
       "best_value",
       "most_convenient",
     ]);
+  });
+
+  test("assessResearchQuality requests clarification when quality stalls on flight pricing", () => {
+    const promotedSources = promoteSourceEvidence([
+      {
+        title: "OTA fare",
+        url: "https://example.com/ota",
+        snippet: "Flight deal with one stop and baggage details pending.",
+      },
+      {
+        title: "Blog mention",
+        url: "https://example.com/blog",
+        snippet: "General route ideas but no exact prices yet.",
+      },
+    ]);
+
+    const roundOne = assessResearchQuality({
+      promotedSources,
+      totalSourceCount: 4,
+      round: 1,
+      domain: "flight",
+      canClarifyFlexibility: true,
+    });
+    const roundTwo = assessResearchQuality({
+      promotedSources,
+      totalSourceCount: 4,
+      round: 2,
+      previousQuality: roundOne,
+      domain: "flight",
+      canClarifyFlexibility: true,
+    });
+
+    expect(roundTwo.decision).toBe("clarify");
+    expect(roundTwo.terminationReason).toBe("needs_user_input");
+    expect(roundTwo.clarificationKeys).toEqual(["flexibilityLevel"]);
+  });
+
+  test("assessResearchQuality finalizes on diminishing returns", () => {
+    const promotedSources = promoteSourceEvidence([
+      {
+        title: "Carrier page",
+        url: "https://example.com/carrier",
+        snippet: "Official route page with general schedule info.",
+        extractedSummary: "Official route page with general schedule info and no exact fare numbers.",
+      },
+    ]);
+
+    const result = assessResearchQuality({
+      promotedSources,
+      totalSourceCount: 3,
+      round: 2,
+      previousQuality: {
+        decision: "continue",
+        terminationReason: "budget_limit",
+        score: 0.48,
+        round: 1,
+        gaps: ["numeric_evidence"],
+        dimensions: {
+          completeness: 0.48,
+          depth: 0.3,
+          reliability: 0.55,
+          actionability: 0.35,
+        },
+        improvementFromPrevious: undefined,
+        clarificationKeys: [],
+        reason: "Round one baseline.",
+      },
+      domain: "flight",
+      canClarifyFlexibility: false,
+    });
+
+    expect(result.decision).toBe("finalize");
+    expect(result.terminationReason).toBe("diminishing_returns");
   });
 });

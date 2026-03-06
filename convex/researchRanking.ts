@@ -1,16 +1,4 @@
-import type { CandidateDraft } from "./researchTypes";
-
-type RankedResultDraft = {
-  category: "cheapest" | "best_value" | "most_convenient";
-  rank: number;
-  score: number;
-  title: string;
-  rationale: string;
-  verificationStatus: "needs_live_check" | "partially_verified" | "verified";
-  verifiedAt?: number;
-  recheckAfter: number;
-  sourceUrls: string[];
-};
+import type { CandidateDraft, RankedResultDraft } from "./researchTypes";
 
 type NumericBand = {
   min: number;

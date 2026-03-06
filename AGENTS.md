@@ -19,6 +19,8 @@ An AI-powered travel & ticket search agent that acts like a conversational assis
 - CI quirk: placeholder Clerk publishable keys (e.g. `pk_test_ci_placeholder`) can break Next.js prerender for auth-wrapped layouts.
 - Memory snapshots are deduped by markdown and capped to latest 40 per user.
 - Research pipeline contracts/types now live in `convex/researchContracts.ts`, `convex/researchTypes.ts`, `convex/researchEvidence.ts`, and `convex/researchSynthesis.ts`; keep `convex/research.ts` orchestration-focused to avoid type/schema drift.
+- Deterministic shortlist verification lives in `convex/researchVerification.ts`; downgrade unsupported leads there instead of sprinkling ad hoc verification checks through orchestration.
+- GPT Researcher shipped deep research is mostly fixed breadth/depth recursion; its smarter adaptive continue/stop logic lives in `docs/proposals/adaptive-deep-research.md`, so use that RFC as the strategy reference rather than copying the current runtime literally.
 - Styling is split by concern via `src/app/globals.css` imports (`styles/base.css`, `styles/chat.css`, `styles/knowledge-admin.css`, `styles/clerk.css`); keep chat/admin/clerk edits in those files instead of re-growing one monolithic stylesheet, and avoid over-fragmenting beyond this set unless a file becomes genuinely hard to navigate.
 - Streaming markdown in chat/reasoning should go through `src/components/markdown-renderer.tsx`; avoid CSS rules that flatten streamed block elements (`ul/ol/pre`) to inline or list markers disappear until streaming ends.
 - Chat scroll uses a feed-end anchor (`IntersectionObserver`) plus Lenis follow calls; keep one scroll authority and block non-essential follow updates during thread-switch reveal transitions.

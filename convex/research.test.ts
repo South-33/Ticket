@@ -245,19 +245,13 @@ describe("research pipeline", () => {
       expect(latest?.candidates[0]?.estimatedTotalUsd).toBeGreaterThan(0);
       expect(latest?.candidates[0]?.recheckAfter).toBeGreaterThan(0);
       expect(latest?.rankedResults[0]?.recheckAfter).toBeGreaterThan(0);
-      expect(
-        latest?.findings.some(
-          (finding: { title: string }) => finding.title === "Content extraction pass completed",
-        ),
-      ).toBe(true);
-
       const persisted = await t.run(async (ctx) => {
         const job = await ctx.db.get("researchJobs", researchJobId);
         const findings = await ctx.db
           .query("findings")
           .withIndex("by_job_createdAt", (q) => q.eq("jobId", researchJobId))
           .order("asc")
-          .take(10);
+          .take(20);
         const sources = await ctx.db
           .query("sources")
           .withIndex("by_job_rank", (q) => q.eq("jobId", researchJobId))
@@ -278,17 +272,27 @@ describe("research pipeline", () => {
           .withIndex("by_job_createdAt", (q) => q.eq("jobId", researchJobId))
           .order("asc")
           .take(20);
-        return { job, findings, sources, candidates, rankedResults, stageEvents };
+        const dialogueEvents = await ctx.db
+          .query("researchDialogueEvents")
+          .withIndex("by_job_createdAt", (q) => q.eq("jobId", researchJobId))
+          .order("asc")
+          .take(20);
+        return { job, findings, sources, candidates, rankedResults, stageEvents, dialogueEvents };
       });
 
       expect(persisted.job?.status).toBe("completed");
       expect(persisted.findings.length).toBeGreaterThanOrEqual(3);
       expect(persisted.findings.some((finding) => finding.sourceType === "web")).toBe(true);
+      expect(persisted.findings.some((finding) => finding.title === "Content extraction pass completed")).toBe(true);
+      expect(persisted.findings.some((finding) => finding.title === "Verification sweep completed")).toBe(true);
       expect(persisted.sources).toHaveLength(2);
       expect(persisted.sources[0]?.provider).toBe("tavily");
       expect(persisted.candidates).toHaveLength(3);
       expect(persisted.rankedResults).toHaveLength(3);
       expect(persisted.stageEvents.length).toBeGreaterThanOrEqual(5);
+      expect(
+        persisted.dialogueEvents.some((event) => event.message.includes("Verifier checked shortlist citation coverage and freshness")),
+      ).toBe(true);
       expect(persisted.stageEvents[0]?.status).toBe("running");
       expect(persisted.stageEvents.at(-1)?.status).toBe("completed");
     } finally {
@@ -802,8 +806,12 @@ describe("research pipeline", () => {
       expect(latest?.sources).toHaveLength(0);
       expect(latest?.candidates).toHaveLength(3);
       expect(latest?.rankedResults).toHaveLength(3);
+      expect(latest?.candidates.every((candidate) => candidate.verificationStatus === "needs_live_check")).toBe(true);
       expect(
         latest?.findings.some((finding: { title: string }) => finding.title === "Tavily scan fallback used"),
+      ).toBe(true);
+      expect(
+        latest?.findings.some((finding: { title: string }) => finding.title === "Verification sweep completed"),
       ).toBe(true);
     } finally {
       if (priorApiKey === undefined) {

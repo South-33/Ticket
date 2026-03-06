@@ -1,4 +1,8 @@
-import { validateBranchAnalysisOutput, type BranchAnalysisOutput } from "./researchContracts";
+import {
+  validateBranchAnalysisOutput,
+  validateQualityAssessmentOutput,
+  type BranchAnalysisOutput,
+} from "./researchContracts";
 import type {
   PromotedSourceEvidence,
   QualityAssessment,
@@ -187,6 +191,9 @@ export function assessResearchQuality(args: {
   promotedSources: PromotedSourceEvidence[];
   totalSourceCount: number;
   round: number;
+  previousQuality?: QualityAssessment;
+  domain?: string;
+  canClarifyFlexibility?: boolean;
 }): QualityAssessment {
   const promoted = args.promotedSources;
   const promotedText = promoted.map((source) => sourceTextForSignals(source)).join("\n");
@@ -200,6 +207,17 @@ export function assessResearchQuality(args: {
     promoted.length > 0
       ? promoted.reduce((sum, source) => sum + source.signalScore, 0) / promoted.length
       : 0;
+  const officialCoverage = promoted.length > 0
+    ? promoted.filter((source) => source.signalReasons.includes("official_context")).length / promoted.length
+    : 0;
+  const extractCoverage = promoted.length > 0
+    ? promoted.filter((source) => source.signalReasons.includes("extracted_content")).length / promoted.length
+    : 0;
+
+  const completeness = clamp(citationCoverage * 0.7 + sourceDiversity * 0.3, 0, 1);
+  const depth = clamp(Math.min(1, numericSignals / 6) * 0.75 + extractCoverage * 0.25, 0, 1);
+  const reliability = clamp(confidence * 0.75 + officialCoverage * 0.25, 0, 1);
+  const actionability = clamp(Math.min(1, numericSignals / 5) * 0.55 + officialCoverage * 0.25 + extractCoverage * 0.2, 0, 1);
 
   const gaps: QualityGapKey[] = [];
   if (citationCoverage < 0.45) {
@@ -216,29 +234,73 @@ export function assessResearchQuality(args: {
   }
 
   const score = clamp(
-    citationCoverage * 0.32
-      + Math.min(1, numericSignals / 6) * 0.26
-      + sourceDiversity * 0.18
-      + confidence * 0.24,
+    completeness * 0.28
+      + depth * 0.27
+      + reliability * 0.25
+      + actionability * 0.2,
     0,
     1,
   );
 
   const continueAllowed = args.round < MAX_RESEARCH_SCAN_ROUNDS;
-  const decision = score < QUALITY_CONTINUE_THRESHOLD && continueAllowed ? "continue" : "finalize";
+  const improvementFromPrevious = args.previousQuality
+    ? Number((score - args.previousQuality.score).toFixed(3))
+    : undefined;
+  const diminishingReturns = improvementFromPrevious !== undefined && improvementFromPrevious < 0.08;
+  const clarificationKeys: string[] = [];
+  const shouldClarifyFlexibility =
+    args.domain === "flight"
+    && args.canClarifyFlexibility === true
+    && args.round >= 2
+    && gaps.includes("numeric_evidence");
+  if (shouldClarifyFlexibility) {
+    clarificationKeys.push("flexibilityLevel");
+  }
 
-  const reason =
-    decision === "continue"
-      ? `Quality score ${(score * 100).toFixed(0)} is below threshold ${(QUALITY_CONTINUE_THRESHOLD * 100).toFixed(0)}; continuing targeted scan for: ${gaps.join(", ") || "coverage"}.`
-      : `Quality score ${(score * 100).toFixed(0)} meets threshold or continuation budget exhausted.`;
+  let decision: QualityAssessment["decision"] = "finalize";
+  let terminationReason: QualityAssessment["terminationReason"] = "quality_met";
 
-  return {
+  if (clarificationKeys.length > 0) {
+    decision = "clarify";
+    terminationReason = "needs_user_input";
+  } else if (score < QUALITY_CONTINUE_THRESHOLD && diminishingReturns) {
+    decision = "finalize";
+    terminationReason = "diminishing_returns";
+  } else if (score < QUALITY_CONTINUE_THRESHOLD && continueAllowed && !diminishingReturns) {
+    decision = "continue";
+    terminationReason = "budget_limit";
+  } else if (score < QUALITY_CONTINUE_THRESHOLD && !continueAllowed) {
+    decision = "finalize";
+    terminationReason = "budget_limit";
+  }
+
+  let reason = `Quality score ${(score * 100).toFixed(0)} meets threshold with ${gaps.length === 0 ? "no critical gaps" : `remaining gaps: ${gaps.join(", ")}`}.`;
+  if (decision === "continue") {
+    reason = `Quality score ${(score * 100).toFixed(0)} is below threshold ${(QUALITY_CONTINUE_THRESHOLD * 100).toFixed(0)}; continue targeted search for: ${gaps.join(", ") || "coverage"}.`;
+  } else if (decision === "clarify") {
+    reason = `Quality score ${(score * 100).toFixed(0)} is still weak after the current scan budget; ask the user for ${clarificationKeys.join(", ")} before another search pass.`;
+  } else if (terminationReason === "diminishing_returns") {
+    reason = `Quality only improved by ${Math.round((improvementFromPrevious ?? 0) * 100)} points, so another broad scan is unlikely to help.`;
+  } else if (terminationReason === "budget_limit") {
+    reason = `Quality score ${(score * 100).toFixed(0)} stayed below threshold, but the current continuation budget is exhausted.`;
+  }
+
+  return validateQualityAssessmentOutput({
     decision,
+    terminationReason,
     score,
     round: args.round,
     gaps,
+    dimensions: {
+      completeness,
+      depth,
+      reliability,
+      actionability,
+    },
+    improvementFromPrevious,
+    clarificationKeys,
     reason,
-  };
+  });
 }
 
 export function buildFollowupSearchQuery(baseQuery: string, quality: QualityAssessment) {
