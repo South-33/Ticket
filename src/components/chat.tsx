@@ -1000,16 +1000,27 @@ function formatSkillLabel(value: string) {
   return value.replaceAll("_", " ").trim();
 }
 
+function isEvaluationThreadTitle(value: string | null | undefined) {
+  if (!value) {
+    return false;
+  }
+  return /^\s*(?:\[(?:test|eval|smoke)\]|(?:test|eval|smoke)\s*:|(?:test|eval|smoke)\b)/i.test(value);
+}
+
 function ResearchStatusPanel({
   latestResearchJob,
   stageEvents,
   isResearchActive,
   onRecheckNow,
+  activeThreadTitle,
+  showTestChecklist,
 }: {
   latestResearchJob: ResearchJobView;
   stageEvents: ResearchStageEventView[];
   isResearchActive: boolean;
   onRecheckNow: () => Promise<void>;
+  activeThreadTitle?: string;
+  showTestChecklist: boolean;
 }) {
   return (
     <section className="research-status" aria-live="polite">
@@ -1017,6 +1028,18 @@ function ResearchStatusPanel({
         <span>Research Pipeline</span>
         <span>{latestResearchJob.stage}</span>
       </div>
+      {activeThreadTitle ? <div className="research-status-thread-title">{activeThreadTitle}</div> : null}
+      {showTestChecklist && (
+        <div className="research-test-banner">
+          <div className="research-test-banner-head">Test Run Checklist</div>
+          <div className="research-test-banner-grid">
+            <span>Dedicated test account</span>
+            <span>Fresh thread per prompt</span>
+            <span>Same prompt in both systems</span>
+            <span>Check fallback and freshness</span>
+          </div>
+        </div>
+      )}
       <div className="research-status-progress-track">
         <div
           className="research-status-progress-fill"
@@ -1102,6 +1125,26 @@ function ResearchStatusPanel({
         </div>
       )}
       {latestResearchJob.error && <p className="research-status-error">{latestResearchJob.error}</p>}
+      {isResearchActive && latestResearchJob.sources.length === 0 && latestResearchJob.rankedResults.length === 0 && (
+        <p className="research-status-empty">
+          Live evidence is still loading. Follow stage events and runtime signals to see whether the run is searching,
+          waiting for clarification, or falling back.
+        </p>
+      )}
+      {!isResearchActive && latestResearchJob.status === "failed" && (
+        <p className="research-status-empty">
+          This run failed after retries. Check the error code, recent operator notes, and findings before rerunning.
+        </p>
+      )}
+      {!isResearchActive
+        && latestResearchJob.status === "completed"
+        && latestResearchJob.rankedResults.length === 0
+        && (
+          <p className="research-status-empty">
+            The run completed without a ranked shortlist. Inspect findings and sources to decide whether the issue was
+            search coverage, extraction quality, or ranking confidence.
+          </p>
+        )}
       {!isResearchActive && latestResearchJob.status !== "awaiting_input" && (
         <button className="research-status-recheck" type="button" onClick={() => void onRecheckNow()}>
           Recheck Live Data
@@ -1170,6 +1213,14 @@ function ResearchStatusPanel({
                 <span>{Math.round(candidate.confidence * 100)}%</span>
               </div>
               <h4>{candidate.title}</h4>
+              <div className="research-result-chips">
+                <span className="research-result-chip">{candidate.verificationStatus.replaceAll("_", " ")}</span>
+                <span className="research-result-chip">{freshnessLabel(candidate.recheckAfter)}</span>
+                <span className="research-result-chip">{candidate.sourceUrls.length} source(s)</span>
+                {latestResearchJob.runtimeSignals.fallbackActive && (
+                  <span className="research-result-chip is-warning">fallback path</span>
+                )}
+              </div>
               <p>{candidate.summary}</p>
               <p className="research-candidate-metrics">
                 ${candidate.estimatedTotalUsd} total - {candidate.travelMinutes}m - {candidate.transferCount} transfer(s)
@@ -1194,9 +1245,15 @@ function ResearchStatusPanel({
                 #{result.rank} {toCandidateLabel(result.category)} - {result.score}
               </div>
               <p>{result.title}</p>
+              <div className="research-result-chips">
+                <span className="research-result-chip">{result.verificationStatus.replaceAll("_", " ")}</span>
+                <span className="research-result-chip">{freshnessLabel(result.recheckAfter)}</span>
+                <span className="research-result-chip">{result.sourceUrls.length} source(s)</span>
+                {latestResearchJob.runtimeSignals.fallbackActive && (
+                  <span className="research-result-chip is-warning">fallback path</span>
+                )}
+              </div>
               <small>{result.rationale}</small>
-              <small>{result.verificationStatus.replaceAll("_", " ")}</small>
-              <small>freshness: {freshnessLabel(result.recheckAfter)}</small>
             </article>
           ))}
         </div>
@@ -1986,6 +2043,11 @@ function AuthenticatedChat() {
   }, [threads, sidebarHistoryCacheKey]);
 
   const sidebarThreads = threads ?? cachedSidebarThreads;
+  const activeThreadSummary = useMemo(
+    () => sidebarThreads.find((thread) => thread.threadId === activeThreadId) ?? null,
+    [activeThreadId, sidebarThreads],
+  );
+  const showTestChecklist = isEvaluationThreadTitle(activeThreadSummary?.title ?? null);
 
   const clearVariantSwapTimers = useCallback(() => {
     if (latestResponseVariantSwapOutTimerRef.current !== null) {
@@ -2089,6 +2151,13 @@ function AuthenticatedChat() {
   const startNew = useCallback(() => {
     switchThread(null, true);
   }, [switchThread]);
+
+  const startNewTest = useCallback(async () => {
+    const created = await createThread({
+      title: "TEST: Flight Live Run",
+    });
+    switchThread(created.threadId, false);
+  }, [createThread, switchThread]);
 
   const activeThreadIdForMessages = isAuthenticated ? activeThreadId : null;
 
@@ -3212,6 +3281,8 @@ function AuthenticatedChat() {
       stageEvents={stageEvents}
       isResearchActive={isResearchActive}
       onRecheckNow={handleRecheckNow}
+      activeThreadTitle={activeThreadSummary?.title}
+      showTestChecklist={showTestChecklist}
     />
   ) : null;
 
@@ -3356,6 +3427,10 @@ function AuthenticatedChat() {
           <button className="new-chat-btn" onClick={startNew}>
             <span>New Session</span>
             <span>[+]</span>
+          </button>
+          <button className="new-test-btn" onClick={() => void startNewTest()}>
+            <span>New Test Session</span>
+            <span>[flight]</span>
           </button>
 
           <div className="nav-section-title">Context History</div>

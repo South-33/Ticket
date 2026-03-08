@@ -76,6 +76,7 @@ Readiness rules:
 
 - Use one dedicated Clerk/test user for all live-flight runs.
 - Start one fresh chat thread per prompt so each run is attributable and replayable.
+- Prefer the in-app `New Test Session` button for live batches; it creates a `TEST:` thread and shows the compact checklist banner in the research panel.
 - Keep `GOOGLE_GENERATIVE_AI_API_KEY`, `TAVILY_API_KEY`, and `LLM_RESEARCH_PIPELINE_V1=1` enabled for normal runs.
 - Run at least one manual `Recheck Live Data` after a completed job to confirm the recheck path works.
 - If you intentionally remove a provider key for a degraded-path check, restore it before the main batch.

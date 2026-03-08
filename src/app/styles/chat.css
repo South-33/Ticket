@@ -588,6 +588,30 @@
   cursor: not-allowed;
 }
 
+.new-test-btn {
+  margin-top: -1.2rem;
+  margin-bottom: 1.4rem;
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px dashed var(--border-color);
+  background: color-mix(in oklab, var(--bg-color) 93%, #ffffff 7%);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: color 180ms ease, border-color 180ms ease, background 180ms ease;
+}
+
+.new-test-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--text-primary);
+  background: color-mix(in oklab, var(--bg-color) 87%, #ffffff 13%);
+}
+
 .nav-section-title {
   font-size: 0.65rem;
   color: var(--text-secondary);
@@ -824,6 +848,44 @@
   margin-top: 0.45rem;
 }
 
+.research-status-thread-title {
+  margin-bottom: 0.55rem;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+}
+
+.research-test-banner {
+  margin-bottom: 0.7rem;
+  border: 1px dashed var(--border-color);
+  background: color-mix(in oklab, var(--bg-color) 93%, #ffffff 7%);
+  padding: 0.55rem 0.65rem;
+}
+
+.research-test-banner-head {
+  font-size: 0.63rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  margin-bottom: 0.35rem;
+}
+
+.research-test-banner-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.research-test-banner-grid span {
+  border: 1px solid var(--border-color);
+  padding: 0.22rem 0.38rem;
+  font-size: 0.64rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-primary);
+}
+
 .research-status-operator-meta {
   margin-top: 0.5rem;
   display: flex;
@@ -852,6 +914,13 @@
   margin-top: 0.6rem;
   color: #9a3b2f;
   font-size: 0.75rem;
+}
+
+.research-status-empty {
+  margin-top: 0.6rem;
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  line-height: 1.45;
 }
 
 .research-status-runtime {
@@ -1092,6 +1161,27 @@
 .research-candidate h4 {
   font-size: 0.84rem;
   margin-bottom: 0.2rem;
+}
+
+.research-result-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.35rem;
+}
+
+.research-result-chip {
+  border: 1px solid var(--border-color);
+  padding: 0.18rem 0.34rem;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-secondary);
+}
+
+.research-result-chip.is-warning {
+  border-color: rgba(154, 59, 47, 0.35);
+  color: #9a3b2f;
 }
 
 .research-candidate p {
@@ -2151,6 +2241,11 @@ textarea::placeholder {
 
   .new-chat-btn {
     margin-bottom: 0.5rem;
+  }
+
+  .new-test-btn {
+    margin-top: 0;
+    margin-bottom: 0.75rem;
   }
 
   .history-list {
