@@ -19,14 +19,20 @@ import {
   type SearchLead,
 } from "./researchProvider";
 import {
+  canonicalizeSlotMap,
   buildFollowUpQuestion,
   detectDomain,
   detectMode,
+  extractProfileSeedSlots,
   extractSlotsFromPrompt,
   mergeSlots,
   missingSlots,
+  normalizeSlotKey,
   requiredSlotsForDomain,
+  slotMapFromGoalSlots,
   summarizeConstraints,
+  normalizeSlotEntries,
+  type SlotMap,
   type ResearchDomain,
 } from "./researchIntake";
 import {
@@ -405,8 +411,9 @@ function buildDeterministicPlannerOutput(args: {
   domain: ResearchDomain;
   plannerHints: string[];
   constraintSummary?: string;
+  slotMap?: SlotMap;
 }): PlannerOutput {
-  const primaryQuery = buildSearchQuery(args.prompt, args.domain);
+  const primaryQuery = buildSearchQuery(args.prompt, args.domain, args.slotMap);
   const fallbackQuery = `${primaryQuery} official fares baggage rules`.slice(0, 220);
   const hintSubqueries = args.plannerHints
     .slice(0, 2)
@@ -429,7 +436,15 @@ function buildPlannerPrompt(args: {
   domain: ResearchDomain;
   constraintSummary?: string;
   plannerHints: string[];
+  slotMap?: SlotMap;
 }) {
+  const structuredSlots =
+    args.slotMap && Object.keys(args.slotMap).length > 0
+      ? Object.entries(args.slotMap)
+          .map(([key, value]) => `- ${key}: ${value}`)
+          .join("\n")
+      : "- none";
+
   return [
     "You are the research planner for a travel deep-research pipeline.",
     "Return only JSON matching the schema.",
@@ -438,6 +453,8 @@ function buildPlannerPrompt(args: {
     `domain: ${args.domain}`,
     `user_prompt: ${compactText(args.prompt)}`,
     `constraints: ${compactText(args.constraintSummary ?? "none")}`,
+    "structured_slots:",
+    structuredSlots,
     "planner_hints:",
     args.plannerHints.length > 0 ? args.plannerHints.slice(0, 6).map((hint) => `- ${hint}`).join("\n") : "- none",
     "",
@@ -460,6 +477,7 @@ async function generatePlannerPlan(args: {
   domain: ResearchDomain;
   plannerHints: string[];
   constraintSummary?: string;
+  slotMap?: SlotMap;
 }): Promise<PlannerPlanResult> {
   const fallback = buildDeterministicPlannerOutput(args);
   const validationErrors: string[] = [];
@@ -693,22 +711,6 @@ async function generateLlmRanking(args: {
   };
 }
 
-function hasProvidedGoalSlot(
-  slots: Array<{ key: string; value?: string; status: "missing" | "provided" | "confirmed" }>,
-  targetKey: string,
-) {
-  const normalizedTarget = targetKey.trim().toLowerCase();
-  return slots.some((slot) => {
-    if (slot.key.trim().toLowerCase() !== normalizedTarget) {
-      return false;
-    }
-    if (slot.status === "missing") {
-      return false;
-    }
-    return !!slot.value?.trim();
-  });
-}
-
 function buildClarificationPrompt(questions: Array<{ key: string; question: string }>) {
   const ask = questions
     .map((item) => item.question.trim())
@@ -741,21 +743,28 @@ export async function createResearchJobForPrompt(
   const domain = args.domainOverride ?? detectDomain(args.prompt);
   const mode = detectMode(args.prompt);
 
-  const confirmedFacts = await ctx.db
-    .query("userMemoryFacts")
-    .withIndex("by_user_status_updatedAt", (q) => q.eq("userId", args.userId).eq("status", "confirmed"))
-    .order("desc")
-    .take(60);
+  const [confirmedFacts, profile] = await Promise.all([
+    ctx.db
+      .query("userMemoryFacts")
+      .withIndex("by_user_status_updatedAt", (q) => q.eq("userId", args.userId).eq("status", "confirmed"))
+      .order("desc")
+      .take(60),
+    ctx.db.query("userProfiles").withIndex("by_userId", (q) => q.eq("userId", args.userId)).unique(),
+  ]);
 
-  const memorySlots = confirmedFacts.reduce<Record<string, string>>((acc, fact) => {
+  const memorySlots = canonicalizeSlotMap(domain, confirmedFacts.reduce<Record<string, string>>((acc, fact) => {
     if (!acc[fact.key]) {
       acc[fact.key] = fact.value;
     }
     return acc;
-  }, {});
+  }, {}));
 
-  const promptSlots = mergeSlots(extractSlotsFromPrompt(args.prompt, domain), args.criteriaOverrides ?? {});
-  const mergedSlots = mergeSlots(promptSlots, memorySlots);
+  const profileSeedSlots = extractProfileSeedSlots(domain, profile);
+  const promptSlots = canonicalizeSlotMap(
+    domain,
+    mergeSlots(extractSlotsFromPrompt(args.prompt, domain), args.criteriaOverrides ?? {}),
+  );
+  const mergedSlots = mergeSlots(promptSlots, mergeSlots(profileSeedSlots, memorySlots));
   const missingFieldList = missingSlots(domain, mergedSlots);
   const followUpQuestion = buildFollowUpQuestion(domain, missingFieldList);
   const goalStatus = missingFieldList.length > 0 ? "awaiting_input" : "ready";
@@ -771,7 +780,7 @@ export async function createResearchJobForPrompt(
     mode,
     missingFields: missingFieldList,
     followUpQuestion,
-    constraintSummary: summarizeConstraints(mergedSlots),
+    constraintSummary: summarizeConstraints(domain, mergedSlots),
     createdAt: now,
     updatedAt: now,
   });
@@ -899,9 +908,12 @@ export async function continueAwaitingJobForPrompt(
   }
 
   const now = Date.now();
-  const promptSlots = mergeSlots(extractSlotsFromPrompt(args.prompt, goal.domain), args.criteriaOverrides ?? {});
+  const promptSlots = canonicalizeSlotMap(
+    goal.domain,
+    mergeSlots(extractSlotsFromPrompt(args.prompt, goal.domain), args.criteriaOverrides ?? {}),
+  );
 
-  const [allGoalSlots, confirmedFacts] = await Promise.all([
+  const [allGoalSlots, confirmedFacts, profile] = await Promise.all([
     ctx.db
       .query("projectGoalSlots")
       .withIndex("by_goal_key", (q) => q.eq("projectGoalId", goal._id))
@@ -911,9 +923,10 @@ export async function continueAwaitingJobForPrompt(
       .withIndex("by_user_status_updatedAt", (q) => q.eq("userId", args.userId).eq("status", "confirmed"))
       .order("desc")
       .take(60),
+    ctx.db.query("userProfiles").withIndex("by_userId", (q) => q.eq("userId", args.userId)).unique(),
   ]);
 
-  const explicitGoalSlots = allGoalSlots.reduce<Record<string, string>>((acc, slot) => {
+  const explicitGoalSlots = canonicalizeSlotMap(goal.domain, allGoalSlots.reduce<Record<string, string>>((acc, slot) => {
     if (slot.status === "missing") {
       return acc;
     }
@@ -921,16 +934,20 @@ export async function continueAwaitingJobForPrompt(
       acc[slot.key] = slot.value;
     }
     return acc;
-  }, {});
+  }, {}));
 
-  const memorySlots = confirmedFacts.reduce<Record<string, string>>((acc, fact) => {
+  const memorySlots = canonicalizeSlotMap(goal.domain, confirmedFacts.reduce<Record<string, string>>((acc, fact) => {
     if (!acc[fact.key]) {
       acc[fact.key] = fact.value;
     }
     return acc;
-  }, {});
+  }, {}));
 
-  const mergedSlots = mergeSlots(promptSlots, mergeSlots(explicitGoalSlots, memorySlots));
+  const profileSeedSlots = extractProfileSeedSlots(goal.domain, profile);
+  const mergedSlots = mergeSlots(
+    promptSlots,
+    mergeSlots(explicitGoalSlots, mergeSlots(profileSeedSlots, memorySlots)),
+  );
   const missingFieldList = missingSlots(goal.domain, mergedSlots);
   const followUpQuestion = buildFollowUpQuestion(goal.domain, missingFieldList);
   const goalStatus = missingFieldList.length > 0 ? "awaiting_input" : "ready";
@@ -941,11 +958,14 @@ export async function continueAwaitingJobForPrompt(
       ...requiredSlotsForDomain(goal.domain),
       ...Object.keys(explicitGoalSlots),
       ...Object.keys(memorySlots),
+      ...Object.keys(profileSeedSlots),
       ...Object.keys(promptSlots),
     ]),
   );
 
-  const existingByKey = new Map(allGoalSlots.map((slot) => [slot.key, slot]));
+  const existingByKey = new Map(
+    allGoalSlots.map((slot) => [normalizeSlotKey(goal.domain, slot.key), slot] as const),
+  );
 
   for (const key of trackedSlotKeys) {
     const value = mergedSlots[key];
@@ -973,6 +993,7 @@ export async function continueAwaitingJobForPrompt(
     }
 
     await ctx.db.patch(existing._id, {
+      key,
       value,
       status,
       sourceType,
@@ -1000,7 +1021,7 @@ export async function continueAwaitingJobForPrompt(
     status: goalStatus,
     missingFields: missingFieldList,
     followUpQuestion,
-    constraintSummary: summarizeConstraints(mergedSlots),
+    constraintSummary: summarizeConstraints(goal.domain, mergedSlots),
     updatedAt: now,
   });
 
@@ -1075,9 +1096,13 @@ export const startResearchFromOpsInternal = internalMutation({
     }
 
     const criteriaOverrides = Object.fromEntries(
-      args.criteria
-        .map((entry) => [entry.key.trim(), entry.value.trim()] as const)
-        .filter(([key, value]) => key.length > 0 && value.length > 0),
+      normalizeSlotEntries(
+        args.domain,
+        args.criteria.map((entry) => ({
+          key: entry.key.trim(),
+          value: entry.value.trim(),
+        })),
+      ).map((entry) => [entry.key, entry.value]),
     );
 
     const prompt = buildPromptWithCriteria(args.prompt, criteriaOverrides);
@@ -1136,6 +1161,10 @@ export const requestUserClarificationInternal = internalMutation({
     if (!job) {
       throw new ConvexError("Research job not found");
     }
+    const goal = await ctx.db.get(job.projectGoalId);
+    if (!goal) {
+      throw new ConvexError("Project goal not found");
+    }
 
     if (args.questions.length === 0) {
       throw new ConvexError("At least one clarification question is required");
@@ -1146,7 +1175,7 @@ export const requestUserClarificationInternal = internalMutation({
         args.questions
           .map((question) => ({
             ...question,
-            key: question.key.trim(),
+            key: normalizeSlotKey(goal.domain, question.key),
             question: question.question.trim(),
           }))
           .filter((question) => question.key.length > 0 && question.question.length > 0)
@@ -1252,30 +1281,6 @@ export const submitClarificationAnswerInternal = internalMutation({
       return { accepted: false, resumed: false, missingKeys: [] };
     }
 
-    const now = Date.now();
-    const answersByKey = new Map(
-      args.answers
-        .map((answer) => [answer.key.trim().toLowerCase(), answer.value.trim()] as const)
-        .filter(([key, value]) => key.length > 0 && value.length > 0),
-    );
-
-    const requiredKeys = request.questions.filter((question) => question.required).map((question) => question.key.toLowerCase());
-    const missingKeys = requiredKeys.filter((key) => !answersByKey.get(key));
-    if (missingKeys.length > 0) {
-      await ctx.db.patch(args.requestId, {
-        updatedAt: now,
-      });
-      return { accepted: false, resumed: false, missingKeys };
-    }
-
-    const normalizedAnswers = Array.from(answersByKey.entries()).map(([key, value]) => ({ key, value }));
-    await ctx.db.patch(args.requestId, {
-      status: "answered",
-      answers: normalizedAnswers,
-      answeredAt: now,
-      updatedAt: now,
-    });
-
     const job = await ctx.db.get(request.jobId);
     if (!job) {
       throw new ConvexError("Research job not found");
@@ -1285,16 +1290,49 @@ export const submitClarificationAnswerInternal = internalMutation({
       throw new ConvexError("Project goal not found");
     }
 
+    const now = Date.now();
+    const normalizedAnswers = normalizeSlotEntries(
+      goal.domain,
+      args.answers.map((answer) => ({
+        key: answer.key.trim(),
+        value: answer.value.trim(),
+      })),
+    );
+    const answersByKey = new Map(
+      normalizedAnswers.map((answer) => [answer.key.toLowerCase(), answer.value] as const),
+    );
+
+    const requiredKeys = request.questions
+      .filter((question) => question.required)
+      .map((question) => normalizeSlotKey(goal.domain, question.key).toLowerCase());
+    const missingKeys = requiredKeys.filter((key) => !answersByKey.get(key));
+    if (missingKeys.length > 0) {
+      await ctx.db.patch(args.requestId, {
+        updatedAt: now,
+      });
+      return { accepted: false, resumed: false, missingKeys };
+    }
+
+    await ctx.db.patch(args.requestId, {
+      status: "answered",
+      answers: normalizedAnswers,
+      answeredAt: now,
+      updatedAt: now,
+    });
+
     const existingSlots = await ctx.db
       .query("projectGoalSlots")
       .withIndex("by_goal_key", (q) => q.eq("projectGoalId", goal._id))
       .take(120);
-    const existingByKey = new Map(existingSlots.map((slot) => [slot.key.toLowerCase(), slot]));
+    const existingByKey = new Map(
+      existingSlots.map((slot) => [normalizeSlotKey(goal.domain, slot.key).toLowerCase(), slot] as const),
+    );
 
     for (const answer of normalizedAnswers) {
       const existing = existingByKey.get(answer.key);
       if (existing) {
         await ctx.db.patch(existing._id, {
+          key: answer.key,
           value: answer.value,
           status: "confirmed",
           sourceType: "user_confirmed",
@@ -2566,6 +2604,7 @@ export const runJobInternal = internalAction({
       const goalSlots = await ctx.runQuery(internal.research.listGoalSlotsInternal, {
         projectGoalId: goal._id,
       });
+      const goalSlotMap = slotMapFromGoalSlots(goal.domain, goalSlots);
 
       let activeTaskKey: "plan" | "scan" | "synthesize" | undefined;
 
@@ -2582,6 +2621,7 @@ export const runJobInternal = internalAction({
           domain: goal.domain,
           constraintSummary: goal.constraintSummary,
           plannerHints,
+          slotMap: goalSlotMap,
         });
         const plannerPlan = plannerResult.plan;
 
@@ -2736,9 +2776,9 @@ export const runJobInternal = internalAction({
         }));
         const canClarifyFlexibility =
           goal.domain === "flight"
-          && hasProvidedGoalSlot(goalSlots, "departureDate")
-          && hasProvidedGoalSlot(goalSlots, "destination")
-          && !hasProvidedGoalSlot(goalSlots, "flexibilityLevel");
+          && !!goalSlotMap.departureDate
+          && !!goalSlotMap.destination
+          && !goalSlotMap.flexibilityLevel;
         const promotedFirstRound = promoteSourceEvidence(firstRoundEvidence);
         const roundOneQuality = assessResearchQuality({
           promotedSources: promotedFirstRound,
@@ -3030,6 +3070,7 @@ export const runJobInternal = internalAction({
             prompt: goal.prompt,
             domain: goal.domain,
             constraintSummary: goal.constraintSummary,
+            slotMap: goalSlotMap,
           },
           sources: synthesisEvidence,
           unresolvedGaps: finalQuality.gaps,

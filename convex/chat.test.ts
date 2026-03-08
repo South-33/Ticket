@@ -398,6 +398,8 @@ describe("chat intake flow", () => {
 
     expect(prompt).toContain("treat them as playbook aliases");
     expect(prompt).toContain("analyze the user-provided content directly");
+    expect(prompt).toContain("Optional flight enrichers when available");
+    expect(prompt).toContain("returnDate, passengerCount, cabinClass, nonstopOnly, bags, flexibilityLevel");
   });
 
   test("thread skill packs decrement per user prompt turn", async () => {

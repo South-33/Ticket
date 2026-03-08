@@ -17,7 +17,13 @@ import {
   toPreview,
 } from "./agent";
 import { getAuthUserIdOrThrow } from "./auth";
-import { requiredSlotsForDomain, type ResearchDomain } from "./researchIntake";
+import {
+  normalizeSlotEntries as normalizeResearchSlotEntries,
+  normalizeSlotKey as normalizeResearchSlotKey,
+  optionalSlotsForDomain,
+  requiredSlotsForDomain,
+  type ResearchDomain,
+} from "./researchIntake";
 import { components, internal } from "./_generated/api";
 import {
   internalAction,
@@ -564,6 +570,7 @@ export function buildSystemPrompt(args: {
     `- concert: ${requiredSlotsForDomain("concert").join(", ")}`,
     `- mixed: ${requiredSlotsForDomain("mixed").join(", ")}`,
   ].join("\n");
+  const flightOptionalSummary = optionalSlotsForDomain("flight").join(", ");
 
   return [
     BASE_CHAT_INSTRUCTIONS,
@@ -589,6 +596,7 @@ export function buildSystemPrompt(args: {
     skillCatalogSummary,
     "Research required criteria by domain:",
     requiredByDomainSummary,
+    `Optional flight enrichers when available: ${flightOptionalSummary}`,
     "",
     "Output contract:",
     "- Preferred: plain user-facing response text.",
@@ -624,6 +632,7 @@ export function buildSystemPrompt(args: {
     "- Include SkillOps when loading or refreshing non-general context packs.",
     "- Start research only when criteria are complete and selectedSkills has at least one valid skill slug.",
     "- If required criteria are missing, do not emit ResearchOps; ask the user for only the missing fields.",
+    "- Optional flight enrichers should be added when the user already provided them: returnDate, passengerCount, cabinClass, nonstopOnly, bags, flexibilityLevel.",
     "- Every ResearchOps.start must include at least one selected skill.",
     "- Keep response concise and helpful.",
     "- Include TitleOps only when renaming title.",
@@ -636,10 +645,6 @@ export function buildSystemPrompt(args: {
       ? ["- Important: in this pass, respond directly to the user and do not emit tool tags."]
       : []),
   ].join("\n");
-}
-
-function normalizeSlotKey(value: string) {
-  return value.trim();
 }
 
 function normalizeSkillSlug(value: string) {
@@ -716,13 +721,19 @@ function validateResearchOpsSemantics(args: {
   }
 
   const criteriaMap = new Map<string, string>();
-  for (const entry of args.researchOps.criteria) {
-    criteriaMap.set(normalizeSlotKey(entry.key), entry.value.trim());
+  for (const entry of normalizeResearchSlotEntries(
+    args.researchOps.domain as ResearchDomain,
+    args.researchOps.criteria.map((criterion) => ({
+      key: criterion.key,
+      value: criterion.value,
+    })),
+  )) {
+    criteriaMap.set(entry.key, entry.value.trim());
   }
   for (const fact of args.confirmedFacts) {
-    const key = normalizeSlotKey(fact.key);
-    if (!criteriaMap.has(key)) {
-      criteriaMap.set(key, fact.value);
+    const key = normalizeResearchSlotKey(args.researchOps.domain as ResearchDomain, fact.key);
+    if (!criteriaMap.has(key) && fact.value.trim().length > 0) {
+      criteriaMap.set(key, fact.value.trim());
     }
   }
 

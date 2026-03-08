@@ -879,6 +879,102 @@ describe("research pipeline", () => {
     expect(latest?.missingFields).toHaveLength(0);
   });
 
+  test("stores canonical optional flight slots from aliased research criteria", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+
+    const started = await t.mutation(internal.research.startResearchFromOpsInternal, {
+      userId: DEMO_USER_ID,
+      threadId: "thread-start-ops-optional",
+      promptMessageId: "pm-start-ops-optional",
+      prompt: "Find me flight options to Frankfurt",
+      domain: "flight",
+      selectedSkillSlugs: ["general"],
+      criteria: [
+        { key: "origin", value: "Manila" },
+        { key: "destination", value: "Frankfurt" },
+        { key: "departure_date", value: "2026-08-11" },
+        { key: "passport", value: "Filipino" },
+        { key: "return_date", value: "2026/08/19" },
+        { key: "travellers", value: "2 adults" },
+        { key: "preferredCabin", value: "Business Class" },
+        { key: "direct", value: "yes" },
+        { key: "baggage", value: "checked bag" },
+      ],
+      skillHintsSnapshot: [],
+    });
+
+    const state = await t.run(async (ctx) => {
+      const goal = await ctx.db.get("projectGoals", started.projectGoalId);
+      const slots = await ctx.db
+        .query("projectGoalSlots")
+        .withIndex("by_goal_key", (q) => q.eq("projectGoalId", started.projectGoalId))
+        .take(40);
+      return { goal, slots };
+    });
+
+    const slotMap = Object.fromEntries(
+      state.slots
+        .filter((slot) => slot.status !== "missing" && !!slot.value)
+        .map((slot) => [slot.key, slot.value]),
+    );
+
+    expect(started.jobStatus).toBe("awaiting_input");
+    expect(started.missingFields).toContain("budget");
+    expect(slotMap).toMatchObject({
+      departureDate: "2026-08-11",
+      nationality: "Filipino",
+      returnDate: "2026-08-19",
+      passengerCount: "2",
+      cabinClass: "business",
+      nonstopOnly: "true",
+      bags: "checked",
+    });
+    expect(state.goal?.constraintSummary).toContain("returnDate: 2026-08-19");
+    expect(state.goal?.constraintSummary).toContain("cabinClass: business");
+  });
+
+  test("seeds cabin and flexibility from profile without widening required slots", async () => {
+    const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
+
+    await t.mutation(api.memory.upsertUserProfile, {
+      preferredCabin: "Premium Economy",
+      flexibilityLevel: "strict dates",
+    });
+
+    const started = await t.mutation(internal.research.startResearchFromOpsInternal, {
+      userId: DEMO_USER_ID,
+      threadId: "thread-start-ops-profile-seed",
+      promptMessageId: "pm-start-ops-profile-seed",
+      prompt: "Find me flight options to Frankfurt",
+      domain: "flight",
+      selectedSkillSlugs: ["general"],
+      criteria: [
+        { key: "origin", value: "Manila" },
+        { key: "destination", value: "Frankfurt" },
+        { key: "departureDate", value: "2026-08-11" },
+        { key: "nationality", value: "Filipino" },
+      ],
+      skillHintsSnapshot: [],
+    });
+
+    const slots = await t.run(async (ctx) => {
+      return await ctx.db
+        .query("projectGoalSlots")
+        .withIndex("by_goal_key", (q) => q.eq("projectGoalId", started.projectGoalId))
+        .take(40);
+    });
+    const slotMap = Object.fromEntries(
+      slots
+        .filter((slot) => slot.status !== "missing" && !!slot.value)
+        .map((slot) => [slot.key, slot.value]),
+    );
+
+    expect(started.jobStatus).toBe("awaiting_input");
+    expect(started.missingFields).toContain("budget");
+    expect(slotMap.cabinClass).toBe("premium_economy");
+    expect(slotMap.flexibilityLevel).toBe("strict");
+  });
+
   test("startResearchFromOpsInternal requires at least one selected skill", async () => {
     const t = convexTest(schema, modules).withIdentity(AUTH_IDENTITY);
 
@@ -1026,7 +1122,7 @@ describe("research pipeline", () => {
     expect(state.job?.status).toBe("planned");
     expect(state.job?.blockedByRequestId).toBeUndefined();
     expect(state.slot?.status).toBe("confirmed");
-    expect(state.slot?.value).toBe("yes");
+    expect(state.slot?.value).toBe("flexible");
   });
 
   test("getPendingClarificationForThread returns latest pending request", async () => {
@@ -1057,7 +1153,7 @@ describe("research pipeline", () => {
 
     expect(pending).not.toBeNull();
     expect(pending?.researchJobId).toBe(researchJobId);
-    expect(pending?.questions[0]?.key).toBe("preferredCabin");
+    expect(pending?.questions[0]?.key).toBe("cabinClass");
   });
 
   test("allows manual recheck scheduling for terminal jobs", async () => {

@@ -1,5 +1,6 @@
 import { validateSynthesisOutput, type SynthesisOutput } from "./researchContracts";
 import { clamp, collectDurationMinutes, collectTransferCounts, collectUsdPrices } from "./researchEvidence";
+import type { SlotMap } from "./researchIntake";
 import type { CandidateDraft, SourceEvidence } from "./researchTypes";
 
 type CandidateEvidenceMetrics = {
@@ -17,6 +18,13 @@ type CandidateEvidenceMetrics = {
   bookingEaseScore: number;
   freshnessScore: number;
   confidenceLift: number;
+};
+
+type CandidateGoalContext = {
+  prompt: string;
+  domain: string;
+  constraintSummary?: string;
+  slotMap?: SlotMap;
 };
 
 function extractBudgetCeiling(text: string) {
@@ -180,8 +188,75 @@ function deriveCandidateEvidenceMetrics(
   };
 }
 
+function buildTripContext(slotMap: SlotMap | undefined) {
+  if (!slotMap) {
+    return "";
+  }
+
+  const parts: string[] = [];
+  if (slotMap.returnDate) {
+    parts.push(`Round-trip context includes return ${slotMap.returnDate}.`);
+  }
+  if (slotMap.passengerCount) {
+    parts.push(`Traveler count: ${slotMap.passengerCount}.`);
+  }
+  if (slotMap.cabinClass) {
+    parts.push(`Requested cabin: ${slotMap.cabinClass.replace(/_/g, " ")}.`);
+  }
+
+  return parts.join(" ");
+}
+
+function applyFlightPreferenceAdjustments(
+  goal: CandidateGoalContext,
+  candidate: CandidateDraft,
+): CandidateDraft {
+  if (goal.domain !== "flight") {
+    return candidate;
+  }
+
+  const slotMap = goal.slotMap ?? {};
+  let confidence = candidate.confidence;
+  let baggageScore = candidate.baggageScore;
+  let bookingEaseScore = candidate.bookingEaseScore;
+  let summary = candidate.summary;
+
+  const tripContext = buildTripContext(slotMap);
+  if (tripContext) {
+    summary = `${summary} ${tripContext}`.trim();
+  }
+
+  if (slotMap.cabinClass) {
+    confidence = clamp(confidence - 0.04, 0.2, 0.95);
+    summary = `${summary} Cabin alignment for ${slotMap.cabinClass.replace(/_/g, " ")} is still unverified.`;
+  }
+
+  if (slotMap.nonstopOnly === "true" && candidate.transferCount > 0) {
+    confidence = clamp(confidence - 0.08, 0.2, 0.95);
+    bookingEaseScore = clamp(bookingEaseScore - 0.1, 0.2, 0.97);
+    summary = `${summary} Conflicts with nonstop-only preference: ${candidate.transferCount} transfer${candidate.transferCount === 1 ? "" : "s"}.`;
+  }
+
+  if (slotMap.bags === "checked" && candidate.baggageScore < 0.65) {
+    confidence = clamp(confidence - 0.06, 0.2, 0.95);
+    baggageScore = clamp(baggageScore - 0.12, 0.2, 0.95);
+    summary = `${summary} Checked-bag coverage remains weak; baggage fees still need live verification.`;
+  }
+
+  return {
+    ...candidate,
+    confidence,
+    baggageScore,
+    bookingEaseScore,
+    summary:
+      summary.replace(/\s+/g, " ").trim().length <= 320
+        ? summary.replace(/\s+/g, " ").trim()
+        : `${summary.replace(/\s+/g, " ").trim().slice(0, 317)}...`,
+  };
+}
+
 export function buildCandidateDrafts(
-  goal: { prompt: string; domain: string; constraintSummary?: string },
+  goal: CandidateGoalContext,
   sources: SourceEvidence[],
 ): CandidateDraft[] {
   const now = Date.now();
@@ -196,7 +271,7 @@ export function buildCandidateDrafts(
   if (top.length === 0) {
     const pending = verificationTimestamps("needs_live_check", now);
     return [
-      {
+      applyFlightPreferenceAdjustments(goal, {
         category: "cheapest",
         title: "Lowest-Cost Lead Pending",
         summary:
@@ -213,8 +288,8 @@ export function buildCandidateDrafts(
         verifiedAt: pending.verifiedAt,
         recheckAfter: pending.recheckAfter,
         sourceUrls: [],
-      },
-      {
+      }),
+      applyFlightPreferenceAdjustments(goal, {
         category: "best_value",
         title: "Best-Value Lead Pending",
         summary:
@@ -231,8 +306,8 @@ export function buildCandidateDrafts(
         verifiedAt: pending.verifiedAt,
         recheckAfter: pending.recheckAfter,
         sourceUrls: [],
-      },
-      {
+      }),
+      applyFlightPreferenceAdjustments(goal, {
         category: "most_convenient",
         title: "Convenience Lead Pending",
         summary:
@@ -249,7 +324,7 @@ export function buildCandidateDrafts(
         verifiedAt: pending.verifiedAt,
         recheckAfter: pending.recheckAfter,
         sourceUrls: [],
-      },
+      }),
     ];
   }
 
@@ -258,7 +333,7 @@ export function buildCandidateDrafts(
   const convenientVerification = verificationTimestamps("needs_live_check", now);
 
   return [
-    {
+    applyFlightPreferenceAdjustments(goal, {
       category: "cheapest",
       title: "Cheapest Candidate (Web Lead)",
       summary:
@@ -276,8 +351,8 @@ export function buildCandidateDrafts(
       recheckAfter: cheapestVerification.recheckAfter,
       primarySourceUrl: primary,
       sourceUrls,
-    },
-    {
+    }),
+    applyFlightPreferenceAdjustments(goal, {
       category: "best_value",
       title: "Best Value Candidate (Balanced)",
       summary: `Balance total price against ${routeHint}, transfer burden, and policy flexibility using the top ranked source set.`,
@@ -294,8 +369,8 @@ export function buildCandidateDrafts(
       recheckAfter: valueVerification.recheckAfter,
       primarySourceUrl: sourceUrls[1] ?? primary,
       sourceUrls,
-    },
-    {
+    }),
+    applyFlightPreferenceAdjustments(goal, {
       category: "most_convenient",
       title: "Most Convenient Candidate",
       summary:
@@ -313,12 +388,12 @@ export function buildCandidateDrafts(
       recheckAfter: convenientVerification.recheckAfter,
       primarySourceUrl: sourceUrls[2] ?? primary,
       sourceUrls,
-    },
+    }),
   ];
 }
 
 export function buildDeterministicSynthesisOutput(args: {
-  goal: { prompt: string; domain: string; constraintSummary?: string };
+  goal: CandidateGoalContext;
   sources: SourceEvidence[];
   unresolvedGaps?: string[];
 }): SynthesisOutput {

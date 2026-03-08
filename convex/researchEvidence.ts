@@ -3,6 +3,7 @@ import {
   validateQualityAssessmentOutput,
   type BranchAnalysisOutput,
 } from "./researchContracts";
+import { buildSearchConstraintTerms, type ResearchDomain, type SlotMap } from "./researchIntake";
 import type {
   PromotedSourceEvidence,
   QualityAssessment,
@@ -25,23 +26,29 @@ export function summarizeExtractedContent(value: string | undefined) {
   return compact.slice(0, 260);
 }
 
-export function buildSearchQuery(prompt: string, domain: string) {
+export function buildSearchQuery(prompt: string, domain: string, slotMap?: SlotMap) {
   const base = prompt.trim();
   if (!base) {
     return "best travel deals";
   }
 
+  const constraintTerms = slotMap ? buildSearchConstraintTerms(domain as ResearchDomain, slotMap) : [];
+  const withConstraints =
+    constraintTerms.length > 0
+      ? `${base} ${constraintTerms.join(" ")}`
+      : base;
+
   if (domain === "flight") {
-    return `${base} flight deals promos booking`;
+    return `${withConstraints} flight deals promos booking`;
   }
   if (domain === "concert") {
-    return `${base} concert tickets presale resale deals`;
+    return `${withConstraints} concert tickets presale resale deals`;
   }
   if (domain === "train") {
-    return `${base} train tickets passes discounts`;
+    return `${withConstraints} train tickets passes discounts`;
   }
 
-  return `${base} deals offers`;
+  return `${withConstraints} deals offers`;
 }
 
 export function clamp(value: number, min: number, max: number) {

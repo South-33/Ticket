@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   assessResearchQuality,
+  buildSearchQuery,
   buildDeterministicBranchAnalysis,
   promoteSourceEvidence,
 } from "./researchEvidence";
@@ -104,6 +105,10 @@ describe("research contracts", () => {
         prompt: "Find me a flight from Manila to Frankfurt on 2026-08-11 budget 900",
         domain: "flight",
         constraintSummary: "origin: Manila | destination: Frankfurt | departureDate: 2026-08-11 | budget: 900",
+        slotMap: {
+          returnDate: "2026-08-19",
+          passengerCount: "2",
+        },
       },
       sources: [
         {
@@ -128,6 +133,54 @@ describe("research contracts", () => {
       "best_value",
       "most_convenient",
     ]);
+    expect(output.candidates[0]?.summary).toContain("Round-trip context includes return 2026-08-19.");
+    expect(output.candidates[0]?.summary).toContain("Traveler count: 2.");
+  });
+
+  test("buildSearchQuery appends structured flight constraint terms", () => {
+    const query = buildSearchQuery("Find me fares from Manila to Frankfurt", "flight", {
+      returnDate: "2026-08-19",
+      passengerCount: "2",
+      cabinClass: "business",
+      nonstopOnly: "true",
+      bags: "checked",
+      flexibilityLevel: "flexible",
+    });
+
+    expect(query).toContain("round trip");
+    expect(query).toContain("return 2026-08-19");
+    expect(query).toContain("2 passengers");
+    expect(query).toContain("business class");
+    expect(query).toContain("nonstop");
+    expect(query).toContain("checked bag");
+    expect(query).toContain("flexible dates");
+  });
+
+  test("buildDeterministicSynthesisOutput adds soft caveats for nonstop and checked bags", () => {
+    const output = buildDeterministicSynthesisOutput({
+      goal: {
+        prompt: "Find me a flight from Manila to Frankfurt on 2026-08-11 budget 900",
+        domain: "flight",
+        constraintSummary: "origin: Manila | destination: Frankfurt | departureDate: 2026-08-11 | budget: 900",
+        slotMap: {
+          nonstopOnly: "true",
+          bags: "checked",
+          cabinClass: "business",
+        },
+      },
+      sources: [
+        {
+          title: "OTA option",
+          url: "https://example.com/ota",
+          snippet: "Fare from $560 one stop 14h 10m.",
+        },
+      ],
+    });
+
+    const cheapest = output.candidates.find((candidate) => candidate.category === "cheapest");
+    expect(cheapest?.summary).toContain("nonstop-only preference");
+    expect(cheapest?.summary).toContain("Checked-bag coverage remains weak");
+    expect(cheapest?.summary).toContain("Cabin alignment for business");
   });
 
   test("assessResearchQuality requests clarification when quality stalls on flight pricing", () => {
