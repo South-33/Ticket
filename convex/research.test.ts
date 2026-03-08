@@ -240,6 +240,13 @@ describe("research pipeline", () => {
       expect(latest?.sources).toHaveLength(2);
       expect(latest?.sources[0]?.url).toContain("example.com/deal-1");
       expect(latest?.sources[0]?.provider).toBe("tavily");
+      expect(latest?.runtimeSignals).toEqual({
+        plannerMode: "fallback",
+        searchMode: "tavily",
+        rankingMode: "fallback",
+        fallbackActive: true,
+      });
+      expect(latest?.dialogueEvents.length).toBeGreaterThan(0);
       expect(latest?.candidates).toHaveLength(3);
       expect(latest?.rankedResults).toHaveLength(3);
       expect(latest?.candidates[0]?.estimatedTotalUsd).toBeGreaterThan(0);
@@ -813,6 +820,8 @@ describe("research pipeline", () => {
       expect(
         latest?.findings.some((finding: { title: string }) => finding.title === "Verification sweep completed"),
       ).toBe(true);
+      expect(latest?.runtimeSignals.searchMode).toBe("fallback");
+      expect(latest?.runtimeSignals.fallbackActive).toBe(true);
     } finally {
       if (priorApiKey === undefined) {
         delete process.env.TAVILY_API_KEY;

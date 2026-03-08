@@ -51,6 +51,7 @@ import {
   summarizeExtractedContent,
 } from "./researchEvidence";
 import { buildRankedResultsFromCandidates } from "./researchRanking";
+import { deriveResearchRuntimeSignals } from "./researchRuntime";
 import { buildDeterministicSynthesisOutput } from "./researchSynthesis";
 import type { CandidateDraft, SourceEvidence } from "./researchTypes";
 import { verifyShortlist } from "./researchVerification";
@@ -1503,6 +1504,17 @@ export const getLatestJobForThread = query({
       startedAt: v.optional(v.number()),
       completedAt: v.optional(v.number()),
       updatedAt: v.number(),
+      runtimeSignals: v.object({
+        plannerMode: v.union(v.literal("pending"), v.literal("llm"), v.literal("fallback")),
+        searchMode: v.union(
+          v.literal("pending"),
+          v.literal("tavily"),
+          v.literal("fallback"),
+          v.literal("hybrid"),
+        ),
+        rankingMode: v.union(v.literal("pending"), v.literal("llm"), v.literal("fallback")),
+        fallbackActive: v.boolean(),
+      }),
       tasks: v.array(
         v.object({
           key: v.string(),
@@ -1602,7 +1614,7 @@ export const getLatestJobForThread = query({
         .query("findings")
         .withIndex("by_job_createdAt", (q) => q.eq("jobId", selectedJob._id))
         .order("desc")
-        .take(4),
+        .take(12),
       ctx.db
         .query("sources")
         .withIndex("by_job_rank", (q) => q.eq("jobId", selectedJob._id))
@@ -1625,6 +1637,11 @@ export const getLatestJobForThread = query({
         .take(10),
     ]);
 
+    const runtimeSignals = deriveResearchRuntimeSignals({
+      findings,
+      sources,
+    });
+
     return {
       researchJobId: selectedJob._id,
       status: selectedJob.status,
@@ -1640,6 +1657,7 @@ export const getLatestJobForThread = query({
       startedAt: selectedJob.startedAt,
       completedAt: selectedJob.completedAt,
       updatedAt: selectedJob.updatedAt,
+      runtimeSignals,
       tasks: tasks.map((task) => ({
         key: task.key,
         label: task.label,
@@ -1650,6 +1668,7 @@ export const getLatestJobForThread = query({
         updatedAt: task.updatedAt,
       })),
       findings: findings
+        .slice(0, 4)
         .slice()
         .reverse()
         .map((finding) => ({

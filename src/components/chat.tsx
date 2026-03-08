@@ -952,6 +952,14 @@ type ResearchStageEventView = {
   createdAt: number;
 };
 
+type ResearchDialogueEventView = {
+  actor: string;
+  kind: string;
+  message: string;
+  detail?: string;
+  createdAt: number;
+};
+
 type ResearchJobView = {
   researchJobId: string;
   status: string;
@@ -962,12 +970,35 @@ type ResearchJobView = {
   error?: string;
   followUpQuestion?: string;
   missingFields?: string[];
+  selectedSkillSlugs?: string[];
+  startedAt?: number;
+  completedAt?: number;
+  updatedAt: number;
+  runtimeSignals: {
+    plannerMode: "pending" | "llm" | "fallback";
+    searchMode: "pending" | "tavily" | "fallback" | "hybrid";
+    rankingMode: "pending" | "llm" | "fallback";
+    fallbackActive: boolean;
+  };
   tasks: ResearchTaskView[];
   findings: ResearchFindingView[];
   sources: ResearchSourceView[];
   candidates: ResearchCandidateView[];
   rankedResults: RankedResultView[];
+  dialogueEvents: ResearchDialogueEventView[];
 };
+
+function formatRuntimeMode(value: string) {
+  return value.replaceAll("_", " ");
+}
+
+function formatActorLabel(value: string) {
+  return value.trim().toUpperCase();
+}
+
+function formatSkillLabel(value: string) {
+  return value.replaceAll("_", " ").trim();
+}
 
 function ResearchStatusPanel({
   latestResearchJob,
@@ -995,6 +1026,58 @@ function ResearchStatusPanel({
       <div className="research-status-meta">
         <span>{toResearchStatusLabel(latestResearchJob.status)}</span>
         <span>{latestResearchJob.progress}%</span>
+      </div>
+      <div className="research-status-operator-meta">
+        <span>Updated: {formatUtcTimestamp(latestResearchJob.updatedAt)}</span>
+        {latestResearchJob.startedAt ? <span>Started: {formatUtcTimestamp(latestResearchJob.startedAt)}</span> : null}
+        {latestResearchJob.completedAt ? (
+          <span>Completed: {formatUtcTimestamp(latestResearchJob.completedAt)}</span>
+        ) : null}
+      </div>
+      <div className="research-runtime-signals">
+        <div className="research-runtime-signals-head">Runtime Signals</div>
+        <div className="research-runtime-signal-grid">
+          <span
+            className={clsx(
+              "research-runtime-signal",
+              latestResearchJob.runtimeSignals.plannerMode === "fallback" && "is-warning",
+            )}
+          >
+            Planner: {formatRuntimeMode(latestResearchJob.runtimeSignals.plannerMode)}
+          </span>
+          <span
+            className={clsx(
+              "research-runtime-signal",
+              (latestResearchJob.runtimeSignals.searchMode === "fallback" ||
+                latestResearchJob.runtimeSignals.searchMode === "hybrid") &&
+                "is-warning",
+            )}
+          >
+            Search: {formatRuntimeMode(latestResearchJob.runtimeSignals.searchMode)}
+          </span>
+          <span
+            className={clsx(
+              "research-runtime-signal",
+              latestResearchJob.runtimeSignals.rankingMode === "fallback" && "is-warning",
+            )}
+          >
+            Ranking: {formatRuntimeMode(latestResearchJob.runtimeSignals.rankingMode)}
+          </span>
+        </div>
+        {latestResearchJob.runtimeSignals.fallbackActive && (
+          <p className="research-runtime-callout">
+            This run used at least one fallback path. Compare output quality against citations before judging speed.
+          </p>
+        )}
+        {latestResearchJob.selectedSkillSlugs && latestResearchJob.selectedSkillSlugs.length > 0 && (
+          <div className="research-runtime-skills">
+            {latestResearchJob.selectedSkillSlugs.map((skill) => (
+              <span key={skill} className="research-runtime-skill">
+                {formatSkillLabel(skill)}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
       {(latestResearchJob.lastErrorCode || latestResearchJob.nextRunAt) && (
         <p className="research-status-runtime">
@@ -1047,6 +1130,26 @@ function ResearchStatusPanel({
               <strong>{finding.title}:</strong> {finding.summary}
             </p>
           ))}
+        </div>
+      )}
+      {latestResearchJob.dialogueEvents.length > 0 && (
+        <div className="research-status-dialogue">
+          <div className="research-status-events-head">Operator Notes</div>
+          <ul className="research-status-events-list">
+            {latestResearchJob.dialogueEvents.slice(-4).map((event) => (
+              <li
+                key={`${event.createdAt}-${event.actor}-${event.kind}`}
+                className="research-status-events-item research-status-dialogue-item"
+              >
+                <span>{formatUtcTimestamp(event.createdAt)}</span>
+                <span>
+                  {formatActorLabel(event.actor)} / {formatRuntimeMode(event.kind)}
+                </span>
+                <span>{event.message}</span>
+                {event.detail ? <span>{event.detail}</span> : null}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {latestResearchJob.sources.length > 0 && (

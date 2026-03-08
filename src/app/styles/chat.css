@@ -824,6 +824,17 @@
   margin-top: 0.45rem;
 }
 
+.research-status-operator-meta {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.8rem;
+  font-size: 0.64rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
 .research-status-progress-track {
   width: 100%;
   height: 6px;
@@ -849,6 +860,55 @@
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--text-secondary);
+}
+
+.research-runtime-signals {
+  margin-top: 0.7rem;
+  border-top: 1px solid var(--border-color);
+  padding-top: 0.65rem;
+}
+
+.research-runtime-signals-head {
+  font-size: 0.63rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-bottom: 0.4rem;
+}
+
+.research-runtime-signal-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.research-runtime-signal,
+.research-runtime-skill {
+  border: 1px solid var(--border-color);
+  background: color-mix(in oklab, var(--bg-color) 92%, #ffffff 8%);
+  color: var(--text-primary);
+  padding: 0.28rem 0.45rem;
+  font-size: 0.64rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.research-runtime-signal.is-warning {
+  border-color: rgba(154, 59, 47, 0.35);
+  background: color-mix(in oklab, #9a3b2f 12%, var(--bg-color) 88%);
+}
+
+.research-runtime-callout {
+  margin-top: 0.45rem;
+  font-size: 0.72rem;
+  color: #9a3b2f;
+}
+
+.research-runtime-skills {
+  margin-top: 0.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
 }
 
 .research-status-events {
@@ -888,6 +948,23 @@
   color: #9a3b2f;
   font-size: 0.62rem;
   letter-spacing: 0.04em;
+}
+
+.research-status-dialogue {
+  margin-top: 0.7rem;
+  border-top: 1px solid var(--border-color);
+  padding-top: 0.65rem;
+}
+
+.research-status-dialogue-item span:nth-child(3) {
+  color: var(--text-primary);
+  font-size: 0.7rem;
+  letter-spacing: normal;
+}
+
+.research-status-dialogue-item span:nth-child(4) {
+  color: var(--text-secondary);
+  font-size: 0.64rem;
 }
 
 .research-status-recheck {
